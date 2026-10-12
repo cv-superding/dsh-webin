@@ -677,12 +677,12 @@ export function pickSendDelay(min = SEND_DELAY_MIN_MS, max = SEND_DELAY_MAX_MS):
  *
  * ## 为什么需要它
  *
- * 用户在 DSH 里按停止时，host 会把任务标记为 `cancelled` 并让这次调用报错退出。
+ * 用户在 DSH 里按停止时，host 会把任务标记为 「cancelled」 并让这次调用报错退出。
  * 但**页面那头不知道** —— 它会继续生成到自然结束。两个后果：
  *   1. 白烧网页版配额（用户已经不要这个结果了）；
  *   2. 页面还在输出，下一个任务打进去会**插队**，回复串台。
  *
- * 所以 client 每轮轮询时带 `?running=<jobId>`，host 说「这个不算数了」
+ * 所以 client 每轮轮询时带 「?running=<jobId>」，host 说「这个不算数了」
  * 就去点页面的停止按钮。
  *
  * ## 定位规则来自**实测校准**（真浏览器 dump，见 scripts/probe-stop.mjs）
@@ -690,19 +690,19 @@ export function pickSendDelay(min = SEND_DELAY_MIN_MS, max = SEND_DELAY_MAX_MS):
  * DeepSeek 的停止键是纯图标（无 aria-label、无文字），只能靠 class 特征区分。
  * 实测出来的关键事实：
  *
- * ```
+ * 「」「
  * 生成中，输入框区域同时存在：
  *   发送键：ds-button--primary  ds-button--filled  ds-button--circle
  *   停止键：ds-button--outlinedNeutral  ds-button--outlined  ds-button--circle  ← 生成中才出现
- * ```
+ * 「」「
  *
  * 也就是说：
- *   - `--circle` 是**两者共有**的，不能作为区分特征
- *   - **`--filled` / `--primary` 是发送键独有** ⇒ 命中就排除
- *   - **`--outlined` 是停止键独有** ⇒ 命中才计分
+ *   - 「--circle」 是**两者共有**的，不能作为区分特征
+ *   - **「--filled」 / 「--primary」 是发送键独有** ⇒ 命中就排除
+ *   - **「--outlined」 是停止键独有** ⇒ 命中才计分
  *   - 生成中发送键**不会消失**（早期假设它消失，是错的）
  *
- * 分数阈值 60：只有真正带 `--outlined` 的才够，避免 `--circle` 单独凑分。
+ * 分数阈值 60：只有真正带 「--outlined」 的才够，避免 「--circle」 单独凑分。
  * 分数并列时**不敢猜** —— 宁可不停止（只是浪费一次配额），
  * 也绝不能误点「深度思考」开关（那会改变后续所有请求的行为）。
  *

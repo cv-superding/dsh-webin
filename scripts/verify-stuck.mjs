@@ -104,20 +104,23 @@ console.log('[1] ⭐ 异常必须交回结果（不能只打日志）')
 {
   /**
    * 找 `catch (error)` 之后那段 —— 它必须：
-   *   1. 清掉 pendingJobRef
+   *   1. 清掉任务状态（现在走统一的 `clearPending()`）
    *   2. PUT 一个错误结果给 host
+   *
+   * ⚠️ 清理已**收口**成 `clearPending()`（审计发现散落的 10 处里
+   * 只有 1 处写全了 —— 漏清基线会把上一条回复当成新回复交回去）。
+   * 所以这里断言「调了 clearPending」而不是逐个字段检查。
    */
   const i = clientSrc.indexOf("console.warn('[dsh-webin] 任务处理失败', error)")
   check('找到异常处理点', i > 0, true)
 
   const after = clientSrc.slice(i, i + 1600)
-  check('⭐ 清掉 pendingJobRef', /pendingJobRef\.current = undefined/.test(after), true)
-  check('⭐ 清掉 pendingSinceRef', /pendingSinceRef\.current = 0/.test(after), true)
+  check('⭐ 调 clearPending 清任务状态', /clearPending\(\)/.test(after), true)
   check('⭐ 把错误交回 host', /api\/job\/\$\{stuck\}\/result/.test(after), true)
   check('⭐ 带 error 字段', /error: `客户端处理异常/.test(after), true)
-  /** 必须先取值再清 —— 顺序反了就交不回去了。 */
+  /** 必须先取值再清 —— 顺序反了就交不回去了（stuck 变量要先拿到 jobId）。 */
   const iTake = after.indexOf('const stuck = pendingJobRef.current')
-  const iClear = after.indexOf('pendingJobRef.current = undefined')
+  const iClear = after.indexOf('clearPending()')
   check('⭐ 先取值再清空（顺序正确）', iTake > 0 && iClear > iTake, true)
 }
 

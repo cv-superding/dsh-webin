@@ -708,6 +708,25 @@ export function LdwHost(): unknown {
   const [replyCount, setReplyCount] = useState(0)
   /** guest 里的登录态（来自 probe）。 */
   const [loggedIn, setLoggedIn] = useState(false)
+
+  /**
+   * 上面三个值的**最新镜像**，供心跳读取。
+   *
+   * ## 为什么需要（真实 bug）
+   *
+   * 心跳 effect 原来把 `loggedIn` / `lastReply` / `replyCount` 放进依赖数组，
+   * 于是**每来一条回复就重建整个 effect** —— 定时器被反复清掉重建，
+   * 心跳间隔变得不稳定（可能翻倍），host 侧可能判定「面板掉线」。
+   *
+   * 用 ref 镜像：发送时读 ref（永远是最新值），effect 只依赖 `ready` / 平台。
+   * 这样定时器起来一次就不再重建。
+   */
+  const loggedInRef = useRef(false)
+  const lastReplyAtRef = useRef(0)
+  const replyCountRef = useRef(0)
+  loggedInRef.current = loggedIn
+  replyCountRef.current = replyCount
+  if (lastReply !== '') lastReplyAtRef.current = Date.now()
   /** 最近一次成功发送的记录（时间 / 方式 / 字符数），显示在工具栏上。 */
   const [lastSend, setLastSend] = useState<{ at: string; how: string; chars: number } | undefined>(undefined)
   /** 诊断输出（页面结构 dump）。 */
@@ -805,18 +824,16 @@ export function LdwHost(): unknown {
               if (disposed) return
               const node = hostRef.current?.querySelector('webview') as GuestElement | null
               if (node === null) return
-              void node
-                .executeJavaScript(buildProbeScript())
-                .then((r2) => {
-                  if (disposed) return
-                  try {
-                    const p2 = JSON.parse(String(r2)) as { loggedIn?: boolean }
-                    setLoggedIn(p2.loggedIn === true)
-                  } catch {
-                    /* ignore */
-                  }
-                })
-                .catch(() => undefined)
+              /** ⚠️ 带超时 —— 5 秒一次，裸调用会在导航时堆积死掉的 Promise。 */
+              void execJs<string>(node, buildProbeScript(), 8_000).then((r2) => {
+                if (disposed || r2 === EXEC_TIMEOUT) return
+                try {
+                  const p2 = JSON.parse(String(r2)) as { loggedIn?: boolean }
+                  setLoggedIn(p2.loggedIn === true)
+                } catch {
+                  /* ignore */
+                }
+              })
             }, 5_000)
           }
         }
@@ -921,7 +938,9 @@ export function LdwHost(): unknown {
               }
               let restored = false
               try {
-                const raw = await element.executeJavaScript(buildRestoreScript(snap))
+                /** ⚠️ 带超时 —— 裸调用在导航时会静默死掉，卡住整个启动流程。 */
+                const raw = await execJs<string>(element, buildRestoreScript(snap), 15_000)
+                if (raw === EXEC_TIMEOUT) throw new Error('回写脚本超时')
                 const r = JSON.parse(String(raw)) as { ok?: boolean; reason?: string }
                 restored = r.ok === true
                 console.log('[dsh-webin] 登录态回写', provider.id, raw)
@@ -955,8 +974,14 @@ export function LdwHost(): unknown {
           // ⚠️ `setReady(true)` 放在这里 —— 页面到这一步才真的能干活。
           // 而且**等确认输入框存在**再置位：SPA 渲染有延迟，
           // 提前置位会让发送循环领到任务却找不到输入框（`no-input`）。
-          void element
-            .executeJavaScript(`(function () {
+          //
+          // ⚠️ **必须用 execJs（带超时）**：裸 `executeJavaScript` 在页面
+          // 导航时会静默死掉（不 resolve / 不 reject），于是这个 `.then`
+          // 永不执行 ⇒ `setReady(true)` 永不置位 ⇒ **插件永久失效**。
+          // 早期版本正是这个 bug（用户看到「一直不回复」）。
+          void execJs<boolean>(
+            element,
+            `(function () {
               var sels = ${JSON.stringify(provider.input.selectors)};
               for (var i = 0; i < sels.length; i++) {
                 var list;
@@ -967,45 +992,42 @@ export function LdwHost(): unknown {
                 }
               }
               return false;
-            })()`)
-            .then((hasInput) => {
-              if (disposed) return
-              console.log('[dsh-webin] 输入框就绪检查:', hasInput)
-              setReady(true)
-              if (hasInput === true) setStatus('真实浏览器已就绪')
-              else setStatus('页面已加载，但未找到输入框（可能未登录或结构已变）')
-            })
-            .catch(() => {
-              if (disposed) return
-              // 检查失败也置位 —— 让发送脚本自己去报具体错误，别卡死
-              setReady(true)
-            })
+            })()`,
+            15_000,
+          ).then((hasInput) => {
+            if (disposed) return
+            console.log('[dsh-webin] 输入框就绪检查:', hasInput)
+            /**
+             * 无论结果如何都要置位 —— 超时/异常也置位。
+             * 让发送脚本自己去报具体错误，好过整个插件静默卡死。
+             */
+            setReady(true)
+            if (hasInput === true) setStatus('真实浏览器已就绪')
+            else setStatus('页面已加载，但未找到输入框（可能未登录或结构已变）')
+          })
 
-          void element.executeJavaScript(fingerprintFix()).catch(() => undefined)
-          void element
-            .executeJavaScript(buildDeepSeekHook(provider.completionPath, provider.stopPath))
-            .then((r) => {
-              if (disposed) return
-              console.log('[dsh-webin] hook:', provider.id, r)
-            })
-            .catch((e) => {
-              if (disposed) return
-              console.error('[dsh-webin] hook 注入失败', e)
-            })
-          void element
-            .executeJavaScript(buildProbeScript())
-            .then((raw) => {
-              if (disposed) return
-              try {
-                const info = JSON.parse(String(raw)) as { loggedIn?: boolean } & Record<string, unknown>
-                ;(globalThis as unknown as { __dshWebinProbe?: unknown }).__dshWebinProbe = info
-                console.log('[dsh-webin] guest probe', info)
-                setLoggedIn(info.loggedIn === true)
-              } catch {
-                /* ignore */
-              }
-            })
-            .catch(() => undefined)
+          void execJs(element, fingerprintFix(), 10_000).catch(() => undefined)
+          void execJs<string>(
+            element,
+            buildDeepSeekHook(provider.completionPath, provider.stopPath),
+            15_000,
+          ).then((r) => {
+            if (disposed) return
+            if (r === EXEC_TIMEOUT) console.warn('[dsh-webin] hook 注入超时')
+            else console.log('[dsh-webin] hook:', provider.id, r)
+          })
+          void execJs<string>(element, buildProbeScript(), 10_000).then((raw) => {
+            if (disposed) return
+            if (raw === EXEC_TIMEOUT) return
+            try {
+              const info = JSON.parse(String(raw)) as { loggedIn?: boolean } & Record<string, unknown>
+              ;(globalThis as unknown as { __dshWebinProbe?: unknown }).__dshWebinProbe = info
+              console.log('[dsh-webin] guest probe', info)
+              setLoggedIn(info.loggedIn === true)
+            } catch {
+              /* ignore */
+            }
+          })
 
           // 登录态持续探测已抽到 markLive() 里（那里起的 5s 轮询就是干这个的），
           // 避免重复起两个定时器。
@@ -1268,6 +1290,14 @@ export function LdwHost(): unknown {
               // 有在跑的任务 → 交结果（带上当前页面 URL，host 靠它绑定会话 ↔ 网页对话）
               const jobId = pendingJobRef.current
               if (jobId !== undefined) {
+                /**
+                 * ⚠️ 这里**只清 pending，不动基线**。
+                 *
+                 * 这是 drain 轮询 effect（与发送循环是两个独立 effect），
+                 * 基线（`baselineRef` / `baselineTextRef`）由**发送循环**在
+                 * 领活时设置。在这里清掉会让发送循环的「本轮回复来了吗」
+                 * 判据失效（它自己会在结束任务时通过 `clearPending()` 收口）。
+                 */
                 pendingJobRef.current = undefined
                 pendingSinceRef.current = 0
                 scrapedRef.current = undefined
@@ -1291,8 +1321,10 @@ export function LdwHost(): unknown {
               console.warn('[dsh-webin] page reported error', ev.detail)
               const jobId = pendingJobRef.current
               if (jobId !== undefined) {
+                /** 同上：drain effect 只清 pending，不碰基线。 */
                 pendingJobRef.current = undefined
                 pendingSinceRef.current = 0
+                scrapedRef.current = undefined
                 void fetch(`/dsh-webin/api/job/${jobId}/result`, {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
@@ -1325,13 +1357,25 @@ export function LdwHost(): unknown {
     const beat = () => {
       if (stopped) return
       const el = hostRef.current?.querySelector('webview') as GuestElement | null
+      /**
+       * ⚠️ 每次心跳都**现读**这些值，而不是把它们放进依赖数组。
+       *
+       * ## 为什么（真实 bug）
+       *
+       * 早期把 `loggedIn` / `lastReply` / `replyCount` 放进依赖数组，
+       * 于是**每来一条回复就重建整个 effect** —— 定时器被反复清掉重建。
+       * 后果：心跳间隔变得不稳定（可能长达两倍），host 侧可能判定
+       * 「面板掉线」，而且回复越多重建越频繁。
+       *
+       * 用 ref 保存最新值：effect 只在 `ready` / 平台变化时重建一次。
+       */
       const payload = {
         clientId,
         platform: provider.id,
-        loggedIn,
+        loggedIn: loggedInRef.current,
         hasGuest: el !== null,
-        lastReplyAt: lastReply === '' ? 0 : Date.now(),
-        replyCount,
+        lastReplyAt: lastReplyAtRef.current,
+        replyCount: replyCountRef.current,
       }
       void fetch('/dsh-webin/api/client/heartbeat', {
         method: 'POST',
@@ -1345,7 +1389,7 @@ export function LdwHost(): unknown {
       stopped = true
       window.clearInterval(timer)
     }
-  }, [ready, provider.id, loggedIn, lastReply, replyCount])
+  }, [ready, provider.id])
 
   // P3：领任务 → 打进网页输入框 → 发送 → 等 hook 抓到回复后交回 host。
   // 这就是 cuckoo 的闭环：请求由**页面自己**发出，我们只操作界面。
@@ -1360,6 +1404,29 @@ export function LdwHost(): unknown {
 
     const tick = async () => {
       if (stopped || busy) return
+      /**
+       * ## ⭐ 任务状态清理**只有一个出口**
+       *
+       * ## 为什么必须收口（审计发现的真实 bug）
+       *
+       * 领活后需要清三样：`pendingJobRef` / `scrapedRef` / `baseline*Ref`。
+       * 原来这些清理**散落在 10 个地方**各写一遍，审计发现只有 1 处写全了 ——
+       * 其余要么只清 `scrapedRef`，要么两个基线都不清。
+       *
+       * 后果很具体：**不清基线** ⇒ 下个任务领到时 `baselineRef` 还是
+       * 上一轮的条数 ⇒ `countGrew` 一上来就成立 ⇒ 可能把**上一条回复**
+       * 当成新回复交回去（张冠李戴，DSH 里出现答非所问的内容）。
+       *
+       * 所以收口成一个函数：**任何**结束任务的地方都调它，
+       * 不再依赖「写代码的人记得清哪几个」。
+       */
+      const clearPending = () => {
+        pendingJobRef.current = undefined
+        pendingSinceRef.current = 0
+        scrapedRef.current = undefined
+        baselineRef.current = 0
+        baselineTextRef.current = ''
+      }
       /**
        * ## ⚠️ 正在等回复时**绝不能再领新任务**
        *
@@ -1479,9 +1546,7 @@ export function LdwHost(): unknown {
                   判据: countGrew ? '条数增长' : '内容变化',
                   selector: scraped.selector,
                 })
-                pendingJobRef.current = undefined
-                pendingSinceRef.current = 0
-                scrapedRef.current = undefined
+                clearPending()
                 const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
                 const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
                 await fetch(`/dsh-webin/api/job/${jobId}/result`, {
@@ -1506,9 +1571,7 @@ export function LdwHost(): unknown {
         if (hasPending && waitedMs > giveUpMs) {
           const stuck = pendingJobRef.current!
           console.warn('[dsh-webin] 待办超时，放弃任务', stuck, { waitedMs, giveUpMs })
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
-          scrapedRef.current = undefined
+          clearPending()
           await fetch(`/dsh-webin/api/job/${stuck}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -1544,10 +1607,20 @@ export function LdwHost(): unknown {
         // 被取消：去按页面的停止按钮，并清掉本地待办
         if (typeof data.cancel === 'string' && data.cancel !== '') {
           console.log('[dsh-webin] 任务已被取消，停止页面生成', data.cancel)
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
-          const stopped = await el.executeJavaScript(buildStopScript(sendHintsFor(provider)))
-          console.log('[dsh-webin] 停止结果', stopped)
+          clearPending()
+          /**
+           * ⚠️ 必须**一并清掉上一轮的比对状态**。
+           *
+           * 否则下一个任务会用「上一轮的内容」做稳定性比对 ——
+           * `scrapedRef.current !== last` 立刻成立，可能把上一条回复
+           * 当成新回复交回去（张冠李戴）。
+           */
+          scrapedRef.current = undefined
+          baselineRef.current = 0
+          baselineTextRef.current = ''
+          /** ⚠️ 带超时 —— 停止脚本卡住会让这个 tick 永远不返回。 */
+          const stopResult = await execJs(el, buildStopScript(sendHintsFor(provider)), 10_000)
+          console.log('[dsh-webin] 停止结果', stopResult === EXEC_TIMEOUT ? '超时' : stopResult)
           return
         }
 
@@ -1641,9 +1714,10 @@ export function LdwHost(): unknown {
           if (inChat) {
             console.log('[dsh-webin] 首轮：开新对话（不占用当前页）', { from: current.slice(-48) })
             await element_loadURL(el, provider.homeUrl)
-            await el
-              .executeJavaScript(
-                `(function () {
+            /** ⚠️ 带超时 —— 否则导航途中脚本死掉会让这个 tick 永远不返回。 */
+            const freshReady = await execJs<unknown>(
+              el,
+              `(function () {
                   var sels = ${JSON.stringify(provider.input.selectors)};
                   var deadline = Date.now() + 25000;
                   return new Promise(function (resolve) {
@@ -1663,7 +1737,7 @@ export function LdwHost(): unknown {
                 })()`,
               30_000,
             )
-            if (readyRaw !== true) console.warn('[dsh-webin] 新对话页未见输入框，仍尝试发送')
+            if (freshReady !== true) console.warn('[dsh-webin] 新对话页未见输入框，仍尝试发送')
           }
         }
 
@@ -1705,8 +1779,7 @@ export function LdwHost(): unknown {
         noteTurnStart(id)
         if (!canSendThisTurn()) {
           console.warn('[dsh-webin] 本轮请求数已达上限，停止发送', { limit: currentConfig().maxRequestsPerTurn })
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
+          clearPending()
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -1797,8 +1870,7 @@ export function LdwHost(): unknown {
         )
 
         if (fillRaw === EXEC_TIMEOUT) {
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
+          clearPending()
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -1817,8 +1889,7 @@ export function LdwHost(): unknown {
         console.log('[dsh-webin] 填充结果', fill)
 
         if (!fill.ok) {
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
+          clearPending()
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -1846,8 +1917,7 @@ export function LdwHost(): unknown {
         console.log('[dsh-webin] 触发结果', trig)
 
         if (trig.ok !== true) {
-          pendingJobRef.current = undefined
-          pendingSinceRef.current = 0
+          clearPending()
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
@@ -1895,8 +1965,7 @@ export function LdwHost(): unknown {
          */
         console.warn('[dsh-webin] 任务处理失败', error)
         const stuck = pendingJobRef.current
-        pendingJobRef.current = undefined
-        pendingSinceRef.current = 0
+        clearPending()
         if (stuck !== undefined) {
           void fetch(`/dsh-webin/api/job/${stuck}/result`, {
             method: 'PUT',
@@ -1931,10 +2000,11 @@ export function LdwHost(): unknown {
     const save = () => {
       const el = hostRef.current?.querySelector('webview') as GuestElement | null
       if (el === null) return
-      void el
-        .executeJavaScript(buildSnapshotScript())
+      /** ⚠️ 带超时 —— 这个每 30s 跑一次，裸调用会在导航时堆积死掉的 Promise。 */
+      void execJs<string>(el, buildSnapshotScript(), 10_000)
         .then(async (raw) => {
           if (stopped) return
+          if (raw === EXEC_TIMEOUT) return
           const text = String(raw)
           if (text === '{}' || text === '') return
           let parsed: { localStorage?: Record<string, string>; cookie?: string; url?: string }
