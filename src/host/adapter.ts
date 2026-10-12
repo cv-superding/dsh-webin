@@ -449,6 +449,14 @@ export interface AdapterDeps {
    * 不能等重启。host 侧传进来的是 `() => readConfig().config`。
    */
   getConfig?: () => WebinConfig
+  /**
+   * 该平台**已登录**吗？（用户要求「已登录才能用 LDW 模型」）
+   *
+   * host 侧传 `(id) => isPlatformLoggedIn(id)`。
+   * 未注入时**一律视为已登录** —— 测试与降级路径不该被门禁挡住；
+   * 真门禁由 host 注入（它才知道快照在哪）。
+   */
+  isLoggedIn?: (platform: string) => boolean
 }
 /** 构造 adapter（鸭子类型对象；不继承 LlmAdapter 基类，所以方法要齐）。 */
 export function createAdapter(deps: AdapterDeps) {
@@ -463,6 +471,14 @@ export function createAdapter(deps: AdapterDeps) {
    * 取当前配置。没有注入时用默认值 —— 测试与降级路径都靠这个。
    */
   const config = (): WebinConfig => deps.getConfig?.() ?? DEFAULT_CONFIG
+
+  /**
+   * 该平台是否已登录。
+   *
+   * **未注入 `isLoggedIn` 时一律返回 true** —— 门禁是 host 的职责
+   * （只有它知道快照文件在哪），adapter 不该在没被告知时自作主张挡人。
+   */
+  const loggedIn = (platform: string): boolean => deps.isLoggedIn?.(platform) ?? true
 
   /**
    * 模型 id 的全局唯一化。
@@ -674,6 +690,33 @@ export function createAdapter(deps: AdapterDeps) {
     const { provider, spec } = resolve(options.provider, options.model)
 
     /**
+     * ## 未登录时**直接报错**（而不是把消息发进网页版）
+     *
+     * `listModels` 已经不列未登录平台的模型，但**旧会话可能还存着**
+     * 那个模型的 id（比如用户登录过、后来清了登录态）。
+     * 那时如果照发，页面会跳到登录页，输入框根本不存在 ——
+     * 用户看到的是「找不到可见的输入框」这种莫名其妙的错误。
+     *
+     * 所以这里给一个能直接照做的提示。
+     */
+    if (!loggedIn(provider.id)) {
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            code: 'WEBIN_NOT_LOGGED_IN',
+            message:
+              `平台「${provider.name}」还没有登录，无法使用它的模型。\n` +
+              '请点输入框左边的「LDW」按钮（或切到 LDW 标签），' +
+              `在打开的浏览器里登录 ${provider.homeUrl} 后重试。`,
+          },
+        },
+      }
+      return
+    }
+
+    /**
      * **只发增量** —— 见 `diffPrompt()` 的说明。
      *
      * 会话键：优先用 DSH 给的 `sessionId`；没有时退到「平台 + system 指纹」，
@@ -862,9 +905,25 @@ export function createAdapter(deps: AdapterDeps) {
       return undefined
     },
 
+    /**
+     * ## 模型清单 —— **未登录的平台不列出**
+     *
+     * 用户要求：「如果是已登录才能使用 LDW 那俩模型」。
+     *
+     * 为什么在 `listModels` 做而不是在设置页做：DSH 的模型选择器
+     * 就是拿这个清单渲染的。不列出来 ⇒ 用户根本选不到 ⇒ 不会出现
+     * 「选了模型但发不出去」这种更糟的体验。
+     *
+     * ⚠️ 判断用**持久化快照**而不是「浏览器此刻在线」：
+     * 否则重启 DSH 后、用户还没切到 LDW 标签时模型会消失，看起来像插件坏了。
+     */
     listModels(provider: string) {
       const hit = registry.all().find((p) => routeFor(p.id) === provider)
       if (hit === undefined) return Promise.resolve([])
+      if (!loggedIn(hit.id)) {
+        deps.logger?.debug?.(`平台 ${hit.id} 未登录，不列出模型`)
+        return Promise.resolve([])
+      }
       return Promise.resolve(hit.models.map((spec) => modelInfoFor(provider, hit, spec)))
     },
 

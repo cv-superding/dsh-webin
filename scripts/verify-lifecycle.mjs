@@ -29,7 +29,7 @@
  *   - 队列状态：取消后 `hasClaimed()` 不该再报 true
  *   - 静态：client 侧确实有「待办时不领新活」的闸门和超时兜底
  */
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isolate } from './lib/isolate.mjs'
@@ -154,6 +154,26 @@ console.log('=== 任务生命周期测试 ===\n')
  * 详见 `scripts/lib/isolate.mjs`。
  */
 const cleanupState = isolate('webin-lifecycle')
+
+/**
+ * ⚠️ **必须写一份登录快照**。
+ *
+ * 插件现在有登录门禁（用户要求「已登录才能用 LDW 模型」）：
+ * 未登录时 `listModels` 返回空、`stream` 直接以 `WEBIN_NOT_LOGGED_IN` 报错
+ * —— 那是对的，但会让**本测试拿不到任务**（「领到任务」断言失败）。
+ *
+ * 所以这里模拟「已经登录过」，让测试专注于它要验的生命周期语义。
+ */
+mkdirSync(join(process.env.DSH_HOME, 'webin', 'auth'), { recursive: true })
+/** 两个平台都要写 —— 本测试两个平台的派发都验。 */
+for (const platform of ['deepseek', 'qwen']) {
+  writeFileSync(
+    join(process.env.DSH_HOME, 'webin', 'auth', `${platform}.json`),
+    JSON.stringify({ localStorage: { userToken: '{"value":"test-token"}' }, url: 'https://example.com/' }),
+    'utf8',
+  )
+}
+
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply } = mod
 

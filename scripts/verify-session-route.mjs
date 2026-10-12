@@ -23,7 +23,7 @@
  *   C. 切回第一个会话再发 → expectUrl 是第一个会话的 URL（不是第二个的）
  *   D. client 静态检查：确实有「先导航再发」的逻辑
  */
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isolate } from './lib/isolate.mjs'
@@ -136,6 +136,21 @@ console.log('=== 会话路由测试 ===\n')
  * 详见 `scripts/lib/isolate.mjs`。
  */
 const cleanupState = isolate('webin-session-route')
+
+/**
+ * ⚠️ **必须写登录快照** —— 插件有登录门禁（用户要求「已登录才能用 LDW 模型」）：
+ * 未登录时 `stream` 直接以 `WEBIN_NOT_LOGGED_IN` 报错，本测试就拿不到任务。
+ * 这里模拟「已经登录过」，让测试专注于会话路由语义。
+ */
+mkdirSync(join(process.env.DSH_HOME, 'webin', 'auth'), { recursive: true })
+for (const platform of ['deepseek', 'qwen']) {
+  writeFileSync(
+    join(process.env.DSH_HOME, 'webin', 'auth', `${platform}.json`),
+    JSON.stringify({ localStorage: { userToken: '{"value":"test-token"}' }, url: 'https://example.com/' }),
+    'utf8',
+  )
+}
+
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply } = mod
 

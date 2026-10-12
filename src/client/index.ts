@@ -21,6 +21,7 @@ import {
 import { buildDiagnoseScript, buildSendScript, buildStopScript, buildThinkingScript, pickSendDelay } from './chat'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
 import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
+import { snapshotLooksLoggedIn } from '../shared/auth-snapshot'
 
 /**
  * 平台注册表（模块级单例）。
@@ -429,6 +430,30 @@ const CSS = `
 @keyframes ldw-shimmer{0%{opacity:.45}50%{opacity:.85}100%{opacity:.45}}
 .ldw-skeleton{animation:ldw-shimmer 1.5s ease-in-out infinite;border-radius:8px;
   background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 70%,transparent);height:13px}
+
+/* ══════════════════════════════════════════════════════════════════════
+   输入框左侧的 LDW 入口（conversation.input.left）
+   ──────────────────────────────────────────────────────────────────────
+   与工具栏里其它紧凑控件同高同圆角，不抢视线；未登录时才用警示色，
+   登录后就是一粒安静的绿点 —— 状态用颜色说话，不靠文字喊。
+   ══════════════════════════════════════════════════════════════════════ */
+.ldw-entry{display:inline-flex;align-items:center;gap:6px;flex:none;
+  height:26px;padding:0 9px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--dsw-alias-border-l1);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 62%,transparent);
+  font:inherit;font-size:11.5px;color:var(--dsw-alias-label-secondary);
+  white-space:nowrap;
+  transition:border-color .18s ease,background .18s ease,color .18s ease,transform .16s ease}
+.ldw-entry:hover{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 52%,var(--dsw-alias-border-l2));
+  background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 8%,var(--dsw-alias-bg-layer-2));
+  color:var(--dsw-alias-label-primary);transform:translateY(-1px)}
+.ldw-entry:active{transform:translateY(0)}
+.ldw-entry:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 78%,transparent);
+  outline-offset:2px}
+/* 未登录时整体偏警示色 —— 一眼看出「这里需要你做点什么」 */
+.ldw-entry:has(.ldw-dot.warn){border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 42%,transparent);
+  color:var(--dsw-alias-state-warning-primary,#f0a441)}
+.ldw-entry-note{margin-left:4px;font-size:10.5px;color:var(--dsw-alias-label-quaternary)}
 `
 
 // ---------------------------------------------------------------------------
@@ -501,53 +526,6 @@ function subscribeRect(fn: (r: HostRect | null) => void): () => void {
  *
  * 同时排除停在登录路由上的快照（哪怕 token 还在，页面在登录页说明没生效）。
  */
-function snapshotLooksLoggedIn(snapshot: {
-  localStorage?: Record<string, string>
-  url?: string
-}): boolean {
-  const ls = snapshot.localStorage ?? {}
-
-  /**
-   * 解包 AppKit 包装：`{"value":<v>,"__version":"0"}` → `<v>`。
-   *
-   * ⚠️ 解析失败时**不能把原文当 token** —— 那样 `"{broken"` 这种畸形值
-   * 会被当成有效 token（非空字符串），于是坏快照又能覆盖好快照。
-   * 只有**看起来像 JSON 却解析失败**的才返回 undefined；
-   * 真正的裸 token（不以 `{` 开头）才按原文返回。
-   */
-  const unwrap = (raw: string | undefined): unknown => {
-    if (typeof raw !== 'string' || raw === '') return undefined
-    const trimmed = raw.trim()
-    if (trimmed === '') return undefined
-    // JSON 的空值字面量：`"null"` / `"undefined"` 都不是 token
-    if (trimmed === 'null' || trimmed === 'undefined') return undefined
-    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-      // 裸字符串 token（旧版页面可能这样存）
-      return trimmed
-    }
-    try {
-      const parsed = JSON.parse(trimmed) as unknown
-      if (parsed !== null && typeof parsed === 'object' && 'value' in (parsed as object)) {
-        return (parsed as { value: unknown }).value
-      }
-      return parsed
-    } catch {
-      // 像 JSON 但解析失败 ⇒ 视为无效，绝不 fallback 成原文
-      return undefined
-    }
-  }
-
-  const token = unwrap(ls.userToken)
-  if (typeof token === 'string' && token.trim() !== '') return true
-
-  const info = unwrap(ls['__appKit_userInfo'])
-  if (info !== null && typeof info === 'object') {
-    const id = (info as { id?: unknown }).id
-    if (typeof id === 'string' && id.trim() !== '') return true
-  }
-
-  return false
-}
 
 interface GuestReservation {
   lease: string
@@ -2285,6 +2263,114 @@ function row(label: string, value: string): unknown {
   )
 }
 
+/**
+ * ## 输入框左侧的 LDW 按钮（`conversation.input.left`）
+ *
+ * 用户要求：「每次新建会话的时候，应该在这里加个 LDW，让登录一下」。
+ *
+ * ## 为什么需要它
+ *
+ * 之前登录的唯一入口是「切到 LDW 标签」—— 而**新建会话时那个标签不在视野里**，
+ * 用户不知道要去哪登录。模型选择器里 LDW 模型又不出现（未登录不列出），
+ * 于是整个插件看起来像坏的。
+ *
+ * 这个按钮解决「第一次怎么开始」：新建会话就能看到，点一下直达浏览器。
+ *
+ * ## 状态与动作
+ *
+ * | 状态 | 显示 | 点击 |
+ * |---|---|---|
+ * | 未登录 | 「LDW 登录」+ 警示点 | 切到 LDW 标签（浏览器在那里，用户去登录） |
+ * | 已登录 | 「LDW 已登录」+ 绿点 | 切到 LDW 标签（看浏览器 / 换账号） |
+ * | 无面板 | 「LDW 未就绪」+ 灰点 | 切到 LDW 标签（把浏览器起来） |
+ *
+ * ## 为什么用「点标签按钮」而不是调 API
+ *
+ * 切视图的 `selectView` 是 **session header** 的注入属性，不在
+ * `conversation.input.left` 的 standardProps 里（实测查过）。
+ * 硬拿不到的东西就**别硬拿** —— 直接点那个真实存在的标签按钮，
+ * 与我们操作网页版的思路一致（不设计协议，操作界面）。
+ *
+ * 找不到标签按钮时**明确说明**，不静默失败。
+ */
+export function LdwLoginButton(): unknown {
+  const [status, setStatus] = useState<{ loggedIn: boolean; online: boolean } | null>(null)
+  const [note, setNote] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      try {
+        const res = await fetch(`${LDW_API}/status`)
+        const data = (await res.json()) as {
+          loggedInPlatforms?: string[]
+          clients?: { online?: number }
+        }
+        if (!alive) return
+        const logged = (data.loggedInPlatforms ?? []).length > 0
+        const online = Number(data.clients?.online ?? 0) > 0
+        setStatus({ loggedIn: logged, online })
+      } catch {
+        if (alive) setStatus({ loggedIn: false, online: false })
+      }
+    }
+    void load()
+    /** 登录发生在另一个标签页，所以定期回读状态（登录后这里要变绿）。 */
+    const timer = window.setInterval(() => void load(), 5_000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  /**
+   * 切到 LDW 标签。
+   *
+   * 找 `[data-conversation-tabs]` 里文本含 `LDW` 的按钮并点它 ——
+   * 那是 DSH 自己渲染的标签，点它就是用户点它。
+   */
+  const goToLdw = () => {
+    try {
+      const tablist = document.querySelector('[data-conversation-tabs]')
+      if (tablist === null) {
+        setNote('找不到对话标签栏 —— 请手动切到「LDW」标签')
+        return
+      }
+      const tabs = tablist.querySelectorAll('button[role="tab"]')
+      for (let i = 0; i < tabs.length; i += 1) {
+        const el = tabs[i] as HTMLElement
+        if (String(el.textContent ?? '').trim().toUpperCase().includes('LDW')) {
+          el.click()
+          setNote('')
+          return
+        }
+      }
+      setNote('标签栏里没有 LDW —— 插件可能没启用')
+    } catch (error) {
+      setNote(`切换失败：${(error as Error)?.message ?? String(error)}`)
+    }
+  }
+
+  if (status === null) return null
+
+  const { loggedIn, online } = status
+  const dot = loggedIn ? 'ok' : online ? 'warn' : ''
+
+  return createElement(
+    'button',
+    {
+      type: 'button',
+      className: 'ldw-entry',
+      onClick: goToLdw,
+      title: note !== '' ? note : loggedIn ? '打开 LDW 浏览器（已登录）' : '打开 LDW 浏览器并登录',
+    },
+    createElement('span', { className: `ldw-dot ${dot}`.trim() }),
+    createElement('span', null, loggedIn ? 'LDW 已登录' : online ? 'LDW 登录' : 'LDW 未就绪'),
+    note !== '' ? createElement('span', { className: 'ldw-entry-note' }, note) : null,
+  )
+}
+
+
 export function LdwPlaceholder(): unknown {
   const ref = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
@@ -2417,5 +2503,32 @@ export function apply(ctx: {
         ),
       ),
     'dsh-webin: settings page',
+  )
+
+  /**
+   * ---- 输入框左侧的 LDW 入口：conversation.input.left ----
+   *
+   * 用户要求：「每次新建会话的时候，应该在这里加个 LDW，让登录一下」。
+   *
+   * 这个位置在**每一条会话**里都在（包括刚新建的空会话），
+   * 所以它是「第一次怎么开始」的正确入口 —— 之前只能靠切 LDW 标签，
+   * 而新建会话时那个标签不在视野里。
+   *
+   * `order: 10` —— 排在左侧控件前段，紧邻工作区 / 模式选择器。
+   */
+  ctx.effect(
+    () =>
+      ctx.slots.inject('conversation.input.left', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.input.left',
+            id: 'ldw-login',
+            order: 10,
+            label: () => 'LDW',
+          },
+          LdwLoginButton,
+        ),
+      ),
+    'dsh-webin: composer entry',
   )
 }

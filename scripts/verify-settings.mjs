@@ -18,7 +18,7 @@
  * - host 的 `GET /providers` 返回设置页需要的全部字段
  * - 设置页确实渲染出平台卡片（用 React 服务端渲染做真实渲染验证）
  */
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isolate } from './lib/isolate.mjs'
@@ -128,6 +128,19 @@ function makeCtx() {
 console.log('=== 设置页测试 ===\n')
 
 const cleanupState = isolate('webin-settings')
+/**
+ * ⚠️ **必须写登录快照** —— 插件有登录门禁（用户要求「已登录才能用 LDW 模型」）：
+ * 未登录时 `stream` 直接以 `WEBIN_NOT_LOGGED_IN` 报错，本测试一个任务都拿不到。
+ * 这里模拟「已经登录过」，让测试专注于它要验的语义。
+ */
+mkdirSync(join(process.env.DSH_HOME, 'webin', 'auth'), { recursive: true })
+for (const platform of ['deepseek', 'qwen']) {
+  writeFileSync(
+    join(process.env.DSH_HOME, 'webin', 'auth', `${platform}.json`),
+    JSON.stringify({ localStorage: { userToken: '{"value":"test-token"}' }, url: 'https://example.com/' }),
+    'utf8',
+  )
+}
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply } = mod
 

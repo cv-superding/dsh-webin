@@ -38,6 +38,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
 import type { CursorStore, SessionCursor } from './adapter'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
+import { snapshotTextLooksLoggedIn } from '../shared/auth-snapshot'
 import {
   checkConfig,
   DEFAULT_CONFIG,
@@ -71,6 +72,48 @@ function stateRoot(): string {
 function snapshotPath(slot: string): string {
   const safe = /^[A-Za-z0-9_-]{1,64}$/.test(slot) ? slot : DEFAULT_SLOT
   return join(stateRoot(), 'auth', `${safe}.json`)
+}
+
+/**
+ * 某个平台「已登录」吗？
+ *
+ * ## 判据：快照存在**且**快照里确实有登录凭据
+ *
+ * 为什么不看「浏览器在线」：那样重启 DSH 后、用户还没切到 LDW 标签时，
+ * 模型会从选择器里消失 —— 用户会以为插件坏了。
+ *
+ * 快照是**持久化**的（`~/.dsh/webin/auth/<platform>.json`），
+ * 它记录的是「上次确实登录过」。所以用它判断「能否使用 LDW 模型」最稳：
+ *   - 登录过 ⇒ 模型可选，即便此刻浏览器没开（发送时会提示打开标签）
+ *   - 没登录过 ⇒ 模型不列出，用户先去登录
+ *
+ * ⚠️ 注意用 `snapshotTextLooksLoggedIn` 而不是「文件存在」——
+ * 未登录时页面也会写 `userToken={"value":null}`，那种快照不算登录。
+ */
+function isPlatformLoggedIn(platform: string): boolean {
+  try {
+    const path = snapshotPath(platform)
+    if (!existsSync(path)) return false
+    return snapshotTextLooksLoggedIn(readFileSync(path, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 已登录的平台 id 列表（给状态接口与设置页用）。
+ *
+ * 注意判据是**登录快照**而不是「浏览器在线」—— 快照跨重启存活，
+ * 所以重启后未打开标签页时也能正确报告「这个平台登录过」。
+ *
+ * @param platforms - 平台清单（注册表在 `apply()` 内，所以由调用方传入）
+ */
+function loggedInPlatforms(platforms: readonly { id: string }[]): string[] {
+  const out: string[] = []
+  for (const p of platforms) {
+    if (isPlatformLoggedIn(p.id)) out.push(p.id)
+  }
+  return out
 }
 
 /**
@@ -356,6 +399,11 @@ export async function apply(ctx: {
     registry,
     /** 每轮读一次配置 —— 设置页改完立刻生效，不用重启。 */
     getConfig: () => readConfig().config,
+    /**
+     * 登录门禁：未登录的平台不列出模型、也不允许调用。
+     * 用户要求「如果是已登录才能使用 LDW 那俩模型」。
+     */
+    isLoggedIn: (platform) => isPlatformLoggedIn(platform),
     cursorStore: {
       load: (platform) => {
         const path = sessionsPath(platform)
@@ -705,6 +753,14 @@ export async function apply(ctx: {
               replyCount: c.replyCount,
             })),
           },
+          /**
+           * 登录过的平台（判据是**持久化快照**，不是「浏览器此刻在线」）。
+           *
+           * 未登录的平台**不会列出模型** —— 用户要求
+           * 「如果是已登录才能使用 LDW 那俩模型」。输入框旁边的 LDW 按钮
+           * 也读这个字段决定显示「去登录」还是「已登录」。
+           */
+          loggedInPlatforms: loggedInPlatforms(registry.all()),
           routes: [
             `GET    ${API_PREFIX}/status`,
             `GET    ${API_PREFIX}/providers`,
@@ -749,6 +805,8 @@ export async function apply(ctx: {
           count: items.length,
           /** 在线客户端（登录态来源）。 */
           clients: liveClients(),
+          /** 登录过的平台（快照判据）—— 设置页据此显示「已登录 / 去登录」。 */
+          loggedInPlatforms: loggedInPlatforms(registry.all()),
         })
         return
       }

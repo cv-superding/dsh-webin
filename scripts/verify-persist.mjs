@@ -26,7 +26,7 @@
  *
  * 修复：首轮带 `freshChat`，client **显式开新对话**。
  */
-import { readFileSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -172,6 +172,19 @@ const TMP = mkdtempSync(join(tmpdir(), 'dsh-webin-persist-'))
 process.env.DSH_HOME = TMP
 mkdirSync(join(TMP, 'webin'), { recursive: true })
 
+/**
+ * ⚠️ **必须写登录快照** —— 插件有登录门禁（用户要求「已登录才能用 LDW 模型」）：
+ * 未登录时 `stream` 直接以 `WEBIN_NOT_LOGGED_IN` 报错，本测试一个任务都拿不到。
+ * 这里模拟「已经登录过」，让测试专注于它要验的语义。
+ */
+mkdirSync(join(process.env.DSH_HOME, 'webin', 'auth'), { recursive: true })
+for (const platform of ['deepseek', 'qwen']) {
+  writeFileSync(
+    join(process.env.DSH_HOME, 'webin', 'auth', `${platform}.json`),
+    JSON.stringify({ localStorage: { userToken: '{"value":"test-token"}' }, url: 'https://example.com/' }),
+    'utf8',
+  )
+}
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply } = mod
 

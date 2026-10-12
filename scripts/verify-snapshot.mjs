@@ -47,8 +47,33 @@ const nextDecl = rest.search(/\n\t\t(?:function |const |exports\.)/)
 const declEnd = nextDecl < 0 ? bundle.length : openBrace + nextDecl
 const end = braceEnd > 0 && braceEnd <= declEnd ? braceEnd : declEnd
 
+/**
+ * ⚠️ `snapshotLooksLoggedIn` 现在**依赖 `unwrapAppKit`**（两者一起从
+ * `src/shared/auth-snapshot.ts` 编译进来，client 与 host 共用）。
+ * 只抠前者会 `ReferenceError: unwrapAppKit is not defined`（踩过）。
+ *
+ * 所以从 `unwrapAppKit` 一直切到 `snapshotLooksLoggedIn` 结束 ——
+ * 两者在产物里相邻且顺序固定（unwrap 在前）。
+ */
+const helperMatch = bundle.match(/function unwrapAppKit\(([^)]*)\)\s*\{/)
+if (helperMatch === null) throw new Error('产物里找不到 unwrapAppKit —— 先跑 npm run build')
+
+/**
+ * 用**括号配对**找 `snapshotLooksLoggedIn` 的结束位置。
+ *
+ * ⚠️ 不能只用花括号配对：函数体里有字符串字面量含花括号
+ * （`startsWith('{')`），配对会提前结束。所以取「配对结果」与
+ * 「下一个顶层声明」的较近者 —— 与上面原有逻辑一致。
+ */
+const rest2 = bundle.slice(openBrace)
+const nextDecl2 = rest2.search(/\n\t\t(?:function |const |exports\.)/)
+const declEnd2 = nextDecl2 < 0 ? bundle.length : openBrace + nextDecl2
+const end2 = braceEnd > 0 && braceEnd <= declEnd2 ? braceEnd : declEnd2
+
 // eslint-disable-next-line no-new-func
-const snapshotLooksLoggedIn = new Function(`${bundle.slice(start, end)}\n; return snapshotLooksLoggedIn;`)()
+const snapshotLooksLoggedIn = new Function(
+  `${bundle.slice(helperMatch.index, end2)}\n; return snapshotLooksLoggedIn;`,
+)()
 
 let pass = 0
 let fail = 0

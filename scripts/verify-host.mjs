@@ -13,6 +13,7 @@
  *   5. 心跳路由必须存在，且 /status 反映在线客户端
  */
 import { createRequire } from 'node:module'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
@@ -146,6 +147,22 @@ console.log('=== dsh-webin host 半验证 ===\n')
  * 详见 `scripts/lib/isolate.mjs`。
  */
 const cleanupState = isolate('webin-host')
+
+/**
+ * ⚠️ **必须写登录快照** —— 插件有登录门禁（用户要求「已登录才能用 LDW 模型」）：
+ * 未登录时 `listModels` 返回空、`stream` 以 `WEBIN_NOT_LOGGED_IN` 报错，
+ * 于是「有模型」「能领到任务」这些断言全挂。
+ * 这里模拟「已经登录过」，让测试专注于 host 装配与生命周期语义。
+ */
+mkdirSync(join(process.env.DSH_HOME, 'webin', 'auth'), { recursive: true })
+for (const platform of ['deepseek', 'qwen']) {
+  writeFileSync(
+    join(process.env.DSH_HOME, 'webin', 'auth', `${platform}.json`),
+    JSON.stringify({ localStorage: { userToken: '{"value":"test-token"}' }, url: 'https://example.com/' }),
+    'utf8',
+  )
+}
+
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply, name } = mod
 
