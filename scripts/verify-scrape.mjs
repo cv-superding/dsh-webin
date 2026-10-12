@@ -439,5 +439,29 @@ console.log('\n[16] ⭐ 用真实类名跑一遍（模拟页面真实结构）')
   check('⭐ 代码围栏还原', /```js\n[\s\S]*?Get-Date[\s\S]*?\n```/.test(r.last), true)
 }
 
+console.log('\n[17] ⭐⭐ 思考内容**不得混进正文**（嵌套结构下的真实风险）')
+{
+  /**
+   * 真实页面里 `ds-think-content` 很可能**嵌套在 `ds-markdown` 内部**
+   * （思考是回复的一部分，只是折叠显示）。
+   *
+   * 那么 `render()` 递归时会**连思考一起读进正文** ——
+   * 后果：DSH 的对话里，思考变成正文的一部分（用户明确提过这个问题）。
+   *
+   * 而思考由 `readThink()` 单独提供 ⇒ **正文里必须把它排除**。
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('div', { cls: 'ds-think-content' }, el('p', {}, text('这段是思考过程，不该出现在正文里。'))),
+    el('p', {}, text('这段才是真正的回复正文内容。')),
+  )
+  const r = run(script, [reply])
+
+  check('⭐ 思考被单独读到', r.think.includes('不该出现在正文里'), true)
+  check('⭐⭐ 正文含真正的回复', r.last.includes('这段才是真正的回复正文内容'), true)
+  check('⭐⭐ 正文**不含**思考', r.last.includes('不该出现在正文里'), false)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
