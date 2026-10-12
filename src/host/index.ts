@@ -40,6 +40,14 @@ import type { CursorStore, SessionCursor } from './adapter'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
 import { snapshotTextLooksLoggedIn } from '../shared/auth-snapshot'
 import {
+  checkForUpdate,
+  currentVersion,
+  repoUrl,
+  starUrl,
+  updateHint,
+  type UpdateCheck,
+} from '../shared/version'
+import {
   checkConfig,
   DEFAULT_CONFIG,
   describeConfig,
@@ -365,6 +373,14 @@ export async function apply(ctx: {
 
   /** 在线客户端心跳（clientId → 最近一次心跳）。 */
   const beats = new Map<string, ClientBeat>()
+
+  /**
+   * 上次更新检查结果（**缓存 60 秒**）。
+   *
+   * 未认证的 GitHub API 每小时只有 60 次配额 —— 用户在设置页连点几次
+   * 「检查更新」就能把它打光。缓存一下，正常使用完全够。
+   */
+  let lastUpdateCheck: UpdateCheck | undefined
   const liveClients = (): ClientBeat[] => {
     const now = Date.now()
     const out: ClientBeat[] = []
@@ -713,6 +729,44 @@ export async function apply(ctx: {
         }
         log.info?.('配置已恢复默认')
         sendJson(res, 200, { ok: true, config: { ...DEFAULT_CONFIG }, problems: [], summary: describeConfig(DEFAULT_CONFIG) })
+        return
+      }
+
+      /**
+       * ---- GET /version —— 版本 + 更新检查 ----
+       *
+       * ## 为什么走 host 而不是让 client 直接请求 GitHub
+       *
+       *   - **CORS**：浏览器里对 `api.github.com` 的跨域请求会被拦
+       *   - **凭据**：host 侧不需要任何凭据（公开仓库），也不该为了
+       *     检查更新去要一个能写仓库的 token
+       *   - **缓存**：host 侧记一下上次结果，用户反复开设置页时不必重复打
+       *     GitHub（未认证的 API 每小时 60 次，刷几次就没了）
+       */
+      if (method === 'GET' && pathname === `${API_PREFIX}/version`) {
+        const info = currentVersion()
+        const url = new URL(req.url ?? '', 'http://localhost')
+        /** `?check=1` 才真的打 GitHub —— 默认只回本地版本，省配额。 */
+        const wantCheck = url.searchParams.get('check') === '1'
+        let update: UpdateCheck | undefined
+        if (wantCheck) {
+          const now = Date.now()
+          /** 60 秒内复用上次结果（用户连点「检查更新」不会打爆配额）。 */
+          if (lastUpdateCheck !== undefined && now - lastUpdateCheck.checkedAt < 60_000) {
+            update = lastUpdateCheck
+          } else {
+            update = await checkForUpdate(info.repo)
+            lastUpdateCheck = update
+          }
+        }
+        sendJson(res, 200, {
+          ok: true,
+          ...info,
+          repoUrl: repoUrl(info.repo),
+          starUrl: starUrl(info.repo),
+          updateHint: updateHint(info.repo),
+          ...(update === undefined ? {} : { update }),
+        })
         return
       }
 
