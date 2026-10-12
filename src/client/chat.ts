@@ -413,34 +413,78 @@ export function buildTriggerScript(hints?: SendHints): string {
 }
 
 /**
- * ## 检查发送是否被确认（**短调用，立刻返回**）
+ * ## 清空输入框（撤销一次已填入但未发送的内容）
  *
- * 读 hook 记的 completion 请求计数 —— 这是 DeepSeek 上**唯一可靠的
- * 发送成功信号**（页面真的发出了 POST /api/v0/chat/completion）。
+ * ## 什么时候用
  *
- * 与 cuckoo 的差异：cuckoo 根本不验证（点完就算发了）。
- * 我们多这一层是因为 DSH 需要知道「这一轮到底有没有发出去」，
- * 否则失败时会白等到超时。但**验证本身也是短调用** —— 只读一个数字。
+ * 「填完字」到「按发送」之间隔了 2–4 秒。这期间用户可能按了停止，
+ * 或者切到了别的会话 —— 那时**不该再发出去**。
+ *
+ * 但输入框里已经有内容了，留着它有两个风险：
+ *   1. 用户手动按 Enter 会发出一条半截/已取消的消息
+ *   2. 下一个任务填充时可能和旧内容混在一起
+ *
+ * 所以取消时显式清空。
+ *
+ * @param hints - 平台声明（输入框选择器）
  */
-export function buildVerifyScript(): string {
+export function buildClearInputScript(hints?: SendHints): string {
+  const inputSelectors = hints?.inputSelectors ?? [
+    'textarea[placeholder*="DeepSeek"]',
+    'textarea',
+    'div[contenteditable="true"]',
+    '[role="textbox"]',
+  ]
+
   return `(function () {
+  var INPUT_SELECTORS = ${JSON.stringify(inputSelectors)};
+
+  function visible(el) {
+    if (!el) return false;
+    try { return el.offsetWidth > 0 && el.offsetHeight > 0; } catch (e) { return false; }
+  }
+
   try {
-    var n = window.__dshWebinHookInstalled___requests;
-    var input = document.querySelector('textarea, div[contenteditable="true"]');
-    var text = '';
+    var hit = null;
+    for (var i = 0; i < INPUT_SELECTORS.length && !hit; i++) {
+      var list;
+      try { list = document.querySelectorAll(INPUT_SELECTORS[i]); } catch (e) { continue; }
+      for (var j = 0; j < list.length; j++) {
+        if (visible(list[j])) { hit = list[j]; break; }
+      }
+    }
+    if (!hit) return JSON.stringify({ ok: false, reason: 'no-input' });
+
+    hit.focus();
+    if (hit.tagName === 'TEXTAREA' || hit.tagName === 'INPUT') {
+      /** 走原生 setter —— 直接赋值不会触发 React 的 onChange。 */
+      var proto = hit.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(hit, '');
+      else hit.value = '';
+      try { hit.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      return JSON.stringify({ ok: true, how: 'native-setter' });
+    }
+
+    /** contenteditable：selectAll + delete。 */
     try {
-      text = input ? (input.tagName === 'TEXTAREA' ? (input.value || '') : (input.innerText || input.textContent || '')) : '';
+      document.execCommand('selectAll', false, undefined);
+      document.execCommand('delete', false, undefined);
     } catch (e) {}
-    return JSON.stringify({
-      requests: typeof n === 'number' ? n : 0,
-      inputEmpty: text.trim() === '',
-      url: location.href
-    });
+    var left = String(hit.innerText || hit.textContent || '').trim();
+    if (left !== '') {
+      /** 兜底：直接清 textContent 再补事件。 */
+      hit.textContent = '';
+      try { hit.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      left = String(hit.innerText || hit.textContent || '').trim();
+    }
+    return JSON.stringify({ ok: left === '', how: 'execCommand-delete', left: left.slice(0, 40) });
   } catch (e) {
-    return JSON.stringify({ requests: 0, inputEmpty: false, error: String(e && e.message) });
+    return JSON.stringify({ ok: false, reason: String(e && e.message) });
   }
 })();`
 }
+
 /**
  * 诊断脚本：把页面上的输入框与候选发送控件列出来。
  *

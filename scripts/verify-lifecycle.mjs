@@ -277,6 +277,93 @@ console.log('\n[2] 平台隔离：不同平台领不到彼此的活')
   await first.catch(() => undefined)
 }
 
+console.log('\n[3b] ⭐⭐ 已取消的任务不能被迟到结果「复活」（行为验证）')
+{
+  /**
+   * ## 真实 bug（审计发现）
+   *
+   * 时序：
+   *   t0  用户按停止 ⇒ host 调 `cancel()` ⇒ job.failed = '已取消'
+   *   t1  调用方收到错误退出
+   *   t2  **但 client 还在等页面回复** —— 稍后 done 事件到了，
+   *       它照样 PUT 一次结果
+   *   t3  `settle()` 若直接覆盖 ⇒ job.done 被写上 ⇒ 任务「复活」成成功
+   *
+   * 这里用真 host 跑完整时序，验证 t3 被拒绝。
+   */
+  const A = makeCtx()
+  await apply(A.ctx)
+  const route = [...A.routes.values()].find((r) => r.path === '/dsh-webin/api')
+
+  const adapter = A.adapters.get('webin-deepseek')
+  const ac = new AbortController()
+  const stream = adapter.stream({
+    provider: 'webin-deepseek',
+    model: 'deepseek:ldw-fast',
+    sessionId: 'revive-test',
+    messages: [{ role: 'user', content: '测试取消后不能被复活' }],
+    signal: ac.signal,
+  })
+  /** 后台消费（不 await —— 我们要手动控制时序）。 */
+  const drain = (async () => {
+    try {
+      for await (const _ of stream) { /* 只消费 */ }
+    } catch { /* abort 会抛，忽略 */ }
+  })()
+
+  /** 领到任务。 */
+  let jobId
+  for (let i = 0; i < 60 && jobId === undefined; i += 1) {
+    const res = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+    if (res.json?.job?.id !== undefined) jobId = res.json.job.id
+    else await new Promise((r) => setTimeout(r, 50))
+  }
+  check('领到任务', typeof jobId, 'string')
+
+  /** t0：用户按停止 —— abort 让 adapter 走 cancel 路径。 */
+  ac.abort()
+  /**
+   * ⚠️ 必须**等到** host 真的处理了 abort，不能猜时间。
+   *
+   * adapter 的取消检查在轮询循环**顶部**，而循环体里 `await sleep(250ms)`
+   * ⇒ abort 后最多要等一个轮询周期（250ms）才会走到检查点。
+   * 早期这里写死 `sleep(200)` ⇒ 太短 ⇒ 测试误报「取消没生效」（踩过）。
+   *
+   * 改成**轮询等待**（最多 3 秒），既不慢也不脆。
+   */
+  let cancelled = false
+  for (let i = 0; i < 30 && !cancelled; i += 1) {
+    await new Promise((r) => setTimeout(r, 120))
+    const probe = await call(
+      route.handler,
+      'GET',
+      `/dsh-webin/api/job/next?platform=deepseek&running=${encodeURIComponent(jobId)}`,
+    )
+    if (probe.json?.cancel === jobId) cancelled = true
+  }
+  check('⭐ 取消后 running 查询报 cancel', cancelled, true)
+
+  /** t2/t3：client 迟到的**成功**结果 —— 必须被拒绝。 */
+  const late = await call(
+    route.handler,
+    'PUT',
+    `/dsh-webin/api/job/${encodeURIComponent(jobId)}/result`,
+    JSON.stringify({ text: '这是迟到的成功回复，不该被接受', think: '', status: 'finished' }),
+  )
+  check('⭐⭐ 迟到结果被拒绝（404）', late.status, 404)
+  check('⭐⭐ ok=false', late.json?.ok, false)
+  /** 再交一次也一样 —— 证明没被第一次「复活」成已了结。 */
+  const late2 = await call(
+    route.handler,
+    'PUT',
+    `/dsh-webin/api/job/${encodeURIComponent(jobId)}/result`,
+    JSON.stringify({ text: '第二次迟到', think: '', status: 'finished' }),
+  )
+  check('⭐ 第二次迟到也被拒绝', late2.status, 404)
+
+  await drain.catch(() => undefined)
+}
+
 console.log('\n[3] 静态：client 侧防插队闸门与超时兜底')
 {
   const src = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')

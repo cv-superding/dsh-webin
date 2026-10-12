@@ -306,6 +306,115 @@ console.log('\n[N] ⭐ 残留的死代码不要留着误导人')
   /** `buildSendScript` 已删（拆成 fill/trigger）。 */
   check('⭐ 源码无 buildSendScript 定义', /export function buildSendScript/.test(chatSrc), false)
   check('⭐ 无对它的调用', /await execJs[^\n]*buildSendScript\(/.test(clientSrc), false)
+  /** `buildVerifyScript` 已删（发送不再自证）。 */
+  check('⭐ 源码无 buildVerifyScript', /buildVerifyScript/.test(chatSrc), false)
+}
+
+console.log('\n[O] ⭐⭐ 所有对 host 的 fetch 必须有超时（防循环永久停摆）')
+{
+  /**
+   * ## 真实 bug（审计发现）
+   *
+   * 发送循环里有 8 处 `await fetch('/dsh-webin/api/job/.../result')`。
+   * 裸 `fetch` **没有超时** —— host 卡住时这个 await 永远挂着，
+   * 而 `busy` 已经是 true ⇒ **整个发送循环永久停摆**，
+   * 且没有任何异常可捕获（用户看到「什么都不发生」）。
+   *
+   * 现在统一走 `fetchJson()`（带超时、超时返回 undefined 不抛错）。
+   */
+  check('⭐ 有 fetchJson 包装', /function fetchJson\(/.test(clientSrc), true)
+  check('⭐ fetchJson 用 setTimeout 加超时', /setTimeout\(\(\) => \{[\s\S]{0,200}resolve\(undefined\)/.test(clientSrc), true)
+  /** 交结果的路径必须全走 fetchJson。 */
+  const rawJobFetch = clientSrc.match(/await fetch\(`\/dsh-webin\/api\/job\//g) ?? []
+  check('⭐ 没有裸 await fetch(job)', rawJobFetch, [])
+  const rawVoidFetch = clientSrc.match(/void fetch\(`\/dsh-webin\/api\/job\//g) ?? []
+  check('⭐ 没有裸 void fetch(job)', rawVoidFetch, [])
+  /** 领活请求也要有超时。 */
+  check('⭐ 领活请求走 fetchJson', /const res = await fetchJson\(query/.test(clientSrc), true)
+  check('有 fetchJson 调用', (clientSrc.match(/fetchJson\(/g) ?? []).length >= 8, true)
+}
+
+console.log('\n[P] ⭐⭐ 长等待必须可中断（不能一觉睡到底）')
+{
+  /**
+   * ## 真实 bug（审计发现）
+   *
+   * 长休原来是 `await new Promise(r => setTimeout(r, breakMs))` ——
+   * 一口气睡最多 **3 分钟**。那段时间里：
+   *   1. **用户按停止看不到反应**（循环在睡觉，不会问 host「取消了吗」）
+   *   2. 用户切会话后，任务醒来仍往**当前页面**发 ⇒ 串台
+   *
+   * 现在每 2 秒醒一次检查取消。
+   */
+  check('⭐ 长休分段睡', /Math\.min\(2_000, deadline - Date\.now\(\)\)/.test(clientSrc), true)
+  check('⭐ 长休期间检查取消', /长休期间任务被取消/.test(clientSrc), true)
+  check('⭐ 取消后不交结果（host 已标记）', /clearPending\(\)\s*\n\s*return/.test(clientSrc), true)
+  /** 长休不应再有一觉睡到底的写法。 */
+  check('⭐ 没有一觉睡 breakMs', /await new Promise\(\(r\) => setTimeout\(r, breakMs\)\)/.test(clientSrc), false)
+}
+
+console.log('\n[Q] ⭐⭐ 点火前必须复查（填完字到按发送之间隔 2–4 秒）')
+{
+  /**
+   * 那 2–4 秒里用户可能按停止、或切到别的会话 —— 两种都不该再发出去，
+   * 否则要么发出已取消的消息，要么把内容发进**错误的对话**（串台）。
+   */
+  check('⭐ 点火前有取消复查', /点火前发现任务已取消/.test(clientSrc), true)
+  check('⭐ 取消时清空输入框（不留半截消息）', /buildClearInputScript/.test(clientSrc), true)
+  check('⭐ 有清空脚本实现', /export function buildClearInputScript/.test(chatSrc), true)
+  /** 清空脚本要能处理 textarea 与 contenteditable 两种。 */
+  check('清空支持 textarea', /HTMLTextAreaElement\.prototype/.test(chatSrc), true)
+  check('清空支持 contenteditable', /execCommand\('selectAll'/.test(chatSrc), true)
+  /** ⚠️ 复查必须在触发**之前**。 */
+  const iProbe = clientSrc.indexOf('点火前发现任务已取消')
+  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider))')
+  check('⭐ 复查在触发之前', iProbe > 0 && iTrig > 0 && iProbe < iTrig, true)
+}
+
+console.log('\n[R] ⭐⭐ host 侧：已取消的任务不能被结果「复活」')
+{
+  /**
+   * ## 真实 bug（审计发现）
+   *
+   * `settle()` 早期直接覆盖 `job.done` / `job.failed`：
+   *
+   *   1. 用户按停止 ⇒ `cancel()` 设 `failed = 已取消`，调用方已收到错误退出
+   *   2. client 那边**还在等页面回复**，稍后 `done` 到达，照样 PUT 结果
+   *   3. `settle()` 把 `failed` **覆盖成 `done`** ⇒ 取消掉的任务在队列里
+   *      「复活」成成功状态
+   *
+   * 修法：已取消 / 已了结的任务**一律拒绝**（返回 false ⇒ 调用方收到 404）。
+   */
+  check('⭐ settle 拒绝已取消的', /if \(job\.cancelled === true\) return false/.test(adapterSrc), true)
+  check('⭐ settle 拒绝已了结的', /if \(job\.done !== undefined \|\| job\.failed !== undefined\) return false/.test(adapterSrc), true)
+  /** 顺序：两个拒绝都要在写入**之前**。 */
+  const iReject = adapterSrc.indexOf('if (job.cancelled === true) return false')
+  const iWrite = adapterSrc.indexOf("if ('error' in result) job.failed = result.error")
+  check('⭐ 拒绝在写入之前', iReject > 0 && iWrite > iReject, true)
+}
+
+console.log('\n[S] ⭐ 队列淘汰只删已了结的（否则要么爆内存要么丢任务）')
+{
+  /**
+   * ## 真实隐患（审计发现）
+   *
+   * 早期写法：按时间排序取最老的，若已了结就删。
+   *
+   * 但最老的**通常正是**已完成那条 ⇒ 碰巧能删；可如果最老那条恰好
+   * 卡住没了结，就**一个都删不掉** ⇒ map 无限增长。
+   *
+   * 现在：只在超限时，从**已了结的**里面挑最老的删。
+   */
+  check('⭐ 只在已了结的里面挑', /if \(j\.done === undefined && j\.failed === undefined\) continue/.test(adapterSrc), true)
+  check('⭐ 挑最老的已了结', /j\.createdAt < oldestDone\.createdAt/.test(adapterSrc), true)
+  /** 不能再用「排序取 [0] 然后判定了结」那种写法。 */
+  check('⭐ 没有旧的 sort+[0] 写法', /sort\(\(a, b\) => a\.createdAt - b\.createdAt\)\[0\]/.test(adapterSrc), false)
+}
+
+console.log('\n[T] ⭐ 领活不能重复领同一个任务')
+{
+  check('⭐ claimNext 跳过已领的', /job\.claimedAt !== undefined\) continue/.test(adapterSrc), true)
+  check('⭐ claimNext 按平台过滤', /platform !== undefined && job\.platform !== platform/.test(adapterSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

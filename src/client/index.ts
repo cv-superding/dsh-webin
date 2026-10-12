@@ -20,12 +20,12 @@ import {
   saveSnapshot,
 } from './hook'
 import {
+  buildClearInputScript,
   buildDiagnoseScript,
   buildFillScript,
   buildStopScript,
   buildThinkingScript,
   buildTriggerScript,
-  buildVerifyScript,
   pickSendDelay,
 } from './chat'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
@@ -188,6 +188,56 @@ function element_loadURL(el: GuestElement, url: string): Promise<void> {
  * @returns 脚本结果；超时返回 {@link EXEC_TIMEOUT}
  */
 export const EXEC_TIMEOUT = Symbol('dsh-webin:exec-timeout')
+
+/**
+ * ## 带超时的 `fetch`（**所有对 host 的请求都必须走这里**）
+ *
+ * ## 为什么（审计发现的真实风险）
+ *
+ * 发送循环里有 8 处 `await fetch('/dsh-webin/api/job/.../result')`。
+ * 裸 `fetch` **没有超时** —— 如果 host 卡住（事件循环被占、
+ * 正在写大文件、或者干脆挂了），这个 `await` 会永远挂着，
+ * 而 `busy` 已经是 `true` ⇒ **整个发送循环永久停摆**。
+ *
+ * 用户会看到的现象和「一直深度求索中」一样：什么都不发生，
+ * 且没有任何报错（因为没有异常可捕获）。
+ *
+ * 这里的超时**只保护「等响应」这一段**，不取消请求本身
+ * （请求可能已经到达 host 并被处理，取消反而会造成状态不一致）。
+ * 超时后返回 `undefined`，调用方按「交结果可能没成功」继续 ——
+ * 关键是**循环要能继续转**。
+ *
+ * @param input - 请求 URL
+ * @param init - fetch 选项
+ * @param timeoutMs - 超时（默认 15s）
+ * @returns 响应；超时/失败返回 undefined（**不抛错**）
+ */
+function fetchJson(input: string, init?: RequestInit, timeoutMs = 15_000): Promise<Response | undefined> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      console.warn(`[dsh-webin] fetch 超时 ${timeoutMs}ms: ${input}`)
+      resolve(undefined)
+    }, timeoutMs)
+    fetch(input, init).then(
+      (res) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        resolve(res)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        console.warn(`[dsh-webin] fetch 失败: ${input}`, error)
+        resolve(undefined)
+      },
+    )
+  })
+}
 
 /**
  * 探测 hook 是否**仍在本页面**。
@@ -1305,7 +1355,7 @@ export function LdwHost(): unknown {
                 void execJs<string>(el, 'location.href', 8_000)
                   .then((u) => (u === EXEC_TIMEOUT ? '' : String(u)))
                   .then((chatUrl) => {
-                    void fetch(`/dsh-webin/api/job/${jobId}/result`, {
+                    void fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
                       method: 'PUT',
                       headers: { 'content-type': 'application/json' },
                       body: JSON.stringify({
@@ -1314,7 +1364,7 @@ export function LdwHost(): unknown {
                         status: String(ev.detail?.status ?? 'finished'),
                         ...(chatUrl === '' ? {} : { chatUrl }),
                       }),
-                    }).catch(() => undefined)
+                    })
                   })
               }
             } else if (ev.name === 'error') {
@@ -1325,11 +1375,11 @@ export function LdwHost(): unknown {
                 pendingJobRef.current = undefined
                 pendingSinceRef.current = 0
                 scrapedRef.current = undefined
-                void fetch(`/dsh-webin/api/job/${jobId}/result`, {
+                void fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({ error: String(ev.detail?.message ?? 'page error') }),
-                }).catch(() => undefined)
+                })
               }
             }
           }
@@ -1549,7 +1599,7 @@ export function LdwHost(): unknown {
                 clearPending()
                 const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
                 const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
-                await fetch(`/dsh-webin/api/job/${jobId}/result`, {
+                await fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({
@@ -1559,7 +1609,7 @@ export function LdwHost(): unknown {
                     via: 'dom',
                     ...(chatUrl === '' ? {} : { chatUrl }),
                   }),
-                }).catch(() => undefined)
+                })
                 return
               }
             } catch {
@@ -1572,7 +1622,7 @@ export function LdwHost(): unknown {
           const stuck = pendingJobRef.current!
           console.warn('[dsh-webin] 待办超时，放弃任务', stuck, { waitedMs, giveUpMs })
           clearPending()
-          await fetch(`/dsh-webin/api/job/${stuck}/result`, {
+          await fetchJson(`/dsh-webin/api/job/${stuck}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
@@ -1580,7 +1630,7 @@ export function LdwHost(): unknown {
                 `等待网页回复超时（${Math.round(giveUpMs / 1000)} 秒）。` +
                 '页面上没有可读取的回复内容 —— 请检查网页版里的状态。',
             }),
-          }).catch(() => undefined)
+          })
           return
         }
         /**
@@ -1595,8 +1645,15 @@ export function LdwHost(): unknown {
           '/dsh-webin/api/job/next?platform=' +
           encodeURIComponent(provider.id) +
           (running === undefined ? '' : '&running=' + encodeURIComponent(running))
-        const res = await fetch(query)
-        if (!res.ok) return
+        /**
+         * ⚠️ **领活请求也必须带超时**（审计发现）。
+         *
+         * 裸 `await fetch` 在 host 卡住时会永远挂着 —— 而 `busy` 已经是
+         * `true` ⇒ 发送循环**永久停摆**，且没有任何报错可捕获。
+         * 超时后直接 return（下一轮 1.5s 后再试），循环保持活着。
+         */
+        const res = await fetchJson(query, undefined, 10_000)
+        if (res === undefined || !res.ok) return
         const data = (await res.json()) as {
           ok: boolean
           job: { id: string; prompt: string; thinking: boolean; expectUrl?: string; freshChat?: boolean } | null
@@ -1780,13 +1837,13 @@ export function LdwHost(): unknown {
         if (!canSendThisTurn()) {
           console.warn('[dsh-webin] 本轮请求数已达上限，停止发送', { limit: currentConfig().maxRequestsPerTurn })
           clearPending()
-          await fetch(`/dsh-webin/api/job/${id}/result`, {
+          await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               error: `本轮请求数已达上限（${currentConfig().maxRequestsPerTurn}），可在设置页调整`,
             }),
-          }).catch(() => undefined)
+          })
           return
         }
         noteTurnRequest()
@@ -1794,8 +1851,55 @@ export function LdwHost(): unknown {
         const cfgNow = currentConfig()
         const breakMs = noteRequestDone()
         if (breakMs > 0) {
+          /**
+           * ## ⚠️ 长休必须**分段睡**，不能一觉睡到底（审计发现的 bug）
+           *
+           * 原实现是 `await new Promise(r => setTimeout(r, breakMs))` ——
+           * 一口气睡最多 **3 分钟**（`longBreakMaxMs` 默认 180000）。
+           * 那段时间里 `busy` 一直是 `true`，于是：
+           *
+           *   1. **用户按停止看不到反应** —— 循环在睡觉，不会去问 host
+           *      「这个任务取消了吗」，页面继续白生成、烧配额；
+           *   2. 用户切到别的 DSH 会话后，这个任务醒来仍会往**当前页面**发
+           *      （而当前页面可能已经换成另一个会话的对话）⇒ 串台。
+           *
+           * 改成每 2 秒醒一次检查取消；被取消就立刻停止发送并交结果。
+           * 这样「长休」只影响**发送时机**，不影响响应性。
+           */
           console.log(`[dsh-webin] 长休 ${Math.round(breakMs / 1000)}s（每 ${cfgNow.longBreakAfter} 次请求休息一次）`)
-          await new Promise((r) => setTimeout(r, breakMs))
+          const deadline = Date.now() + breakMs
+          let cancelledDuringBreak = false
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, Math.min(2_000, deadline - Date.now())))
+            if (stopped) return
+            /** 醒来先问一次「这个任务还算数吗」。 */
+            const probe = await fetchJson(
+              `/dsh-webin/api/job/next?platform=${encodeURIComponent(provider.id)}&running=${encodeURIComponent(id)}`,
+              undefined,
+              8_000,
+            )
+            if (probe !== undefined && probe.ok) {
+              try {
+                const p = (await probe.json()) as { cancel?: string }
+                if (typeof p.cancel === 'string' && p.cancel !== '') {
+                  console.log('[dsh-webin] 长休期间任务被取消，放弃发送', p.cancel)
+                  cancelledDuringBreak = true
+                  break
+                }
+              } catch {
+                /* 解析失败就当没取消 */
+              }
+            }
+          }
+          if (cancelledDuringBreak) {
+            /**
+             * ⚠️ 被取消时**不交结果** —— host 那边已经把这个任务标记为
+             * cancelled 并让调用方报错退出了，再交一次结果会 404
+             * （或者更糟：覆盖掉真正的结果）。
+             */
+            clearPending()
+            return
+          }
         }
 
         /**
@@ -1871,11 +1975,11 @@ export function LdwHost(): unknown {
 
         if (fillRaw === EXEC_TIMEOUT) {
           clearPending()
-          await fetch(`/dsh-webin/api/job/${id}/result`, {
+          await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ error: '填充输入框超时（页面可能正在导航），请重试。' }),
-          }).catch(() => undefined)
+          })
           return
         }
 
@@ -1890,11 +1994,11 @@ export function LdwHost(): unknown {
 
         if (!fill.ok) {
           clearPending()
-          await fetch(`/dsh-webin/api/job/${id}/result`, {
+          await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ error: `${fill.stage ?? 'fill-failed'}: ${fill.message ?? '填充失败'}` }),
-          }).catch(() => undefined)
+          })
           return
         }
 
@@ -1908,6 +2012,42 @@ export function LdwHost(): unknown {
         console.log(`[dsh-webin] 已填入 ${fill.chars ?? prompt.length} 字符，${gapMs}ms 后触发发送`)
         await new Promise((r) => setTimeout(r, gapMs))
 
+        /**
+         * ## ⚠️ 点火前**最后一次检查**（审计发现的 bug）
+         *
+         * 从「填完字」到「真的按发送」之间隔了 2–4 秒。这段时间里用户可能：
+         *   - 按了停止（host 把任务标记为 cancelled）
+         *   - 切到别的 DSH 会话（当前网页对话已经不是这个任务该在的地方）
+         *
+         * 两种情况下都**不该再发出去** —— 否则要么发一条用户已经取消的消息，
+         * 要么把内容发进**错误的对话**（上下文串台，用户实测报过这个）。
+         *
+         * 检查到取消就**清空输入框**（把已经填进去的字删掉，避免用户手动
+         * 误发一条半截内容）。
+         */
+        {
+          const probe = await fetchJson(
+            `/dsh-webin/api/job/next?platform=${encodeURIComponent(provider.id)}&running=${encodeURIComponent(id)}`,
+            undefined,
+            8_000,
+          )
+          if (probe !== undefined && probe.ok) {
+            try {
+              const p = (await probe.json()) as { cancel?: string; job?: unknown }
+              if (typeof p.cancel === 'string' && p.cancel !== '') {
+                console.log('[dsh-webin] 点火前发现任务已取消，撤销发送', p.cancel)
+                /** 清掉已填入的内容 —— 不要留下一条随时可能被误发的半截消息。 */
+                await execJs(el, buildClearInputScript(sendHintsFor(provider)), 8_000)
+                clearPending()
+                return
+              }
+            } catch {
+              /* 解析失败就按「没取消」继续（宁可发出也不要静默卡住） */
+            }
+          }
+          if (stopped) return
+        }
+
         /** ③ 触发发送（只点一下，立刻返回，不验证）。 */
         const trigRaw = await execJs<string>(el, buildTriggerScript(sendHintsFor(provider)), 15_000)
         const trig =
@@ -1918,11 +2058,11 @@ export function LdwHost(): unknown {
 
         if (trig.ok !== true) {
           clearPending()
-          await fetch(`/dsh-webin/api/job/${id}/result`, {
+          await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ error: `send-failed: ${trig.message ?? '触发发送失败'}` }),
-          }).catch(() => undefined)
+          })
           return
         }
 
@@ -1967,13 +2107,13 @@ export function LdwHost(): unknown {
         const stuck = pendingJobRef.current
         clearPending()
         if (stuck !== undefined) {
-          void fetch(`/dsh-webin/api/job/${stuck}/result`, {
+          void fetchJson(`/dsh-webin/api/job/${stuck}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               error: `客户端处理异常：${(error as Error)?.message ?? String(error)}`,
             }),
-          }).catch(() => undefined)
+          })
         }
       } finally {
         busy = false

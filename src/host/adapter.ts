@@ -118,10 +118,26 @@ class JobQueue {
       ...(freshChat === true ? { freshChat: true } : {}),
     }
     this.jobs.set(job.id, job)
-    // 只保留最近 50 条，避免长会话内存堆积
+    /**
+     * 只保留最近 50 条，避免长会话内存堆积。
+     *
+     * ⚠️ **只能淘汰已了结的**（审计发现的隐患）。
+     *
+     * 早期写法是「按时间取最老的，如果它已了结就删」。但排序后取
+     * `[0]` 拿到的是**最老的**（通常正是已完成的那条），于是能删掉 ——
+     * 可如果最老的那条恰好**还没了结**（比如它卡住了），就一个都删不掉，
+     * map 无限增长。
+     *
+     * 现在改成：只在超限时，**从已了结的里面**挑最老的删。
+     * 一个都没了结就暂时留着（总比丢掉在跑的任务好）。
+     */
     if (this.jobs.size > 50) {
-      const oldest = [...this.jobs.values()].sort((a, b) => a.createdAt - b.createdAt)[0]
-      if (oldest !== undefined && oldest.done !== undefined) this.jobs.delete(oldest.id)
+      let oldestDone: Job | undefined
+      for (const j of this.jobs.values()) {
+        if (j.done === undefined && j.failed === undefined) continue
+        if (oldestDone === undefined || j.createdAt < oldestDone.createdAt) oldestDone = j
+      }
+      if (oldestDone !== undefined) this.jobs.delete(oldestDone.id)
     }
     return job
   }
@@ -142,13 +158,46 @@ class JobQueue {
     return undefined
   }
 
-  /** client 交结果。 */
+  /**
+   * client 交结果。
+   *
+   * ## ⚠️ 已取消 / 已了结的任务**不接受新结果**（审计发现的 bug）
+   *
+   * 早期实现直接覆盖 `job.done` / `job.failed`，于是：
+   *
+   *   1. 用户按停止 ⇒ `cancel()` 把 `failed` 设成「已取消」，调用方已经
+   *      拿到错误退出了；
+   *   2. 但 client 那边可能**还在等页面回复**，稍后 `done` 事件到了，
+   *      它照样 PUT 一次结果 ⇒ `settle()` 把 `failed` **覆盖成 `done`**。
+   *
+   * 后果：一个已被取消的任务在队列里「复活」成成功状态。
+   * 更糟的是那一轮的 token 会被计进统计，而调用方根本没收到。
+   *
+   * 所以：**已了结的任务一律拒绝**（返回 false，调用方会收到 404）。
+   * 这也让「重复提交」变成幂等可见的失败，而不是静默覆盖。
+   *
+   * @returns 是否接受（false = 任务不存在 / 已了结）
+   */
   settle(
     id: string,
     result: { text: string; think: string; status: string; chatUrl?: string } | { error: string },
   ): boolean {
     const job = this.jobs.get(id)
     if (job === undefined) return false
+    /**
+     * 已取消的任务：**明确拒绝**。
+     *
+     * `cancel()` 已经把 `failed` 设成取消原因，调用方也已收到错误 ——
+     * 这里再覆盖会让取消「看起来没生效」。
+     */
+    if (job.cancelled === true) return false
+    /**
+     * 已了结的（无论成功还是失败）：拒绝重复提交。
+     *
+     * 正常情况下不该发生；真发生了说明有竞态（比如 client 超时兜底
+     * 和真实 `done` 同时到达），此时**保留先到的那个**更安全。
+     */
+    if (job.done !== undefined || job.failed !== undefined) return false
     if ('error' in result) job.failed = result.error
     else job.done = result
     return true
