@@ -88,10 +88,23 @@ const checks = [
   ['URL 非法时退回 homeUrl', src.includes('target = provider.homeUrl')],
 
   // ---- 本轮修复的回归点 ----
-  ['发送：多策略候选', src.includes('collectCandidates')],
+  /**
+   * ⚠️ 发送已按 cuckoo 的架构**拆成三段**（读它的实现后重构）：
+   *   ① buildFillScript（只填）② 客户端 setTimeout（随机延迟）
+   *   ③ buildTriggerScript（只点发送）
+   *
+   * 原来是一个大脚本 `buildSendScript`，把「填充 → 等 2.4s → 验证 →
+   * 重试」全塞进一次跨进程调用 —— 页面一导航就整体死掉，
+   * 导致「一直深度求索中」。
+   */
+  ['发送：拆分出填充脚本', src.includes('buildFillScript')],
+  ['发送：拆分出触发脚本', src.includes('buildTriggerScript')],
+  ['发送：触发脚本有多策略候选', src.includes('near-input') || src.includes('scoreByGeometry')],
   ['发送：几何评分', src.includes('scoreByGeometry')],
-  ['发送：停止按钮信号', src.includes('hasStopControl')],
   ['发送：诊断脚本', src.includes('buildDiagnoseScript')],
+  /** 回复改由 DOM 轮询读取（主路径）。 */
+  ['回复：DOM 抓取脚本存在', src.includes('buildScrapeScript')],
+  ['回复：按条数增长判断新回复', src.includes('baselineRef')],
   ['心跳上报', src.includes('/client/heartbeat')],
   ['done 事件时间戳过滤', src.includes('sentAtRef')],
   ['登录判据含 userInfo', src.includes('hasUserId')],

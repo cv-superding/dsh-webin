@@ -241,7 +241,11 @@ console.log('\n[4] ⭐⭐ client 必须**真的使用** job.thinking（这就是
    * 它是请求体的一部分，发出去之后再切这一轮已经按旧模式跑了。
    */
   const thinkIdx = client.indexOf('buildThinkingScript(data.job.thinking')
-  const sendIdx = client.indexOf('buildSendScript(prompt')
+  /**
+   * ⚠️ 发送已拆成 `buildFillScript` + `buildTriggerScript`（照 cuckoo 重构），
+   * 所以这里比对「思考切换」与**填充**的先后 —— 填充是发送的第一步。
+   */
+  const sendIdx = client.indexOf('buildFillScript(prompt')
   check('⭐ 切换在发送之前', thinkIdx > 0 && sendIdx > 0 && thinkIdx < sendIdx, true)
   check('⭐ 切不动时不阻断发送', /思考模式脚本失败/.test(client), true)
   check('⭐ 切不动时明确报告（不静默）', /思考模式未切换/.test(client), true)

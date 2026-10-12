@@ -792,56 +792,63 @@ export function buildDrainScript(): string {
 }
 
 /**
- * ## 从**页面 DOM** 兜底抓最后一条回复
+ * ## 从页面 DOM 读回复（**主路径**）
  *
- * ## 为什么需要这个（用户实测踩到的死局）
+ * 用户的要求：「我想要的插件很简单，就是把网页版的内容，回显到 dsh 的对话窗口中」。
  *
- * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，但就是不输出」。
+ * ## 为什么它是主路径（读 cuckoo 之后的设计修正）
  *
- * 已经用两层手段保证 hook 在场：
- *   1. 导航时立即预注入
- *   2. 每 1.5s 自愈守护（见 `index.ts` 的 hook watchdog）
+ * 原来我把「抓 SSE」当主路径，DOM 只当 20 秒后的兜底。那条路有个
+ * **解决不了的时序问题**：
  *
- * 但仍有一类漏网：**页面在 hook 装好之前就发出了请求**。
- * 那时 SSE 已经在流了，我们一条都看不到 ⇒ 「收到 0 条」。
+ *   cuckoo 能在页面脚本执行**之前**注入 hook，靠的是 **preload**
+ *   （`src/bridge/entry.ts:52-68`，注释写着「必须在页面脚本执行前…
+ *   才能覆盖到 window.fetch / XHR」）。
  *
- * 而此刻**回复就明明白白显示在页面上** —— 用户看得见，我们却拿不到，
- * 这是最不可接受的失败方式。
+ *   而 DSH 的 webview 门禁（`lib/main.js:9690`）把 preferences
+ *   **清空后只设固定几项**，`preload` 不在里面。所以我只能等
+ *   `dom-ready` —— 那时**页面脚本早已跑完、请求早已发出**。
+ *   这就是「收到 0 条」的根源，靠加事件监听治不好（时序已经错了）。
  *
- * 所以加这最后一层：直接从 DOM 把最后一条 assistant 消息读出来。
+ * ## DOM 抓取没有这个问题
  *
- * ## 代价与风险（诚实说明）
+ * 内容渲染在页面上，**什么时候读都读得到**，不依赖注入时机。
+ * cuckoo 自己也把 DOM 抓取当默认模式（`src/providers/types.ts:72`：
+ * 「是否使用网络拦截模式（默认 false = DOM 抓取）」）。
  *
- * 这是**兜底**，不是主路径：
- *   - 读不到思考过程（DOM 里思考是折叠的，且结构随版本变）
- *   - 可能读到多余的界面文字
- *   - 选择器依赖页面结构，改版会失效
+ * ## 返回结构化内容（不只是纯文本）
  *
- * 但「拿到不完美的回复」**远好于**「明明有回复却报超时」。
- * 主路径（hook 抓 SSE）拿到内容时永远不会走到这里。
+ * 网页版的回复里，**工具调用是代码块**（`<pre><code>`）。只取 textContent
+ * 会丢掉代码块边界（三反引号）—— 那正是用户报过的「工具调用泄漏成正文」。
  *
- * 判据：找所有可能的 assistant 消息容器，取**最后一个**文本够长的。
- * 用多个候选选择器依次尝试，都不中就返回空串（让调用方照常报超时）。
+ * 所以这里**按 DOM 结构还原 markdown**：
+ *   - `<pre><code>` ⇒ 围栏代码块（含语言标记）
+ *   - 段落 / 列表 / 标题 ⇒ 保留换行结构
+ *   - 行内 `<code>` ⇒ 单反引号
+ *   - 按钮 / 输入框 / 图标 ⇒ 剔除（界面不是回复）
+ *
+ * 这样 DSH 侧解析围栏的代码**不用改**，直接就能认出工具调用。
  */
 export function buildScrapeScript(): string {
   return `(function () {
   try {
     /**
-     * 候选选择器（从最精确到最宽泛）。
+     * 回复容器候选（从最精确到最宽泛）。
      *
-     * ⚠️ DeepSeek 的 class 名是构建期生成的哈希（如 \`_4f9bf79\`），
-     * **不能依赖具体类名**。所以这里用**结构性 + 语义性**特征：
-     *   - data-* 属性（如果有）
-     *   - markdown 容器（回复正文是 markdown 渲染的）
-     *   - 最后手段：所有 div 里文本最长的那个
+     * ⚠️ DeepSeek 的 class 是构建期哈希（如 _4f9bf79），**不能依赖类名**，
+     * 所以用语义属性 + markdown 容器这类结构性特征。
      */
     var CANDIDATES = [
       '[data-message-author-role="assistant"]',
       '[data-role="assistant"]',
-      '[class*="assistant"]',
       '.ds-markdown',
-      '[class*="markdown"]'
+      '[class*="markdown"]',
+      '[class*="assistant"]'
     ];
+
+    /** 反引号用 charCode 拼，避免模板字符串里出现裸反引号。 */
+    var BT = String.fromCharCode(96);
+    var FENCE = BT + BT + BT;
 
     function visible(el) {
       if (!el) return false;
@@ -852,38 +859,99 @@ export function buildScrapeScript(): string {
       } catch (e) { return false; }
     }
 
-    /** 取元素的可见文本（排除按钮/输入框等交互元素的文字）。 */
-    function textOf(el) {
+    /** 该节点是「界面元素」而不是「回复内容」吗。 */
+    function isChrome(el) {
+      var tag = el.tagName;
+      if (tag === 'BUTTON' || tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SVG' ||
+          tag === 'PATH' || tag === 'SELECT' || tag === 'OPTION') return true;
       try {
-        var clone = el.cloneNode(true);
-        var junk = clone.querySelectorAll('button, textarea, input, svg, [role="button"], [contenteditable="true"]');
-        for (var i = 0; i < junk.length; i++) {
-          if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-        }
-        return String(clone.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim();
-      } catch (e) { return ''; }
+        if (el.getAttribute('role') === 'button') return true;
+        if (el.getAttribute('contenteditable') === 'true') return true;
+        if (el.getAttribute('aria-hidden') === 'true') return true;
+      } catch (e) {}
+      return false;
     }
 
-    var best = '';
-    for (var c = 0; c < CANDIDATES.length; c++) {
-      var list;
-      try { list = document.querySelectorAll(CANDIDATES[c]); } catch (e) { continue; }
-      /** 从**后往前**找 —— 最后一条才是本轮回复。 */
-      for (var i = list.length - 1; i >= 0; i--) {
-        if (!visible(list[i])) continue;
-        var t = textOf(list[i]);
-        /**
-         * 太短的多半是标题/占位，不是回复。
-         * 取第一个够长的就停 —— 不要把所有候选拼起来（那会混入历史消息）。
-         */
-        if (t.length >= 8) { best = t; break; }
+    /** 递归渲染成 markdown，重点是**保留代码块围栏**（工具调用靠它）。 */
+    function render(node) {
+      if (!node) return '';
+      if (node.nodeType === 3) return node.nodeValue || '';
+      if (node.nodeType !== 1) return '';
+      if (isChrome(node)) return '';
+
+      var tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'br') return '\\n';
+
+      /** 代码块 —— 最关键的一支。 */
+      if (tag === 'pre') {
+        var codeEl = node.querySelector('code');
+        var raw = ((codeEl || node).textContent || '').replace(/\\n+$/, '');
+        var lang = '';
+        try {
+          var m = /language-([\\w+-]+)/.exec(codeEl ? String(codeEl.className || '') : '');
+          if (m) lang = m[1];
+        } catch (e) {}
+        return '\\n\\n' + FENCE + lang + '\\n' + raw + '\\n' + FENCE + '\\n\\n';
       }
-      if (best !== '') break;
+      if (tag === 'code') return BT + (node.textContent || '') + BT;
+
+      var BLOCK = { p: 2, div: 1, li: 1, tr: 1, h1: 2, h2: 2, h3: 2, h4: 2, h5: 2, h6: 2,
+        blockquote: 2, table: 2, ul: 1, ol: 1, hr: 2 };
+      var isBlock = Object.prototype.hasOwnProperty.call(BLOCK, tag);
+
+      var out = tag === 'li' ? '- ' : '';
+      var kids = node.childNodes || [];
+      for (var i = 0; i < kids.length; i++) out += render(kids[i]);
+
+      if (isBlock) {
+        out = out.replace(/[ \\t]+$/, '');
+        out += BLOCK[tag] >= 2 ? '\\n\\n' : '\\n';
+      }
+      return out;
     }
 
-    return JSON.stringify({ ok: best !== '', text: best, url: location.href });
+    function tidy(s) {
+      return String(s || '').replace(/\\n{3,}/g, '\\n\\n').replace(/^[\\s\\n]+|[\\s\\n]+$/g, '');
+    }
+
+    var list = [];
+    var usedSelector = '';
+    for (var c = 0; c < CANDIDATES.length; c++) {
+      var found;
+      try { found = document.querySelectorAll(CANDIDATES[c]); } catch (e) { continue; }
+      var picked = [];
+      for (var i = 0; i < found.length; i++) {
+        if (!visible(found[i])) continue;
+        var t = tidy(render(found[i]));
+        /** 太短的多半是标题/占位。 */
+        if (t.length >= 8) picked.push(t);
+      }
+      if (picked.length > 0) { list = picked; usedSelector = CANDIDATES[c]; break; }
+    }
+
+    /** 最后手段：页面上最长的可见 div。 */
+    if (list.length === 0) {
+      var all = document.querySelectorAll('div');
+      var best = '';
+      for (var k = 0; k < all.length; k++) {
+        if (!visible(all[k])) continue;
+        var txt = tidy(render(all[k]));
+        if (txt.length > best.length) best = txt;
+      }
+      if (best.length >= 8) { list = [best]; usedSelector = 'longest-div'; }
+    }
+
+    return JSON.stringify({
+      ok: list.length > 0,
+      /** 全部候选；**最后一条**是最新一轮的回复。 */
+      all: list,
+      last: list.length > 0 ? list[list.length - 1] : '',
+      selector: usedSelector,
+      count: list.length,
+      url: location.href
+    });
   } catch (e) {
-    return JSON.stringify({ ok: false, text: '', error: String(e && e.message) });
+    return JSON.stringify({ ok: false, last: '', all: [], error: String(e && e.message) });
   }
 })();`
 }

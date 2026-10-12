@@ -56,7 +56,13 @@ export interface SendHints {
   completionPath?: string
 }
 
-export function buildSendScript(text: string, delayMs: number, hints?: SendHints): string {
+/**
+ * ## 填充输入框（**短调用，快速返回**）
+ *
+ * 与 `buildTriggerScript` 配合使用，中间由客户端控制随机延迟。
+ * 拆分理由见 `buildTriggerScript` 的说明。
+ */
+export function buildFillScript(text: string, hints?: SendHints): string {
   const inputSelectors = hints?.inputSelectors ?? [
     'textarea[placeholder*="给 DeepSeek"]',
     'textarea[placeholder*="DeepSeek"]',
@@ -65,23 +71,10 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     'div[contenteditable="true"]',
     '[role="textbox"]',
   ]
-  const sendSelectors = hints?.sendSelectors ?? [
-    'button[type="submit"]',
-    'button[aria-label*="send" i]',
-    'button[aria-label*="发送"]',
-    '[role="button"][aria-label*="发送"]',
-    '[data-testid*="send" i]',
-  ]
 
   return `(function () {
   var TEXT = ${JSON.stringify(text)};
-  var DELAY = ${String(delayMs)};
   var INPUT_SELECTORS = ${JSON.stringify(inputSelectors)};
-  var SEND_SELECTORS = ${JSON.stringify(sendSelectors)};
-  var SIGNATURES = ${JSON.stringify(hints?.signatures ?? [])};
-  var VETOES = ${JSON.stringify(hints?.vetoes ?? [])};
-
-  // ---------- 通用工具 ----------
 
   function visible(el) {
     if (!el) return false;
@@ -99,7 +92,189 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     try {
       if (el.disabled === true) return true;
       if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
-      if (el.classList && el.classList.contains('disabled')) return true;
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  /** 只读的输入框填不进去 —— 及早排除。 */
+  function readOnly(el) {
+    try {
+      if (el.readOnly === true) return true;
+      if (el.getAttribute && el.getAttribute('aria-readonly') === 'true') return true;
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  /** 把 CRLF 折成 LF（textarea 的 value 会做这个规范化，见 toLf 的说明）。 */
+  function toLf(s) {
+    return String(s).replace(/\\r\\n?/g, '\\n').replace(/\\n\\r/g, '\\n');
+  }
+
+  function readInput(el) {
+    try {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value || '';
+      return el.innerText || el.textContent || '';
+    } catch (e) { return ''; }
+  }
+
+  /** 填入。判据是「非空」而不是「逐字节全等」—— 见原 setText 的说明。 */
+  function setText(el, value) {
+    el.focus();
+    value = toLf(value);
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      var desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(el, value);
+      else el.value = value;
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+      try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: false, inputType: 'insertText', data: value }));
+      } catch (e) {}
+      return readInput(el) === '' ? { ok: false, how: 'native-setter-noop' } : { ok: true, how: 'native-setter' };
+    }
+    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
+      /**
+       * contenteditable：**cuckoo 的做法**（chat-input.ts:59-81）——
+       * 先 selectAll + delete 清空，再**分段 paste**（每段 <=6000 字符）。
+       *
+       * 为什么分段：一次性塞很长的文本会被某些站点识别成附件粘贴。
+       * 这里保持 cuckoo 的阈值与做法。
+       */
+      el.focus();
+      try {
+        document.execCommand('selectAll', false, undefined);
+        document.execCommand('delete', false, undefined);
+      } catch (e) {}
+      try {
+        var CHUNK = 6000;
+        for (var i = 0; i < value.length; i += CHUNK) {
+          var dt = new DataTransfer();
+          dt.setData('text/plain', value.slice(i, i + CHUNK));
+          el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
+        }
+        if (readInput(el).trim().length > 0) return { ok: true, how: 'paste-event' };
+      } catch (e) {}
+      try {
+        if (document.execCommand('insertText', false, value)) return { ok: true, how: 'execCommand-insertText' };
+      } catch (e) {}
+      el.textContent = value;
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+      return readInput(el).trim() === '' ? { ok: false, how: 'textContent-noop' } : { ok: true, how: 'textContent-fallback' };
+    }
+    return { ok: false, how: 'unsupported-element' };
+  }
+
+  try {
+    /** 收集候选（依次试，见原实现的说明）。 */
+    var cands = [];
+    var seen = [];
+    for (var i = 0; i < INPUT_SELECTORS.length; i++) {
+      var list;
+      try { list = document.querySelectorAll(INPUT_SELECTORS[i]); } catch (e) { continue; }
+      for (var j = 0; j < list.length; j++) {
+        var el = list[j];
+        if (!visible(el) || disabled(el) || readOnly(el)) continue;
+        var dup = false;
+        for (var k = 0; k < seen.length; k++) if (seen[k] === el) { dup = true; break; }
+        if (dup) continue;
+        seen.push(el);
+        cands.push({ el: el, how: INPUT_SELECTORS[i] });
+      }
+    }
+
+    if (cands.length === 0) {
+      return JSON.stringify({
+        ok: false, stage: 'no-input',
+        message: '找不到可见的输入框（页面结构可能已变，或还停在登录页）',
+        diag: {
+          url: location.href,
+          textareas: document.querySelectorAll('textarea').length,
+          editables: document.querySelectorAll('[contenteditable="true"]').length
+        }
+      });
+    }
+
+    var tried = [];
+    for (var c = 0; c < cands.length; c++) {
+      var attempt = setText(cands[c].el, TEXT);
+      tried.push({ how: cands[c].how, tag: cands[c].el.tagName, result: attempt.how });
+      if (!attempt.ok) continue;
+      if (readInput(cands[c].el).trim().length === 0) {
+        tried[tried.length - 1].result += '+empty-after-fill';
+        continue;
+      }
+      /** 记下填充用的选择器 —— 触发阶段要用同一个元素。 */
+      window.__dshWebinFilledSelector = cands[c].how;
+      return JSON.stringify({
+        ok: true, stage: 'filled',
+        how: attempt.how, selector: cands[c].how,
+        chars: TEXT.length, url: location.href
+      });
+    }
+
+    return JSON.stringify({
+      ok: false, stage: 'fill-failed',
+      message: '试了 ' + tried.length + ' 个候选输入框都没写进去',
+      tried: tried, url: location.href
+    });
+  } catch (e) {
+    return JSON.stringify({ ok: false, stage: 'fill-error', message: String(e && e.message) });
+  }
+})();`
+}
+
+/**
+ * ## 触发发送（**短调用，立刻返回**）
+ *
+ * 只做「点发送按钮」或「合成 Enter」，**不做任何等待与验证** ——
+ * 这与 cuckoo 的 `triggerSend` 一致（chat-input.ts:453-501）：
+ *
+ *     provider.findSendButton() → btn.click()  // 或
+ *     input.dispatchEvent(KeyboardEvent('keydown/keypress/keyup'))
+ *
+ * 验证交给客户端后续的**短轮询**（读 hook 的请求计数）。
+ * 这样单次调用的存活时间只有几十毫秒，导航不可能把它拖死。
+ *
+ * @param hints - 平台声明（发送按钮选择器、加分/否决特征）
+ */
+export function buildTriggerScript(hints?: SendHints): string {
+  const inputSelectors = hints?.inputSelectors ?? [
+    'textarea[placeholder*="DeepSeek"]',
+    'textarea',
+    'div[contenteditable="true"]',
+    '[role="textbox"]',
+  ]
+  const sendSelectors = hints?.sendSelectors ?? [
+    'button[type="submit"]',
+    'button[aria-label*="send" i]',
+    'button[aria-label*="发送"]',
+    '[role="button"][aria-label*="发送"]',
+    '[data-testid*="send" i]',
+  ]
+
+  return `(function () {
+  var INPUT_SELECTORS = ${JSON.stringify(inputSelectors)};
+  var SEND_SELECTORS = ${JSON.stringify(sendSelectors)};
+  var SIGNATURES = ${JSON.stringify(hints?.signatures ?? [])};
+  var VETOES = ${JSON.stringify(hints?.vetoes ?? [])};
+
+  function visible(el) {
+    if (!el) return false;
+    try {
+      if (el.offsetWidth > 0 && el.offsetHeight > 0) return true;
+      var r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return true;
+      var s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    } catch (e) { return false; }
+  }
+
+  function disabled(el) {
+    if (!el) return true;
+    try {
+      if (el.disabled === true) return true;
+      if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
     } catch (e) { /* ignore */ }
     return false;
   }
@@ -112,8 +287,6 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
         parts.push(el.getAttribute('aria-label') || '');
         parts.push(el.getAttribute('title') || '');
         parts.push(el.getAttribute('data-testid') || '');
-        parts.push(el.getAttribute('data-action') || '');
-        parts.push(el.getAttribute('data-type') || '');
         parts.push(el.getAttribute('type') || '');
       }
       if (el.className && typeof el.className === 'string') parts.push(el.className);
@@ -123,183 +296,27 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     return parts.join(' ').toLowerCase();
   }
 
-  function describe(el) {
-    if (!el) return null;
-    var out = { tag: el.tagName };
-    try {
-      out.role = el.getAttribute('role') || null;
-      out.aria = el.getAttribute('aria-label') || null;
-      out.title = el.getAttribute('title') || null;
-      out.testid = el.getAttribute('data-testid') || null;
-      out.type = el.getAttribute('type') || null;
-      out.cls = (typeof el.className === 'string' ? el.className : '').slice(0, 80);
-      var r = el.getBoundingClientRect();
-      out.rect = [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
-      out.text = (el.textContent || '').trim().slice(0, 30);
-      out.disabled = disabled(el);
-      out.visible = visible(el);
-    } catch (e) { /* ignore */ }
-    return out;
-  }
-
-  // ---------- 输入框 ----------
-
-  /**
-   * 找可用的输入框 —— 返回**候选列表**（按选择器优先级）。
-   *
-   * ## 为什么返回列表而不是第一个
-   *
-   * 之前只返回第一个命中的元素，一旦它填不进去（隐藏的镜像 textarea、
-   * 只读的 role=textbox…）整轮就报 fill-failed 放弃。
-   * 现在调用方可以**依次试**到能填进去的那个为止。
-   */
-  function findInputs() {
-    var out = [];
-    var seen = [];
-    for (var i = 0; i < INPUT_SELECTORS.length; i++) {
-      var list;
-      try { list = document.querySelectorAll(INPUT_SELECTORS[i]); } catch (e) { continue; }
-      for (var j = 0; j < list.length; j++) {
-        var el = list[j];
-        if (!visible(el) || disabled(el) || readOnly(el)) continue;
-        var dup = false;
-        for (var k = 0; k < seen.length; k++) if (seen[k] === el) { dup = true; break; }
-        if (dup) continue;
-        seen.push(el);
-        out.push({ el: el, how: INPUT_SELECTORS[i] });
-      }
-    }
-    return out;
-  }
-
-  /** 只读的输入框填不进去 —— 及早排除，别浪费一次尝试。 */
-  function readOnly(el) {
-    try {
-      if (el.readOnly === true) return true;
-      if (el.getAttribute && el.getAttribute('aria-readonly') === 'true') return true;
-      if (el.isContentEditable === false && el.getAttribute('contenteditable') === 'false') return true;
-    } catch (e) { /* ignore */ }
-    return false;
-  }
-
-  function findInput() {
-    var list = findInputs();
-    return list.length > 0 ? list[0] : null;
-  }
-
-  // ---------- 发送目标 ----------
-
-  /** 收集候选发送控件（不限 <button>，含 div[role=button]）。 */
-  function collectCandidates(input) {
-    var out = [];
-    var seen = [];
-    function push(el, how, weight) {
-      if (!el || !visible(el) || disabled(el)) return;
-      for (var i = 0; i < seen.length; i++) if (seen[i] === el) return;
-      seen.push(el);
-      var score = weight + scoreByLabel(el) + scoreBySiteSignature(el) + scoreByGeometry(el, input);
-      out.push({ el: el, how: how, score: score });
-    }
-
-    // 1) 平台声明的语义选择器（来自 Provider.sendSelectors）
-    var semantic = SEND_SELECTORS;
-    for (var i = 0; i < semantic.length; i++) {
-      var list;
-      try { list = document.querySelectorAll(semantic[i]); } catch (e) { continue; }
-      for (var j = 0; j < list.length; j++) push(list[j], semantic[i], 100);
-    }
-
-    // 2) 输入框附近的发送控件：从输入框往上找，逐层扩大范围
-    var box = input;
-    for (var k = 0; k < 6 && box; k++) {
-      box = box.parentElement;
-      if (!box) break;
-      var near;
-      try {
-        near = box.querySelectorAll('button, [role="button"], [role="submit"], a[href="#"], div[tabindex]');
-      } catch (e) { break; }
-      for (var m = 0; m < near.length; m++) push(near[m], 'near-input(L' + (k + 1) + ')', 40 - k * 5);
-      // 找到第一个同时含输入框和候选按钮的容器就够了
-      if (out.length > 0 && k >= 2) break;
-    }
-
-    // 3) 兜底：所有含 svg 的可点元素（DeepSeek 的箭头按钮就是这种）
-    var svgHosts;
-    try { svgHosts = document.querySelectorAll('button:has(svg), [role="button"]:has(svg), div:has(> svg)'); } catch (e) { svgHosts = []; }
-    for (var n = 0; n < svgHosts.length; n++) push(svgHosts[n], 'svg-host', 10);
-
-    out.sort(function (a, b) { return b.score - a.score; });
-    return out;
-  }
-
   function scoreByLabel(el) {
     var L = labelOf(el);
-    if (!L) return 0;
-    if (/send|发送|submit|提交/.test(L)) return 50;
-    if (/stop|停止|中断/.test(L)) return -80;   // 生成中的"停止"按钮绝不能点
-    if (/attach|上传|附件|file|image|图片|deep|think|search|联网|语音|mic/.test(L)) return -60;
-    return 0;
-  }
-
-  /**
-   * 站点特征评分。
-   *
-   * **这是实测出来的，不是猜的**：用真 Chrome 加载 chat.deepseek.com、
-   * 注入登录态后 dump 真实 DOM（scripts/probe-send.mjs）得到的事实：
-   *
-   *   - 发送键：div[role=button].ds-button.ds-button--primary.ds-button--filled.ds-button--circle
-   *     —— **不是 button 元素，没有 aria-label，没有文字**（纯图标）
-   *   - 紧邻它左边有个同样尺寸的图标键：
-   *     .ds-button--iconLabelPrimary.ds-button--icon.ds-button--capsule
-   *     —— 那是附件键，点错会弹文件选择框
-   *   - 输入框下方两个开关：.ds-toggle-button（「深度思考」「智能搜索」）
-   *     —— 点了会改发送语义，绝不能误点
-   *
-   * 只用「几何位置 + 邻近度」评分时，发送键 32 分、附件键 31 分 —— **只差 1 分**，
-   * DOM 稍一变动就会点错。所以必须把这些 class 特征显式编码进评分。
-   *
-   * 这些规则是**加分项而非唯一路径**：命中不了还有几何/语义兜底，
-   * 页面大改时最坏退化成"找不到发送键"，不会误点开关。
-   */
-  function scoreBySiteSignature(el) {
-    var cls = '';
-    try { cls = (typeof el.className === 'string' ? el.className : '') + ' ' + labelOf(el); } catch (e) { return 0; }
     var s = 0;
-
-    // 平台声明的加分特征（SIGNATURES = [[正则源, 加分], ...]）
+    if (/send|发送|提交|submit/.test(L)) s += 100;
     for (var i = 0; i < SIGNATURES.length; i++) {
-      var src = SIGNATURES[i][0];
-      var add = SIGNATURES[i][1];
-      try {
-        if (new RegExp(src).test(cls)) s += add;
-      } catch (e) { /* 校验阶段已排除非法正则 */ }
+      try { if (new RegExp(SIGNATURES[i][0]).test(L)) s += SIGNATURES[i][1]; } catch (e) {}
     }
-
-    // 平台声明的否决特征（VETOES = [正则源, ...]）—— 命中即重罚
     for (var j = 0; j < VETOES.length; j++) {
-      try {
-        if (new RegExp(VETOES[j]).test(cls)) s -= 120;
-      } catch (e) { /* ignore */ }
+      try { if (new RegExp(VETOES[j]).test(L)) s -= 120; } catch (e) {}
     }
-
-    // 输入框本体/镜像不是按钮（通用规则，与平台无关）
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') s -= 200;
-
     return s;
   }
 
-  /** 发送控件通常在输入框的右侧或右下方。 */
   function scoreByGeometry(el, input) {
     try {
       var a = input.getBoundingClientRect();
       var b = el.getBoundingClientRect();
       var score = 0;
-      // 垂直方向与输入框有重叠，或紧贴其下沿（DeepSeek 的发送键在输入框下方右侧）
       if (b.top < a.bottom && b.bottom > a.top) score += 20;
       else if (b.top >= a.bottom - 4 && b.top < a.bottom + 80) score += 15;
-      // 在输入框右半部分
       if (b.left >= a.left + a.width * 0.5) score += 15;
-      // 离输入框越近越好（用右下角距离，贴合"发送键在右下"的布局）
       var dx = Math.abs(b.left - (a.right - b.width));
       var dy = Math.abs(b.top - a.bottom);
       score -= Math.min(30, (dx + dy) / 40);
@@ -307,95 +324,17 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     } catch (e) { return 0; }
   }
 
-  // ---------- 填入 ----------
-
-  /**
-   * 把 CRLF / CR 归一化成 LF。
-   *
-   * ⚠️ **这不是可选的清理，是写入成功判定的前提**。
-   *
-   * HTML 规范要求 textarea 的 value 把 CR+LF 归一化成单个 LF。
-   * 所以拿原始值去全等比较**必然失败**（Windows 上工具输出全是 CRLF）——
-   * 用户实测报的就是 native-setter-noop，而且只在跑过工具之后复发。
-   *
-   * 网页版自己也是按 LF 处理的，归一化不丢信息。
-   */
-  function toLf(s) {
-    return String(s).replace(/\\r\\n?/g, '\\n').replace(/\\n\\r/g, '\\n');
-  }
-
-  function setText(el, value) {
-    el.focus();
-    value = toLf(value);
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      // React 受控组件：必须走原型链上的原生 setter，直接 el.value = x 不触发 onChange
-      var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      var desc = Object.getOwnPropertyDescriptor(proto, 'value');
-      if (desc && desc.set) desc.set.call(el, value);
-      else el.value = value;
-
-      // 事件**先发**（不管后面比较结果如何，页面都得知道值变了）
-      try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
-      try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
-      try {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: false, inputType: 'insertText', data: value }));
-      } catch (e) {}
-
-      /**
-       * ⚠️ 判据是「**非空**」而不是「逐字节全等」。
-       *
-       * 之前是全等比较，于是浏览器任何规范化（textarea 把 CR+LF 折成 LF、
-       * 去尾随换行…）都会被当成「写入失败」，整轮直接放弃 ——
-       * 用户实测的 native-setter-noop 就是这么来的。
-       *
-       * 值非空 = 真的写进去了。内容若有差异，如实报告 mismatch
-       * 但不阻断（下游还有 readInput() 复核）。
-       */
-      var got = toLf(el.value || '');
-      if (got === '') return { ok: false, how: 'native-setter-noop' };
-      return got === value
-        ? { ok: true, how: 'native-setter' }
-        : { ok: true, how: 'native-setter', mismatch: true };
+  /** 找输入框（触发阶段只需要它做几何参照 + Enter 目标）。 */
+  function findInput() {
+    for (var i = 0; i < INPUT_SELECTORS.length; i++) {
+      var list;
+      try { list = document.querySelectorAll(INPUT_SELECTORS[i]); } catch (e) { continue; }
+      for (var j = 0; j < list.length; j++) {
+        if (visible(list[j]) && !disabled(list[j])) return list[j];
+      }
     }
-    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
-      // contenteditable：优先 paste（cuckoo 的做法，长文本最快且不触发附件识别）
-      try {
-        var sel = window.getSelection();
-        if (sel) {
-          var range = document.createRange();
-          range.selectNodeContents(el);
-          sel.removeAllRanges();
-          sel.addRange(range);
-          document.execCommand('selectAll', false, undefined);
-          document.execCommand('delete', false, undefined);
-        }
-      } catch (e) {}
-      try {
-        var dt = new DataTransfer();
-        dt.setData('text/plain', value);
-        el.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: dt }));
-        if ((el.innerText || el.textContent || '').trim().length > 0) {
-          return { ok: true, how: 'paste-event' };
-        }
-      } catch (e) {}
-      try {
-        if (document.execCommand('insertText', false, value)) return { ok: true, how: 'execCommand-insertText' };
-      } catch (e) {}
-      el.textContent = value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      return { ok: true, how: 'textContent-fallback' };
-    }
-    return { ok: false, how: 'unsupported-element' };
+    return null;
   }
-
-  function readInput(el) {
-    try {
-      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value || '';
-      return el.innerText || el.textContent || '';
-    } catch (e) { return ''; }
-  }
-
-  // ---------- 发送 ----------
 
   function pressEnter(el) {
     var opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, isComposing: false };
@@ -404,238 +343,104 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     try { el.dispatchEvent(new KeyboardEvent('keyup', opts)); } catch (e) {}
   }
 
-  /**
-   * 生成中会出现的"停止"控件。
-   *
-   * ⚠️ **在 DeepSeek 上这个信号基本无效**：实测（scripts/probe-send.mjs）
-   * 发送键和停止键都是**纯图标 div**，既没有 aria-label 也没有文字，
-   * 靠文本匹配找不到。保留它只为兼容其它站点形态，**不作为主判据**。
-   */
-  function hasStopControl() {
-    var all;
-    try { all = document.querySelectorAll('button, [role="button"]'); } catch (e) { return false; }
-    for (var i = 0; i < all.length; i++) {
-      if (!visible(all[i])) continue;
-      var L = labelOf(all[i]);
-      var t = (all[i].textContent || '').trim();
-      if (/stop|停止|中断/.test(L) || t === '停止生成' || t === '停止') return true;
-    }
-    return false;
-  }
-
-  /**
-   * hook 是否观察到一次新的 completion 请求。
-   *
-   * **这才是 DeepSeek 上最可靠的发送成功信号**：发送生效 ⇔ 页面自己发出了
-   * POST /api/v0/chat/completion。hook（hook.ts）会把这个事实记在
-   * window.__dshWebinHookInstalled___requests 上。
-   *
-   * 为什么不能只看"输入框被清空"：发送失败时页面可能也清空输入框
-   * （React 受控状态被重置），那样会误判成功、然后永远等不到回复。
-   */
-  function sentRequestCount() {
-    try {
-      var n = window.__dshWebinHookInstalled___requests;
-      return typeof n === 'number' ? n : 0;
-    } catch (e) { return 0; }
-  }
-
-  /** 发送成功的多信号校验。 */
-  function verify(input, before) {
-    var signals = {};
-    signals.cleared = readInput(input).trim() === '';
-    signals.stopControl = hasStopControl();
-    signals.requestSent = sentRequestCount() > before.requests;
-    var nowLen = 0;
-    try { nowLen = document.body.innerText.length; } catch (e) {}
-    signals.grew = nowLen > before.bodyLen + 20;
+  try {
+    var input = findInput();
+    if (!input) return JSON.stringify({ ok: false, message: '触发时找不到输入框', url: location.href });
 
     /**
-     * 判据优先级（**实测校准过两次**）：
-     *
-     *   1. **requestSent** —— 页面真的发出了 completion 请求。**唯一铁证**。
-     *   2. stopControl —— 出现停止生成控件（生成中）。可靠，但 DeepSeek 上是纯图标，测不到。
-     *   3. cleared —— 输入框被清空。**单独不可信**。
-     *   4. grew —— 页面正文变长。**最弱**，从不单独采信。
-     *
-     * ## ⚠️ 为什么 「cleared」 单独成立**不算成功**（用户实测推翻了我原来的判断）
-     *
-     * 用户症状：状态栏显示「已发送 · 收到 0 条」，网页版那边**根本没有新消息**，
-     * DSH 一直等到超时。
-     *
-     * 原来我写的是 「requestSent || stopControl || cleared」，注释里还自我安慰
-     * 「有些站点确实清空即发送」。但那是个**陷阱**：
-     *
-     *   - 页面把输入框清空了（React 受控状态被重置、或清空逻辑跑了）
-     *   - 但 「requestSent」 是 false —— 说明 **hook 没看到请求**
-     *
-     * 而 hook 没看到请求只有两种可能：
-     *   a) 请求真的没发（发送被拦）
-     *   b) 请求发了，但**路径没匹配上**（「samePath」 是精确比较）
-     *
-     * 两种情况**都不该报成功** —— (a) 是失败，(b) 意味着 hook 抓不到回复，
-     * 报成功只会让 DSH 白等到超时。所以：**cleared 只能作为辅助信号**，
-     * 必须配合 requestSent 或 stopControl 才认。
-     *
-     * 宁可**明确报失败**（用户立刻看到「发送未确认」，可以重试），
-     * 也不要报一个假成功让链路僵死 10 分钟。
+     * 收集候选发送控件：平台声明的语义选择器优先，再用「输入框附近」
+     * 与特征加分兜底（DeepSeek 的发送键是纯图标 div，没有文字）。
      */
-    signals.ok = signals.requestSent || signals.stopControl;
-    return signals;
-  }
+    var out = [];
+    var seen = [];
+    function push(el, how, weight) {
+      if (!el || !visible(el) || disabled(el)) return;
+      for (var s = 0; s < seen.length; s++) if (seen[s] === el) return;
+      seen.push(el);
+      /* 输入框本体不算发送键。 */
+      if (el === input) return;
+      out.push({ el: el, how: how, score: weight + scoreByLabel(el) + scoreByGeometry(el, input) });
+    }
 
-  return new Promise(function (resolve) {
-  /**
-   * 输入框可能还没渲染出来（SPA 首次加载 / 刚 reload 完）。
-   *
-   * 早期实现只查一次，查不到就报 no-input 直接失败 —— 而宿主此时
-   * 已经把任务消费掉了，用户看到的就是「处理失败」。
-   * 这里改成**轮询等一会儿**（最多 12 秒），页面渲染完自然就能命中。
-   */
-  function waitForInput(timeoutMs) {
-    var deadline = Date.now() + timeoutMs;
-    return new Promise(function (resolve) {
-      (function attempt() {
-        var found = findInputs();
-        if (found.length > 0) { resolve(found); return; }
-        if (Date.now() > deadline) { resolve(null); return; }
-        setTimeout(attempt, 300);
-      })();
+    for (var i = 0; i < SEND_SELECTORS.length; i++) {
+      var list;
+      try { list = document.querySelectorAll(SEND_SELECTORS[i]); } catch (e) { continue; }
+      for (var j = 0; j < list.length; j++) push(list[j], SEND_SELECTORS[i], 100);
+    }
+
+    /** 输入框附近（往上 6 层）的按钮。 */
+    var box = input;
+    for (var k = 0; k < 6 && box; k++) {
+      box = box.parentElement;
+      if (!box) break;
+      var near;
+      try { near = box.querySelectorAll('button, [role="button"], [role="submit"], div[tabindex]'); } catch (e) { break; }
+      for (var m = 0; m < near.length; m++) push(near[m], 'near-input(L' + (k + 1) + ')', 40 - k * 5);
+    }
+
+    out.sort(function (a, b) { return b.score - a.score; });
+    var best = out.length > 0 ? out[0] : null;
+
+    /**
+     * ⚠️ 与 cuckoo 一致的策略：**先点按钮，找不到才用 Enter**。
+     *
+     * 但这里**立刻返回**，不验证结果 —— 验证是客户端后面的事。
+     * 所以两个都做（双保险）：点按钮 **并且** 补一次 Enter？
+     * 不行 —— 那可能发出两条。所以只选一个：
+     *   - 有够分（>0）的候选按钮 ⇒ 点它
+     *   - 否则 ⇒ 合成 Enter
+     */
+    if (best && best.score > 0) {
+      try { best.el.click(); } catch (e) {}
+      return JSON.stringify({
+        ok: true, how: best.how, method: 'click',
+        score: Math.round(best.score),
+        candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
+        url: location.href
+      });
+    }
+
+    pressEnter(input);
+    return JSON.stringify({
+      ok: true, how: 'enter', method: 'enter',
+      candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
+      url: location.href
     });
+  } catch (e) {
+    return JSON.stringify({ ok: false, message: String(e && e.message) });
   }
-
-  waitForInput(12000).then(function (foundList) {
-    if (!foundList || foundList.length === 0) {
-      resolve(JSON.stringify({
-        ok: false, stage: 'no-input',
-        message: '等了 12 秒仍找不到可见的输入框（页面结构可能已变，或还停在登录页）',
-        diag: {
-          textareas: document.querySelectorAll('textarea').length,
-          editables: document.querySelectorAll('[contenteditable="true"]').length,
-          url: location.href,
-          bodyHead: (document.body ? document.body.innerText : '').slice(0, 120)
-        }
-      }));
-      return;
-    }
-
-    /**
-     * **依次试每个候选**，直到有一个真的把文本吃进去。
-     *
-     * 之前只用第一个候选，它填不进去就整轮报 fill-failed 放弃 ——
-     * 而页面上往往还有别的可用输入框（隐藏的镜像、只读的 role=textbox…）。
-     * 现在失败的候选会留下记录，全部失败时一并报告，便于定位。
-     */
-    var filled = null;
-    var input = null;
-    var tried = [];
-    for (var fi = 0; fi < foundList.length; fi++) {
-      var cand = foundList[fi];
-      var attempt = setText(cand.el, TEXT);
-      tried.push({ how: cand.how, tag: cand.el.tagName, result: attempt.how });
-      if (!attempt.ok) continue;
-      /** 复核真的非空 —— 合成事件可能被页面拒绝。 */
-      if (readInput(cand.el).trim().length === 0) {
-        tried[tried.length - 1].result += '+empty-after-fill';
-        continue;
-      }
-      filled = attempt;
-      input = cand.el;
-      break;
-    }
-
-    if (filled === null || input === null) {
-      resolve(JSON.stringify({
-        ok: false, stage: 'fill-failed',
-        message: '试了 ' + tried.length + ' 个候选输入框都没写进去（页面结构可能已变）',
-        tried: tried,
-        diag: {
-          textareas: document.querySelectorAll('textarea').length,
-          editables: document.querySelectorAll('[contenteditable="true"]').length,
-          url: location.href
-        }
-      }));
-      return;
-    }
-
-    /**
-     * 复核：上面循环里已经查过一次非空，这里再查一次是为了覆盖
-     * 「填进去之后又被页面清掉」的情况（受控组件会回滚非法输入）。
-     */
-    var after = readInput(input);
-    if (after.trim().length === 0) {
-      resolve(JSON.stringify({
-        ok: false, stage: 'fill-failed',
-        message: '填入后输入框仍为空（页面拒绝了合成输入事件）',
-        how: filled.how, tried: tried
-      }));
-      return;
-    }
-
-    // 等 React 把状态吃进去再发
-    setTimeout(function () {
-      var before = { bodyLen: 0, requests: sentRequestCount() };
-      try { before.bodyLen = document.body.innerText.length; } catch (e) {}
-
-      var cands = collectCandidates(input);
-      var target = cands.length > 0 ? cands[0] : null;
-      var usedEnter = false;
-
-      if (target && target.score > 0) {
-        try { target.el.click(); } catch (e) {}
-      } else {
-        pressEnter(input);
-        usedEnter = true;
-      }
-
-      // 最多观察 2.4s：先按 150ms 密集看，再看两次兜底
-      var waited = 0;
-      var timer = setInterval(function () {
-        waited += 150;
-        var sig = verify(input, before);
-        var lastChance = waited >= 2400;
-        if (!sig.ok && !lastChance) return;
-        clearInterval(timer);
-
-        // 还没成功：换另一条路再试一次（点按钮 ↔ 合成 Enter）
-        if (!sig.ok) {
-          if (usedEnter && target) { try { target.el.click(); } catch (e) {} }
-          else pressEnter(input);
-          setTimeout(function () {
-            var sig2 = verify(input, before);
-            resolve(JSON.stringify({
-              ok: sig2.ok,
-              stage: sig2.ok ? 'sent' : 'send-failed',
-              message: sig2.ok
-                ? (usedEnter ? '合成 Enter 生效（二次尝试）' : '点击发送按钮生效（二次尝试）')
-                : '发送按钮与合成 Enter 都没生效',
-              how: usedEnter ? 'enter(retry)' : ((target && target.how) || 'none'),
-              signals: sig2,
-              inputHow: found.how,
-              fillHow: filled.how,
-              candidates: cands.slice(0, 6).map(function (c) { return { how: c.how, score: Math.round(c.score), el: describe(c.el) }; }),
-              diag: { url: location.href, textareas: document.querySelectorAll('textarea').length }
-            }));
-          }, 1200);
-          return;
-        }
-
-        resolve(JSON.stringify({
-          ok: true,
-          stage: 'sent',
-          message: usedEnter ? '已合成 Enter' : ('已点击发送控件 ' + target.how),
-          how: usedEnter ? 'enter' : target.how,
-          signals: sig,
-          inputHow: found.how,
-          fillHow: filled.how
-        }));
-      }, 150);
-    }, DELAY);
-    });
-  });
 })();`
 }
 
+/**
+ * ## 检查发送是否被确认（**短调用，立刻返回**）
+ *
+ * 读 hook 记的 completion 请求计数 —— 这是 DeepSeek 上**唯一可靠的
+ * 发送成功信号**（页面真的发出了 POST /api/v0/chat/completion）。
+ *
+ * 与 cuckoo 的差异：cuckoo 根本不验证（点完就算发了）。
+ * 我们多这一层是因为 DSH 需要知道「这一轮到底有没有发出去」，
+ * 否则失败时会白等到超时。但**验证本身也是短调用** —— 只读一个数字。
+ */
+export function buildVerifyScript(): string {
+  return `(function () {
+  try {
+    var n = window.__dshWebinHookInstalled___requests;
+    var input = document.querySelector('textarea, div[contenteditable="true"]');
+    var text = '';
+    try {
+      text = input ? (input.tagName === 'TEXTAREA' ? (input.value || '') : (input.innerText || input.textContent || '')) : '';
+    } catch (e) {}
+    return JSON.stringify({
+      requests: typeof n === 'number' ? n : 0,
+      inputEmpty: text.trim() === '',
+      url: location.href
+    });
+  } catch (e) {
+    return JSON.stringify({ requests: 0, inputEmpty: false, error: String(e && e.message) });
+  }
+})();`
+}
 /**
  * 诊断脚本：把页面上的输入框与候选发送控件列出来。
  *

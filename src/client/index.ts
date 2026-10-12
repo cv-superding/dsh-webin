@@ -19,7 +19,15 @@ import {
   loadSnapshot,
   saveSnapshot,
 } from './hook'
-import { buildDiagnoseScript, buildSendScript, buildStopScript, buildThinkingScript, pickSendDelay } from './chat'
+import {
+  buildDiagnoseScript,
+  buildFillScript,
+  buildStopScript,
+  buildThinkingScript,
+  buildTriggerScript,
+  buildVerifyScript,
+  pickSendDelay,
+} from './chat'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
 import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
 import { snapshotLooksLoggedIn } from '../shared/auth-snapshot'
@@ -1201,6 +1209,18 @@ export function LdwHost(): unknown {
    * 主路径（hook 的 `done` 事件）拿到结果时也会清掉它。
    */
   const scrapedRef = useRef<string | undefined>(undefined)
+  /**
+   * 派发任务时页面上已有几条 assistant 回复。
+   *
+   * ## 为什么需要基线（而不是「内容变了」）
+   *
+   * 判断「本轮回复来了」最可靠的判据是**条数变多** ——
+   * 只有真的新增一条 assistant 消息才会增长。
+   * 而「内容变了」会被页面重渲染、动画、光标闪烁误触发。
+   *
+   * 所以发送前记下条数，之后等它超过这个基线。
+   */
+  const baselineRef = useRef<number>(0)
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
@@ -1347,58 +1367,89 @@ export function LdwHost(): unknown {
       busy = true
       try {
         /**
-         * ## 等待期间的两道救援（用户实测推动）
+         * ## ⭐ 轮询页面 DOM 读回复（**主路径**）
          *
-         * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，
-         * 但就是不输出」。
+         * 用户的要求：「我想要的插件很简单，就是把网页版的内容，回显到 dsh
+         * 的对话窗口中」。
          *
-         * 正常的 `done` 事件是主路径。但它可能永远不来：
-         * 页面导航了、hook 被清了、请求在 hook 装好之前就发出去了。
-         * 那时 `pendingJobRef` 一直挂着 ⇒ 发送循环**永久罢工**。
+         * ## 为什么改成主路径
          *
-         * 所以等久了就**主动去页面上把回复捞回来**（两层）：
+         * 原来把「hook 抓 SSE」当主路径，DOM 只当 20 秒后的兜底。
+         * 但抓 SSE 有个**解决不了的时序问题**（读 cuckoo 才看明白）：
          *
-         *   1. **20 秒后**：先试 DOM 兜底 —— 回复如果已经渲染出来，
-         *      直接读走交结果。这是「明明有回复却报超时」的解药。
-         *   2. **5 分钟后**：真的一点都没有，才放弃并交错误
-         *      （adapter 那边是 10 分钟，这里更早，避免两边同时超时）。
+         *   cuckoo 能在页面脚本执行**之前**注入 hook，靠的是 **preload**
+         *   （`src/bridge/entry.ts:52-68`）。而 DSH 的 webview 门禁
+         *   （`lib/main.js:9690`）把 preferences 清空后只设固定几项，
+         *   **`preload` 不在里面** —— 所以我只能等 `dom-ready`，
+         *   那时页面脚本早已跑完、请求早已发出 ⇒ 永远「收到 0 条」。
          *
-         * ⚠️ 只捞一次（`scrapedRef` 记着），避免每轮都去读 DOM
-         * 把同一段内容重复交回去。
+         * 而 DOM 里的内容**什么时候读都读得到**，不依赖任何注入时机。
+         * cuckoo 自己也把 DOM 抓取当默认模式
+         * （`src/providers/types.ts:72`：「默认 false = DOM 抓取」）。
+         *
+         * ## 怎么判断「本轮回复已经来了」
+         *
+         * 判据是**回复条数变多**（而不是「最后一条变了」）——
+         * 后者在页面重渲染时会误判。所以派发任务前记下基线条数，
+         * 之后等它增长。
+         *
+         * 同时要求「页面不再生成」（输入框可用）—— 否则会读到半截回复。
+         * 这里不主动检测停止按钮（DeepSeek 上是纯图标，测不到），
+         * 改用**连续两次读到相同内容**作为「已稳定」的判据。
          */
         const waitedMs = Date.now() - pendingSinceRef.current
 
-        if (hasPending && waitedMs > 20_000 && scrapedRef.current !== pendingJobRef.current) {
+        if (hasPending && waitedMs > 3_000) {
           const jobId = pendingJobRef.current!
           const scrapedRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
           if (scrapedRaw !== EXEC_TIMEOUT) {
             try {
-              const scraped = JSON.parse(String(scrapedRaw)) as { ok?: boolean; text?: string }
-              if (scraped.ok === true && typeof scraped.text === 'string' && scraped.text.length >= 8) {
+              const scraped = JSON.parse(String(scrapedRaw)) as {
+                ok?: boolean
+                last?: string
+                count?: number
+                selector?: string
+              }
+              const last = typeof scraped.last === 'string' ? scraped.last : ''
+              const count = typeof scraped.count === 'number' ? scraped.count : 0
+
+              /**
+               * 本轮回复来了吗？—— **条数比基线多**，且内容够长。
+               *
+               * 用条数而不是「内容变了」：页面重渲染/动画也会改内容，
+               * 但只有真的新增一条 assistant 消息才会让条数增长。
+               */
+              if (scraped.ok === true && count > baselineRef.current && last.length >= 8) {
                 /**
-                 * 捞到了 —— 但**不能无条件采信**。
+                 * 稳定性判据：连续两次读到**相同**内容才算生成完。
                  *
-                 * DOM 里可能有上一条回复（会话历史）。所以要确认
-                 * 「这轮确实轮到新内容了」：等页面不再生成（输入框可用 /
-                 * 没有停止按钮）再读，读到的才是本轮结果。
+                 * 避免把「正在流式输出中的半截回复」交回 DSH。
+                 * 用「上次读到的内容」比较，不同就再等一轮。
                  */
-                scrapedRef.current = jobId
-                console.warn('[dsh-webin] hook 未捕获回复，用 DOM 兜底捞到', {
-                  chars: scraped.text.length,
+                if (scrapedRef.current !== last) {
+                  scrapedRef.current = last
+                  /** 内容还在变 ⇒ 让下一轮（1.5s 后）再读一次比对。 */
+                  return
+                }
+
+                console.log('[dsh-webin] DOM 读到本轮回复', {
+                  chars: last.length,
+                  count,
+                  selector: scraped.selector,
                 })
                 pendingJobRef.current = undefined
                 pendingSinceRef.current = 0
+                scrapedRef.current = undefined
                 const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
                 const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
                 await fetch(`/dsh-webin/api/job/${jobId}/result`, {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({
-                    text: scraped.text,
+                    text: last,
                     think: '',
                     status: 'finished',
-                    /** 标明来源，便于排查（主路径不该出现这个）。 */
-                    via: 'dom-scrape',
+                    via: 'dom',
                     ...(chatUrl === '' ? {} : { chatUrl }),
                   }),
                 }).catch(() => undefined)
@@ -1577,6 +1628,24 @@ export function LdwHost(): unknown {
         pendingJobRef.current = id
         pendingSinceRef.current = Date.now()
         scrapedRef.current = undefined
+        /**
+         * 记下「派发前页面上已有几条回复」—— 之后靠条数增长判断本轮回复到位。
+         *
+         * 取不到就保守用 0（那样只要页面上有一条够长的内容就会被当成本轮结果）。
+         * 代价是可能把上一条回复误交回去，所以**发送前**读更稳 ——
+         * 此刻页面还没生成新内容。
+         */
+        {
+          const baseRaw = await execJs<string>(el, buildScrapeScript(), 8_000)
+          if (baseRaw !== EXEC_TIMEOUT) {
+            try {
+              const base = JSON.parse(String(baseRaw)) as { count?: number }
+              baselineRef.current = typeof base.count === 'number' ? base.count : 0
+            } catch {
+              baselineRef.current = 0
+            }
+          }
+        }
         // 记录派发时刻：只接受此刻之后产生的 done 事件
         sentAtRef.current = Date.now()
         console.log('[dsh-webin] 领到任务', { id, chars: prompt.length })
@@ -1657,70 +1726,108 @@ export function LdwHost(): unknown {
         /**
          * ## ⚠️ 用 `execJs` 而不是裸 `executeJavaScript`
          *
-         * 这一句是整个链路最容易死锁的地方：页面一导航，挂着的 Promise
-         * 静默死掉，`await` 永不返回 ⇒ `busy` 永远为 true ⇒ 循环冻死。
+         * ## 三步拆开（照 cuckoo 的架构重构）
          *
-         * 发送脚本自带 12s 等输入框 + 2.4s 观察，所以正常最多 ~15s；
-         * 给 45s 的宽限（含长文本填充 / 慢机器），超时即认输并交错误结果。
+         * 原来把「填充 → 等 2.4s 验证 → 可能再等 1.2s 重试」全塞进**一次**
+         * `executeJavaScript`。那是跨进程调用，页面一导航就整体死掉
+         * （不 resolve / 不 reject）⇒ 宿主永远等 ⇒「一直深度求索中」。
+         *
+         * cuckoo 的做法（`src/overlay/chat-input.ts:137-171`）：
+         *
+         *     const timer = setTimeout(() => triggerSend(input), sendDelay)
+         *     return true        // ← 立刻返回，不等任何确认
+         *
+         * 即：**页面脚本只做瞬时动作，等待在客户端**。
+         * 所以这里拆成三个短调用，中间由客户端控制节奏：
+         *
+         *     ① buildFillScript    —— 只填（几百毫秒）
+         *     ② setTimeout          —— 随机延迟（防封号，客户端侧）
+         *     ③ buildTriggerScript —— 只点发送（几十毫秒）
+         *
+         * 这样导航最多毁掉一次短调用，不会让整条链路僵死。
          */
-        const raw = await execJs<string>(
+        const fillRaw = await execJs<string>(
           el,
-          buildSendScript(prompt, pickSendDelay(cfgNow.sendDelayMinMs, cfgNow.sendDelayMaxMs), sendHintsFor(provider)),
-          45_000,
+          buildFillScript(prompt, sendHintsFor(provider)),
+          30_000,
         )
 
-        if (raw === EXEC_TIMEOUT) {
-          /**
-           * 超时 = 我们不知道页面到底发了没有。**当成失败交回去** ——
-           * 让用户看到明确原因并重试，好过让 DSH 空等到超时
-           * （那正是用户报的「一直深度求索中」）。
-           */
+        if (fillRaw === EXEC_TIMEOUT) {
           pendingJobRef.current = undefined
           pendingSinceRef.current = 0
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              error:
-                '发送脚本执行超时（页面可能在发送途中导航，导致脚本上下文被销毁）。' +
-                '请确认网页版里的状态后重试。',
-            }),
+            body: JSON.stringify({ error: '填充输入框超时（页面可能正在导航），请重试。' }),
           }).catch(() => undefined)
           return
         }
 
-        const outcome = JSON.parse(String(raw)) as {
+        const fill = JSON.parse(String(fillRaw)) as {
           ok: boolean
-          stage: string
-          message: string
+          stage?: string
+          message?: string
           how?: string
-          signals?: Record<string, unknown>
-          candidates?: unknown
-          diag?: unknown
+          chars?: number
         }
-        console.log('[dsh-webin] 发送结果', outcome)
+        console.log('[dsh-webin] 填充结果', fill)
 
-        if (!outcome.ok) {
+        if (!fill.ok) {
           pendingJobRef.current = undefined
           pendingSinceRef.current = 0
           await fetch(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              error: `${outcome.stage}: ${outcome.message}`,
-            }),
+            body: JSON.stringify({ error: `${fill.stage ?? 'fill-failed'}: ${fill.message ?? '填充失败'}` }),
           }).catch(() => undefined)
           return
         }
 
-        // 发送确认：把「真正发出的时刻」作为时间基准，之后的 done 才算本次回复
+        /**
+         * ② 随机延迟 —— **在客户端侧**（cuckoo 同款）。
+         *
+         * 页面脚本不该长时间持有 Promise：延迟放这里，
+         * 单次 executeJavaScript 的存活时间就只有几十毫秒。
+         */
+        const gapMs = pickSendDelay(cfgNow.sendDelayMinMs, cfgNow.sendDelayMaxMs)
+        console.log(`[dsh-webin] 已填入 ${fill.chars ?? prompt.length} 字符，${gapMs}ms 后触发发送`)
+        await new Promise((r) => setTimeout(r, gapMs))
+
+        /** ③ 触发发送（只点一下，立刻返回，不验证）。 */
+        const trigRaw = await execJs<string>(el, buildTriggerScript(sendHintsFor(provider)), 15_000)
+        const trig =
+          trigRaw === EXEC_TIMEOUT
+            ? { ok: false, how: 'timeout', message: '触发发送超时（页面可能正在导航）' }
+            : (JSON.parse(String(trigRaw)) as { ok: boolean; how?: string; method?: string; message?: string })
+        console.log('[dsh-webin] 触发结果', trig)
+
+        if (trig.ok !== true) {
+          pendingJobRef.current = undefined
+          pendingSinceRef.current = 0
+          await fetch(`/dsh-webin/api/job/${id}/result`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ error: `send-failed: ${trig.message ?? '触发发送失败'}` }),
+          }).catch(() => undefined)
+          return
+        }
+
+        /**
+         * 发送已触发。
+         *
+         * `sentAtRef` 是「只接受此刻之后的 done 事件」的时间基准；
+         * 同时它也被下面的 **DOM 轮询**当成「什么时候可以开始读回复」的起点。
+         *
+         * ⚠️ 这里**不代表发送一定成功** —— cuckoo 也不验证（点完就算发了）。
+         * 我们靠后续的 DOM 轮询来确认「页面上真的出现了新回复」。
+         */
         sentAtRef.current = Date.now()
         setLastSend({
           at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-          how: String(outcome.how ?? '?'),
+          how: `${trig.method ?? trig.how ?? '?'}（已触发，等待页面回复）`,
           chars: prompt.length,
         })
-        // 成功则不交结果 —— 等 hook 的 done 事件
+        // 不在这里交结果 —— 由 DOM 轮询 / hook 事件来交。
       } catch (error) {
         /**
          * ## ⚠️ 异常**必须交回 host**，否则 DSH 永远等

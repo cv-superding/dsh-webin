@@ -101,13 +101,8 @@ console.log('[1] host 侧：序列化时归一化换行')
 
 console.log('\n[2] ⭐ 客户端：生成的脚本里正则必须正确（防误改）')
 {
-  const buildSendScript = new Function(
-    'SEND_DELAY_MIN_MS',
-    'SEND_DELAY_MAX_MS',
-    `${extractFn('buildSendScript')}; return buildSendScript;`,
-  )(2000, 4000)
-
-  const script = buildSendScript('hello', 100, { inputSelectors: ['textarea'], sendSelectors: [] })
+  const buildFillScript = new Function(`${extractFn('buildFillScript')}; return buildFillScript;`)()
+  const script = buildFillScript('hello', { inputSelectors: ['textarea'], sendSelectors: [] })
 
   /**
    * ⚠️⚠️ 这条是本文件**最重要**的断言。
@@ -132,40 +127,37 @@ console.log('\n[2] ⭐ 客户端：生成的脚本里正则必须正确（防误
 
 console.log('\n[3] ⭐ 写入判定不再要求逐字节全等')
 {
-  const script = new Function(
-    'SEND_DELAY_MIN_MS',
-    'SEND_DELAY_MAX_MS',
-    `${extractFn('buildSendScript')}; return buildSendScript;`,
-  )(2000, 4000)('hi', 100, { inputSelectors: ['textarea'], sendSelectors: [] })
+  const script = new Function(`${extractFn('buildFillScript')}; return buildFillScript;`)()(
+    'hi',
+    { inputSelectors: ['textarea'], sendSelectors: [] },
+  )
 
   /**
    * 判据应该是「非空」而不是「全等」。
    * 全等会让浏览器的任何规范化都变成假失败。
    */
-  check('⭐ 判据是非空（got === ""）', /if \(got === ''\) return \{ ok: false/.test(script), true)
+  check('⭐ 判据是非空（readInput 为空才算失败）', /readInput\(el\) === '' \? \{ ok: false/.test(script), true)
   check('⭐ 不再用 el.value !== value 全等比较', /el\.value !== value/.test(script), false)
-  check('内容差异报告为 mismatch（不阻断）', /mismatch: true/.test(script), true)
   /**
-   * 事件必须先发 —— 否则 React 收不到变更。
+   * 事件必须先派发 —— 否则 React 收不到变更。
    *
-   * ⚠️ 断言用**位置比较**而不是正则窗口：两处相隔约 600 字符，
+   * ⚠️ 断言用**位置比较**而不是正则窗口：两处相隔数百字符，
    * 写死 `[\s\S]{0,400}` 这种窗口会因为中间插入注释而假失败（踩过）。
    */
   const iEvent = script.indexOf("dispatchEvent(new Event('input'")
-  const iCompare = script.indexOf('var got = toLf')
-  check('⭐ 先派发 input 事件再比较', iEvent > 0 && iCompare > 0 && iEvent < iCompare, true)
+  const iRead = script.indexOf('return readInput(el) ===')
+  check('⭐ 先派发 input 事件再判定', iEvent > 0 && iRead > 0 && iEvent < iRead, true)
 }
 
 console.log('\n[4] ⭐ 依次试所有候选输入框（不再只用第一个）')
 {
-  const script = new Function(
-    'SEND_DELAY_MIN_MS',
-    'SEND_DELAY_MAX_MS',
-    `${extractFn('buildSendScript')}; return buildSendScript;`,
-  )(2000, 4000)('hi', 100, { inputSelectors: ['textarea'], sendSelectors: [] })
+  const script = new Function(`${extractFn('buildFillScript')}; return buildFillScript;`)()(
+    'hi',
+    { inputSelectors: ['textarea'], sendSelectors: [] },
+  )
 
-  check('⭐ 有 findInputs（返回列表）', /function findInputs\(/.test(script), true)
-  check('⭐ 遍历候选', /for \(var fi = 0; fi < foundList\.length; fi\+\+\)/.test(script), true)
+  check('⭐ 收集候选（cands）', /var cands = \[\]/.test(script), true)
+  check('⭐ 遍历候选', /for \(var c = 0; c < cands\.length; c\+\+\)/.test(script), true)
   check('⭐ 记录每个候选的结果', /tried\.push\(/.test(script), true)
   check('⭐ 全部失败时报出试了几个', /试了 ' \+ tried\.length/.test(script), true)
   /** 只读的输入框填不进去 —— 提前排除，别浪费尝试。 */
@@ -175,11 +167,10 @@ console.log('\n[4] ⭐ 依次试所有候选输入框（不再只用第一个）
 
 console.log('\n[5] 失败信息要能定位（不能只说「失败了」）')
 {
-  const script = new Function(
-    'SEND_DELAY_MIN_MS',
-    'SEND_DELAY_MAX_MS',
-    `${extractFn('buildSendScript')}; return buildSendScript;`,
-  )(2000, 4000)('hi', 100, { inputSelectors: ['textarea'], sendSelectors: [] })
+  const script = new Function(`${extractFn('buildFillScript')}; return buildFillScript;`)()(
+    'hi',
+    { inputSelectors: ['textarea'], sendSelectors: [] },
+  )
 
   check('fill-failed 带 tried 明细', /stage: 'fill-failed',[\s\S]{0,200}tried: tried/.test(script), true)
   check('带 textareas 计数', /textareas: document\.querySelectorAll\('textarea'\)\.length/.test(script), true)

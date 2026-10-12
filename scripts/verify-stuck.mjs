@@ -78,15 +78,26 @@ function extractFn(source, name) {
   return ''
 }
 
-/** 把 buildSendScript 生成的脚本取出来（注入假常量）。 */
-function sendScript() {
-  const src = extractFn(bundle, 'buildSendScript')
-  const fn = new Function(
-    'SEND_DELAY_MIN_MS',
-    'SEND_DELAY_MAX_MS',
-    `${src}; return buildSendScript;`,
-  )(2000, 4000)
-  return fn('hi', 100, { inputSelectors: ['textarea'], sendSelectors: [], completionPath: '/api/v0/chat/completion' })
+/**
+ * 取填充脚本（注入假常量）。
+ *
+ * ⚠️ 发送已按 cuckoo 的架构拆成两段：`buildFillScript` + `buildTriggerScript`。
+ * 原来那个把「填充 → 等 2.4s → 验证 → 重试」全塞进一次跨进程调用的
+ * `buildSendScript` **已经删掉** —— 它正是「一直深度求索中」的根源。
+ */
+function fillScript() {
+  const src = extractFn(bundle, 'buildFillScript')
+  if (src === '') throw new Error('产物里找不到 buildFillScript —— 先跑 npm run build')
+  const fn = new Function(`${src}; return buildFillScript;`)()
+  return fn('hi', { inputSelectors: ['textarea'], sendSelectors: [] })
+}
+
+/** 取触发脚本。 */
+function triggerScript() {
+  const src = extractFn(bundle, 'buildTriggerScript')
+  if (src === '') throw new Error('产物里找不到 buildTriggerScript —— 先跑 npm run build')
+  const fn = new Function(`${src}; return buildTriggerScript;`)()
+  return fn({ inputSelectors: ['textarea'], sendSelectors: [] })
 }
 
 console.log('[1] ⭐ 异常必须交回结果（不能只打日志）')
@@ -110,29 +121,55 @@ console.log('[1] ⭐ 异常必须交回结果（不能只打日志）')
   check('⭐ 先取值再清空（顺序正确）', iTake > 0 && iClear > iTake, true)
 }
 
-console.log('\n[2] ⭐ cleared 单独成立**不算**发送成功')
+console.log('\n[2] ⭐ 发送拆成两个短调用（照 cuckoo 的架构）')
 {
-  const script = sendScript()
-  /** 判据只能是 requestSent 或 stopControl。 */
-  check('⭐ ok = requestSent || stopControl', /signals\.ok = signals\.requestSent \|\| signals\.stopControl;/.test(script), true)
-  check('⭐ cleared 不再单独判成功', /signals\.ok = [^;]*\|\| signals\.cleared/.test(script), false)
-  /** cleared 仍然要采集（作为辅助信号报告）。 */
-  check('cleared 仍被采集', /signals\.cleared = readInput\(input\)\.trim\(\) === ''/.test(script), true)
-  /** grew 从来不单独采信。 */
-  check('grew 仍不单独采信', /signals\.ok = [^;]*signals\.grew/.test(script), false)
+  /**
+   * 这是本轮最核心的修正：原来「填充 + 等待 + 验证 + 重试」全在一次
+   * `executeJavaScript` 里 —— 那是跨进程调用，页面一导航就整体死掉
+   * （不 resolve、不 reject）⇒ 宿主永远等 ⇒「一直深度求索中」。
+   *
+   * cuckoo 的做法（`src/overlay/chat-input.ts:137-171`）：
+   * 页面脚本只做瞬时动作，**等待放在客户端**。
+   */
+  check('⭐ 填充脚本已拆分', /buildFillScript/.test(clientSrc), true)
+  check('⭐ 触发脚本已拆分', /buildTriggerScript/.test(clientSrc), true)
+  /**
+   * 断言「真的不再用它」—— 用**调用形态**判断，而不是文本出现
+   * （注释里提到它做历史说明是允许的）。
+   */
+  check('⭐ 不再调用大脚本', /await execJs<[^>]*>\(\s*el,\s*buildSendScript\(/.test(clientSrc), false)
+  check('⭐ 源码里没有该函数定义', /export function buildSendScript/.test(chatSrc), false)
+  /** 随机延迟必须在**客户端**侧。 */
+  check('⭐ 延迟在客户端 setTimeout', /await new Promise\(\(r\) => setTimeout\(r, gapMs\)\)/.test(clientSrc), true)
+  check('用 pickSendDelay 取延迟', /pickSendDelay\(cfgNow\.sendDelayMinMs/.test(clientSrc), true)
+  /** 填充与触发是两次独立调用。 */
+  const iFill = clientSrc.indexOf('buildFillScript(prompt')
+  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider))')
+  check('⭐ 两次独立调用（填充在前）', iFill > 0 && iTrig > iFill, true)
 }
 
-console.log('\n[3] ⭐ 发送未确认时**明确报失败**（不报假成功）')
+console.log('\n[3] ⭐ 填充判据是非空（不因浏览器规范化误报失败）')
 {
-  const script = sendScript()
-  /**
-   * 两步都没成功 ⇒ 必须是 `send-failed`，
-   * 且错误信息要说明「连请求都没看到」这个事实。
-   */
-  check('⭐ 未确认时报 send-failed', /stage: sig2\.ok \? 'sent' : 'send-failed'/.test(script), true)
-  check('失败信息说明两条路都试了', /发送按钮与合成 Enter 都没生效/.test(script), true)
-  /** 诊断信息要带 signal 明细 —— 否则用户没法判断卡在哪。 */
-  check('⭐ 带 signals 明细', /signals: sig2/.test(script), true)
+  const script = fillScript()
+  check('⭐ 判据用 readInput 非空', /readInput\(el\) === ''/.test(script), true)
+  check('⭐ 没有逐字节全等比较', /el\.value !== value/.test(script), false)
+  /** CRLF 归一化（textarea 会做这个规范化）。 */
+  check('⭐ 有 toLf 归一化', /function toLf\(/.test(script), true)
+  check('⭐ contenteditable 分段 paste（cuckoo 同款）', /CHUNK = 6000/.test(script), true)
+  check('⭐ 依次试多个候选输入框', /for \(var c = 0; c < cands\.length; c\+\+\)/.test(script), true)
+  check('失败时列出试过哪些', /tried: tried/.test(script), true)
+}
+
+console.log('\n[3b] ⭐ 触发脚本：有候选就点，否则合成 Enter')
+{
+  const script = triggerScript()
+  /** 与 cuckoo 的 fallbackSend 一致（chat-input.ts:482-501）。 */
+  check('⭐ 有候选按钮就点', /best\.el\.click\(\)/.test(script), true)
+  check('⭐ 没有就合成 Enter', /pressEnter\(input\)/.test(script), true)
+  check('⭐ 两者只选一个（不会发两条）', /if \(best && best\.score > 0\) \{[\s\S]{0,400}return/.test(script), true)
+  /** 输入框附近也纳入候选（DeepSeek 的发送键是纯图标 div）。 */
+  check('⭐ 附近按钮纳入候选', /near-input\(L/.test(script), true)
+  check('点了哪个要报告（便于排查）', /candidates: out\.slice\(0, 5\)/.test(script), true)
 }
 
 console.log('\n[4] ⭐ 记录页面实际发过的 POST 路径（端点改版时定位用）')
@@ -160,7 +197,6 @@ console.log('\n[4] ⭐ 记录页面实际发过的 POST 路径（端点改版时
 
 console.log('\n[5] ⭐ 诊断脚本暴露「期望 vs 实际」路径对比')
 {
-  const script = sendScript()
   /** 诊断脚本（另一个函数）里要带这三样。 */
   const diagSrc = extractFn(bundle, 'buildDiagnoseScript')
   const diag = new Function(
@@ -205,18 +241,25 @@ console.log('\n[7] 已知陷阱仍在防线上：模板内不能有反引号')
   }
 }
 
-console.log('\n[8] ⭐ 两道救援都在（20s DOM 兜底 + 5min 放弃）')
+console.log('\n[8] ⭐ DOM 读回复是**主路径**（不再是 20s 兜底）')
 {
   /**
-   * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，
-   * 但就是不输出」。所以等 20 秒后先去页面 DOM 把回复捞回来 ——
-   * 用户看得见的东西，我们就该拿得到。
+   * 用户的要求：「我想要的插件很简单，就是把网页版的内容，回显到 dsh 的对话窗口中」。
+   *
+   * 所以 DOM 抓取从「20 秒兜底」提升为**主路径** ——
+   * 内容渲染在页面上，什么时候读都读得到，不依赖 hook 注入时机
+   * （而 DSH 门禁删掉了 preload，我们无法像 cuckoo 那样提前注入）。
    */
-  check('⭐ 有 20s DOM 兜底门槛', /waitedMs > 20_000/.test(clientSrc), true)
-  check('⭐ 有 5 分钟放弃门槛', /waitedMs > 300_000/.test(clientSrc), true)
-  check('⭐ 兜底调用 buildScrapeScript', /buildScrapeScript\(\)/.test(clientSrc), true)
-  check('⭐ 兜底结果标了 via', /via: 'dom-scrape'/.test(clientSrc), true)
-  check('⭐ 只捞一次（scrapedRef 防重复）', /scrapedRef\.current !== pendingJobRef\.current/.test(clientSrc), true)
+  check('⭐ 3 秒后就开始读（不等 20s）', /waitedMs > 3_000/.test(clientSrc), true)
+  check('⭐ 不再有 20s 兜底门槛', /waitedMs > 20_000/.test(clientSrc), false)
+  check('⭐ 主路径调用 buildScrapeScript', /buildScrapeScript\(\)/.test(clientSrc), true)
+  check('⭐ 结果标了 via=dom', /via: 'dom'/.test(clientSrc), true)
+  /** 条数增长 = 本轮回复到位（比「内容变了」可靠）。 */
+  check('⭐ 按条数增长判断', /count > baselineRef\.current/.test(clientSrc), true)
+  /** 连续两次读到相同内容才算生成完（避免交半截回复）。 */
+  check('⭐ 内容稳定才交（防半截）', /scrapedRef\.current !== last/.test(clientSrc), true)
+  check('⭐ 派发前记基线', /baselineRef\.current = typeof base\.count === 'number'/.test(clientSrc), true)
+  check('仍有 5 分钟放弃', /waitedMs > 300_000/.test(clientSrc), true)
   check('放弃时也交错误给 host', /等待网页回复超时（客户端 5 分钟兜底）/.test(clientSrc), true)
 }
 
@@ -234,16 +277,21 @@ console.log('\n[10] ⭐ executeJavaScript 全部有超时护栏（防静默死�
 {
   check('⭐ 有 execJs 包装', /function execJs</.test(clientSrc), true)
   check('⭐ 有 EXEC_TIMEOUT sentinel', /export const EXEC_TIMEOUT/.test(clientSrc), true)
-  check('⭐ 发送脚本走 execJs', /const raw = await execJs<string>\(/.test(clientSrc), true)
-  check('⭐ 发送超时当失败交回', /发送脚本执行超时/.test(clientSrc), true)
+  /** 三个短调用都走 execJs（各自独立超时）。 */
+  check('⭐ 填充走 execJs', /execJs<string>\(\s*el,\s*buildFillScript\(/.test(clientSrc), true)
+  check('⭐ 触发走 execJs', /execJs<string>\(el, buildTriggerScript\(/.test(clientSrc), true)
+  check('⭐ 抓 DOM 走 execJs', /execJs<string>\(el, buildScrapeScript\(\), 12_000\)/.test(clientSrc), true)
   check('⭐ drain 走 execJs', /execJs<string>\(el, buildDrainScript\(\), 10_000\)/.test(clientSrc), true)
   check('⭐ 思考脚本走 execJs', /execJs<string>\(el, buildThinkingScript/.test(clientSrc), true)
+  /** 超时都有明确的错误交回。 */
+  check('⭐ 填充超时当失败交回', /填充输入框超时/.test(clientSrc), true)
+  check('⭐ 触发超时当失败交回', /触发发送超时/.test(clientSrc), true)
   /** 超时不能 reject —— 抛出去会被外层 catch 吞掉，反而变静默。 */
   check('⭐ 超时走 resolve 而不是 reject', /resolve\(EXEC_TIMEOUT\)/.test(clientSrc), true)
   check('不用 reject 传超时', /reject\(EXEC_TIMEOUT\)/.test(clientSrc), false)
 }
 
-console.log('\n[11] ⭐ DOM 兜底脚本本身（从产物里真跑一遍）')
+console.log('\n[11] ⭐ DOM 抓取脚本本身（从产物里真跑一遍）')
 {
   const scrapeSrc = extractFn(bundle, 'buildScrapeScript')
   check('产物里有 buildScrapeScript', scrapeSrc !== '', true)
@@ -252,14 +300,24 @@ console.log('\n[11] ⭐ DOM 兜底脚本本身（从产物里真跑一遍）')
   check('是自执行脚本', /^\(function \(\) \{/.test(script.trim()), true)
   /** 必须尝试多种选择器（页面类名是哈希，不能依赖具体类名）。 */
   check('⭐ 多个候选选择器', (script.match(/data-message-author-role|ds-markdown|class\*="markdown"/g) ?? []).length >= 2, true)
-  check('⭐ 从后往前找（最后一条才是本轮）', /for \(var i = list\.length - 1; i >= 0; i--\)/.test(script), true)
-  /** 剔除按钮/输入框的文字，否则回复里混进界面文字。 */
-  check('⭐ 剔除交互元素文字', /button, textarea, input, svg/.test(script), true)
-  /** 太短的不当回复。 */
+  /** 剔除界面元素（按钮/输入框/图标不是回复内容）。 */
+  check('⭐ 剔除界面元素', /function isChrome\(/.test(script), true)
+  check('⭐ 剔除的标签齐全', /BUTTON.*TEXTAREA.*INPUT.*SVG/.test(script), true)
+  /**
+   * ⭐⭐ **代码块围栏必须还原** —— 工具调用就靠它。
+   *
+   * 只取 textContent 会丢掉围栏边界，那正是用户报过的
+   * 「工具调用泄漏成正文：ldw 开头没有三反引号」。
+   */
+  check('⭐⭐ 还原代码块围栏', /FENCE/.test(script), true)
+  check('⭐ 用 charCode 拼反引号（模板里不能有裸反引号）', /String\.fromCharCode\(96\)/.test(script), true)
+  check('⭐ 取 pre > code 的内容', /tag === 'pre'/.test(script), true)
+  check('⭐ 读取语言标记', /language-\(\[/.test(script), true)
   check('⭐ 有最短长度门槛', /t\.length >= 8/.test(script), true)
-  check('返回 JSON（不是裸文本）', /return JSON\.stringify\(\{ ok: best !== ''/.test(script), true)
+  /** 返回结构：all + last + count（客户端靠 count 判断新增）。 */
+  check('⭐ 返回 all/last/count', /all: list/.test(script) && /count: list\.length/.test(script), true)
   /** 异常也不能抛（抛了会让调用方卡住）。 */
-  check('⭐ 内部 try/catch 兜底', /catch \(e\) \{\s*return JSON\.stringify\(\{ ok: false/.test(script), true)
+  check('⭐ 内部 try/catch 兜底', /catch \(e\) \{[\s\S]{0,80}return JSON\.stringify\(\{ ok: false/.test(script), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
