@@ -28,14 +28,16 @@ const MARKER = '__dshWebinHookInstalled__'
 export const EVENT_QUEUE_KEY = `${MARKER}_events`
 
 /**
- * 已观察到的 completion 请求计数在 window 上的键名。
+ * ⚠️ 已删除 `REQUEST_COUNT_KEY` 导出。
  *
- * 用途：`chat.ts` 的发送脚本靠它判断「消息是不是真的发出去了」。
- * 实测 DeepSeek 的发送键是**纯图标 div**（无 aria-label、无文字），
- * 无法用「出现停止按钮」判断，而「输入框被清空」在发送失败时也可能发生
- * （React 受控状态被重置）。**页面自己发出了 completion 请求**才是铁证。
+ * 它原本是「自证发送成功」时代的产物：客户端读
+ * `window.__dshWebinHookInstalled___requests` 来确认「页面真的发出了
+ * completion 请求」。改成三段式发送后**不再自证**（cuckoo 也不自证 ——
+ * 点完发送就算发了，成功与否交给后续的 DOM 轮询确认）。
+ *
+ * hook 内部仍然写这个计数（`${MARKER}_requests`），因为诊断脚本会直接
+ * 按字符串读它 —— 那是有用的排查信息，只是不再需要一个导出常量。
  */
-export const REQUEST_COUNT_KEY = `${MARKER}_requests`
 
 /**
  * 生成注入页面的 hook 源码。

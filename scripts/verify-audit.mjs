@@ -417,5 +417,63 @@ console.log('\n[T] ⭐ 领活不能重复领同一个任务')
   check('⭐ claimNext 按平台过滤', /platform !== undefined && job\.platform !== platform/.test(adapterSrc), true)
 }
 
+console.log('\n[U] ⭐⭐ 交付判据：内容不再增长 + 静默够久（防交半截回复）')
+{
+  /**
+   * ## 真实缺陷（审计发现）
+   *
+   * 早期只用「这次读到的 == 上次读到的」就交付。但流式输出**可能暂停**
+   * （网络抖动、服务端排队）—— 暂停期间两次读到同样的半截内容 ⇒
+   * **把半截回复交回 DSH**，用户看到回复被截断，且 DSH 认为这轮已结束。
+   *
+   * 现在两个条件都要满足：
+   *   1. 内容与上次相同（没有新增）
+   *   2. **且**距离上次**变化**已超过 `STABLE_MS`
+   *
+   * 用「上次变化时刻」而不是「上次读取时刻」——
+   * 后者会被读取频率（1.5s 一轮）影响，白等一轮。
+   */
+  check('⭐ 有 STABLE_MS 常量', /const STABLE_MS = 3_000/.test(clientSrc), true)
+  check('⭐ 有「变化时刻」ref', /scrapedChangedAtRef/.test(clientSrc), true)
+  check('⭐ 判据含静默时长', /now - scrapedChangedAtRef\.current < STABLE_MS/.test(clientSrc), true)
+  /** 内容变化时要更新「变化时刻」。 */
+  check('⭐ 内容变了就记时刻', /scrapedRef\.current = last\s*\n\s*scrapedChangedAtRef\.current = now/.test(clientSrc), true)
+  /** 领活时重置变化时刻（新任务从此刻开始算静默）。 */
+  check('⭐ 领活时重置变化时刻', /baselineTextRef\.current = typeof base\.last[\s\S]{0,200}scrapedChangedAtRef\.current = Date\.now\(\)/.test(clientSrc), true)
+  /** 统一清理要含它。 */
+  const fn = /const clearPending = \(\) => \{([\s\S]{0,500}?)\}/.exec(clientSrc)
+  check('找到 clearPending', fn !== null, true)
+  if (fn !== null) {
+    for (const f of ['pendingJobRef', 'pendingSinceRef', 'scrapedRef', 'scrapedChangedAtRef', 'baselineRef', 'baselineTextRef']) {
+      check(`⭐ clearPending 清 ${f}`, new RegExp(`${f}\\.current = `).test(fn[1]), true)
+    }
+  }
+}
+
+console.log('\n[V] ⭐ 死代码清单（不能留会误导人的东西）')
+{
+  /**
+   * `REQUEST_COUNT_KEY` 是 SSE hook 时代的产物：客户端靠它读
+   * 「页面发了几个 completion 请求」来**自证发送成功**。
+   *
+   * 改成三段式发送后不再自证（cuckoo 也不自证：点完就算发了），
+   * 所以这个常量已无使用者。
+   */
+  /**
+   * ⚠️ 断言的是「没有**声明**」而不是「没有出现」——
+   * 注释里会提到这个名字（解释它为什么被删），那是正常的文档。
+   */
+  check('⭐ 无 REQUEST_COUNT_KEY 死常量（声明）', /export const REQUEST_COUNT_KEY/.test(hookSrc), false)
+  check('⭐ 也没人 import 它', /import[^}]*REQUEST_COUNT_KEY/.test(clientSrc), false)
+  /** chat.ts 的导出必须都被用到（否则就是死代码）。 */
+  const exports = [...chatSrc.matchAll(/^export function (\w+)/gm)].map((m) => m[1])
+  const unused = exports.filter((name) => !new RegExp(`\\b${name}\\b`).test(clientSrc))
+  check('⭐ chat.ts 没有无人使用的导出', unused, [])
+  /** hook.ts 的导出同理。 */
+  const hookExports = [...hookSrc.matchAll(/^export function (\w+)/gm)].map((m) => m[1])
+  const hookUnused = hookExports.filter((name) => !new RegExp(`\\b${name}\\b`).test(clientSrc))
+  check('⭐ hook.ts 没有无人使用的导出', hookUnused, [])
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

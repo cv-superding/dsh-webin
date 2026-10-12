@@ -190,6 +190,22 @@ function element_loadURL(el: GuestElement, url: string): Promise<void> {
 export const EXEC_TIMEOUT = Symbol('dsh-webin:exec-timeout')
 
 /**
+ * 判定「回复生成完了」所需的**静默时长**（毫秒）。
+ *
+ * ## 为什么需要它（审计发现的缺陷）
+ *
+ * 早期只用「这次读到的内容 == 上次读到的」就交付。但流式输出**可能暂停**
+ * （网络抖动、服务端排队），暂停期间两次读到同样的半截内容 ⇒
+ * **把半截回复交回 DSH**，用户看到回复被截断，而且 DSH 认为这轮已结束。
+ *
+ * 加上「静默够久」这个条件后，只有内容真的不再增长才交付。
+ *
+ * 3000ms 的取值：DeepSeek 的流式增量间隔通常在几百毫秒内，
+ * 3 秒静默足以区分「暂停」和「结束」，又不会让用户等太久。
+ */
+const STABLE_MS = 3_000
+
+/**
  * ## 带超时的 `fetch`（**所有对 host 的请求都必须走这里**）
  *
  * ## 为什么（审计发现的真实风险）
@@ -1306,6 +1322,18 @@ export function LdwHost(): unknown {
    * 两个判据取「任一成立」，比只看条数稳得多。
    */
   const baselineTextRef = useRef<string>('')
+  /**
+   * 上一次 DOM 内容**发生变化**的时刻。
+   *
+   * ## 为什么记「变化时刻」而不是「上次读取时刻」
+   *
+   * 稳定性判据是「内容不再增长」。用「上次读取时刻」会被**读取频率**
+   * 影响（每 1.5s 一轮）—— 内容其实早就停了，但因为我们刚读了一次，
+   * 计时就重置，白等一轮。
+   *
+   * 记「上次变化时刻」才是真正的静默时长。
+   */
+  const scrapedChangedAtRef = useRef<number>(0)
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
@@ -1474,6 +1502,7 @@ export function LdwHost(): unknown {
         pendingJobRef.current = undefined
         pendingSinceRef.current = 0
         scrapedRef.current = undefined
+        scrapedChangedAtRef.current = 0
         baselineRef.current = 0
         baselineTextRef.current = ''
       }
@@ -1578,14 +1607,36 @@ export function LdwHost(): unknown {
               const contentChanged = last !== '' && last !== baselineTextRef.current
               if (scraped.ok === true && last.length >= 8 && (countGrew || contentChanged)) {
                 /**
-                 * 稳定性判据：连续两次读到**相同**内容才算生成完。
+                 * ## 稳定性判据：内容**不再增长**才算生成完
                  *
-                 * 避免把「正在流式输出中的半截回复」交回 DSH。
-                 * 用「上次读到的内容」比较，不同就再等一轮。
+                 * ## 为什么不能只比「与上次相同」（审计发现的缺陷）
+                 *
+                 * 早期写法是「这次读到的 == 上次读到的」就交付。但那不够：
+                 * 流式输出**可能暂停**（网络抖动、服务端排队），暂停期间
+                 * 两次读到同样的半截内容 ⇒ **把半截回复交回 DSH**。
+                 *
+                 * 用户会看到回复被截断（而且 DSH 认为这轮已经结束了）。
+                 *
+                 * ## 现在的判据（两个都要满足）
+                 *
+                 *   1. 内容与上次**相同**（没有新增）
+                 *   2. **且**距离上次变化已超过 {@link STABLE_MS}（默认 3 秒）
+                 *
+                 * 用「上次变化时刻」而不是「上次读取时刻」—— 后者会被
+                 * 读取频率影响（1.5s 一轮），前者才是真正的「静默时长」。
+                 *
+                 * 代价是最快也要等 3 秒才交付 —— 相比「交半截回复」，
+                 * 这个代价完全值得。
                  */
+                const now = Date.now()
                 if (scrapedRef.current !== last) {
+                  /** 内容变了：记录新内容 + **变化时刻**，等下一轮。 */
                   scrapedRef.current = last
-                  /** 内容还在变 ⇒ 让下一轮（1.5s 后）再读一次比对。 */
+                  scrapedChangedAtRef.current = now
+                  return
+                }
+                /** 内容没变 —— 还要确认已经静默够久。 */
+                if (now - scrapedChangedAtRef.current < STABLE_MS) {
                   return
                 }
 
@@ -1594,6 +1645,7 @@ export function LdwHost(): unknown {
                   thinkChars: think.length,
                   count,
                   判据: countGrew ? '条数增长' : '内容变化',
+                  静默ms: now - scrapedChangedAtRef.current,
                   selector: scraped.selector,
                 })
                 clearPending()
@@ -1815,9 +1867,12 @@ export function LdwHost(): unknown {
               const base = JSON.parse(String(baseRaw)) as { count?: number; last?: string }
               baselineRef.current = typeof base.count === 'number' ? base.count : 0
               baselineTextRef.current = typeof base.last === 'string' ? base.last : ''
+              /** 基线读完就重置「变化时刻」—— 新任务从此刻开始算静默。 */
+              scrapedChangedAtRef.current = Date.now()
             } catch {
               baselineRef.current = 0
               baselineTextRef.current = ''
+              scrapedChangedAtRef.current = Date.now()
             }
           }
         }
