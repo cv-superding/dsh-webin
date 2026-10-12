@@ -601,18 +601,32 @@ export async function apply(ctx: {
       }
 
       // ---- 自定义 provider 管理 ----
-      // GET /providers —— 列出自定义项与校验结果
+      // GET /providers —— 列出**全部**平台（内置 + 自定义）与校验结果
       if (method === 'GET' && pathname === `${API_PREFIX}/providers`) {
         const { items, errors } = await readCustomProviders()
         const probe = new ProviderRegistry()
         const loaded = probe.loadCustom(items)
+        /**
+         * 设置页需要「当前生效的全部平台」。内置项也列出来 ——
+         * 用户看到的是「我能用哪些平台」，而不是「我加过哪些文件」。
+         */
+        const customIds = new Set(loaded.accepted.map((p) => p.id))
         sendJson(res, 200, {
           ok: true,
           dir: providersDir(),
+          /** 生效的全部平台（内置 + 自定义，自定义覆盖同 id 内置）。 */
+          providers: registry.all(),
+          /** 哪些是用户自定义的（设置页据此决定能否删）。 */
+          customIds: [...customIds],
+          defaultProviderId: DEFAULT_PROVIDER_ID,
           accepted: loaded.accepted,
           rejected: loaded.rejected.map((r) => ({ index: r.index, reason: r.reason })),
+          /** 设置页显示的读盘错误。 */
+          errors: errors.map((e) => ({ file: e.file, reason: e.reason })),
           fileErrors: errors,
           count: items.length,
+          /** 在线客户端（登录态来源）。 */
+          clients: liveClients(),
         })
         return
       }

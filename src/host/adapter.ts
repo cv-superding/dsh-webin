@@ -609,7 +609,7 @@ export function createAdapter(deps: AdapterDeps) {
      * DSH 下发的工具清单。
      *
      * 网页版没有原生 function calling，所以走「JS 代码块协议」（抄 cuckoo）：
-     * 首轮把工具目录打进 prompt，模型输出 ```cuckoo 块，
+     * 首轮把工具目录打进 prompt，模型输出 ```ldw 块，
      * 本 adapter 解析成 `tool-call` chunk 交回 DSH。
      */
     tools?: readonly ToolSchema[]
@@ -762,7 +762,7 @@ export function createAdapter(deps: AdapterDeps) {
     /**
      * ## 解析工具调用（抄 cuckoo 的 JS 代码块协议）
      *
-     * 网页模型没有原生 function calling，所以让它把调用写成 ```cuckoo 代码块
+     * 网页模型没有原生 function calling，所以让它把调用写成 ```ldw 代码块
      * （cuckoo 的模板明确要求「多行文本用反引号模板字符串，不做任何转义」
      * —— 比 web-login 的 JSON 协议少一整类失败模式）。
      *

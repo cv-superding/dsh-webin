@@ -109,10 +109,10 @@ export function serializeMessage(msg: DshMessage): string {
       /**
        * 把历史里的工具调用**文本化**成它当时的样子。
        *
-       * 为什么要还原成 ```dsh 块而不是别的：模型在**下一轮**会看到
+       * 为什么要还原成 ```ldw 块而不是别的：模型在**下一轮**会看到
        * 「自己上次是怎么调的」，保持同一种形态能强化协议一致性。
        */
-      parts.push(['```dsh', ...calls.map((c) => `await ${c};`), '```'].join('\n'))
+      parts.push(['```ldw', ...calls.map((c) => `await ${c};`), '```'].join('\n'))
     }
   }
 

@@ -5,7 +5,7 @@
  *
  * cuckoo 的 `src/prompt/deepseek.md` 原文：
  *
- * > - 需要调用工具时，将 JavaScript 代码输出到以 ```cuckoo 开头、以 ``` 结尾的代码块中
+ * > - 需要调用工具时，将 JavaScript 代码输出到以 ```ldw 开头、以 ``` 结尾的代码块中
  * > - 多行文本一律使用反引号（`）模板字符串，直接换行，**不需要任何转义**
  * > - **不要输出 JSON 格式的工具调用，也不要对字符串做 JSON 转义**
  *
@@ -60,7 +60,7 @@ export interface ParseResult {
  * 用 `dsh` 而不是参考实现用的那个词：这是**模型要原样输出的标记**，
  * 属于本插件自己的对外协议，不该带别人的项目名。
  */
-const FENCE_LANG = 'dsh'
+const FENCE_LANG = 'ldw'
 
 /**
  * 平台信息（抄 cuckoo 的 `buildPlatformInfo()`）。
@@ -412,7 +412,7 @@ export function parseToolCalls(reply: string, tools: ToolSchema[]): ParseResult 
   let rest = reply
 
   for (;;) {
-    // 找 ```cuckoo 开围栏
+    // 找 ```ldw 开围栏
     const open = new RegExp('```[ \\t]*' + FENCE_LANG + '[ \\t]*\\r?\\n', 'i').exec(rest)
     if (open === null) {
       text += rest

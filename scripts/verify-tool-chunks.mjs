@@ -211,7 +211,7 @@ console.log('[1] 模型输出 cuckoo 代码块 → 必须吐出 tool-call chunk'
   const route = [...A.routes.values()].find((r) => r.path === '/dsh-webin/api')
   const adapter = A.adapters.get('webin-deepseek')
 
-  const reply = '我来查一下时间。\n\n```dsh\nawait pwsh({"command": "Get-Date"});\n```'
+  const reply = '我来查一下时间。\n\n```ldw\nawait pwsh({"command": "Get-Date"});\n```'
   const { chunks } = await runRound(adapter, route, {
     messages: [{ role: 'user', content: '现在几点了' }],
     tools: TOOLS,
@@ -250,7 +250,7 @@ console.log('\n[2] ⭐ 有工具调用时 finish 必须是 tool-calls（否则 D
   const { chunks } = await runRound(adapter, route, {
     messages: [{ role: 'user', content: '读文件' }],
     tools: TOOLS,
-    reply: '```dsh\nawait read({"path": "a.ts"});\n```',
+    reply: '```ldw\nawait read({"path": "a.ts"});\n```',
   })
   const finish = chunks.find((c) => c.type === 'finish')
   check('finish.reason.kind === tool-calls', finish?.reason?.kind, 'tool-calls')
@@ -283,7 +283,7 @@ console.log('\n[4] ⭐ 工具代码块不进正文（否则网页记录里会看
   const { chunks } = await runRound(adapter, route, {
     messages: [{ role: 'user', content: '读文件' }],
     tools: TOOLS,
-    reply: '让我读一下。\n\n```dsh\nawait read({"path": "a.ts"});\n```',
+    reply: '让我读一下。\n\n```ldw\nawait read({"path": "a.ts"});\n```',
   })
   const textDelta = chunks.find((c) => c.type === 'text-delta')
   check('正文保留', textDelta?.text.includes('让我读一下。'), true)
@@ -340,7 +340,7 @@ console.log('\n[6] 工具结果回灌：role:tool 消息进入下一轮增量')
     sessionId: 'toolresult-test',
     messages: [{ role: 'user', content: '现在几点了' }],
     tools: TOOLS,
-    reply: '```dsh\nawait pwsh({"command": "Get-Date"});\n```',
+    reply: '```ldw\nawait pwsh({"command": "Get-Date"});\n```',
   })
 
   // 第二轮：DSH 把工具结果作为 role:tool 消息交回来

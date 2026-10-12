@@ -73,7 +73,7 @@ pwsh / ralph / skill / str-replace-editor / subagent / todo / web / workflow / c
 
 cuckoo 的 `src/prompt/deepseek.md` 原文：
 
-> - 需要调用工具时，将 JavaScript 代码输出到以 ` ```dsh ` 开头、以 ` ``` ` 结尾的代码块中
+> - 需要调用工具时，将 JavaScript 代码输出到以 ` ```ldw ` 开头、以 ` ``` ` 结尾的代码块中
 > - **多行文本一律使用反引号（`）模板字符串，直接换行，不需要任何转义**
 > - **不要输出 JSON 格式的工具调用，也不要对字符串做 JSON 转义**
 
@@ -109,9 +109,9 @@ return descriptions.map((t, i) => {
 ### 3.1 协议：抄 cuckoo 的 JS 代码块
 
 ````
-需要调用工具时，输出一个 ```dsh 代码块，块外不要有任何文字：
+需要调用工具时，输出一个 ```ldw 代码块，块外不要有任何文字：
 
-```dsh
+```ldw
 const r = await read("src/index.ts");
 log(r);
 ```
@@ -143,7 +143,7 @@ cuckoo 对**所有**工具都是「签名 + 一句话」，没有核心/长尾�
 |---|---|
 | `text` | 原样 |
 | `reasoning` | `[thinking] …`（或省略，见下） |
-| `tool-call` | ` ```dsh\nconst r = await <name>(<args>);\nlog(r);\n``` ` |
+| `tool-call` | ` ```ldw\nconst r = await <name>(<args>);\nlog(r);\n``` ` |
 | `role:'tool'` 消息 | `【工具结果】\n<content>` |
 
 ⚠️ **reasoning 要不要发**：cuckoo 不把模型的思考回灌（它是 harness，
@@ -153,8 +153,8 @@ cuckoo 对**所有**工具都是「签名 + 一句话」，没有核心/长尾�
 
 ### 3.4 流式捕获：hold-back 扫描器
 
-模型输出 ` ```dsh ` 代码块时，**不能让它流进正文**（会显示在网页记录里）。
-必须做 hold-back：检测到 ```dsh 开头就缓冲，直到 ``` 闭合，然后：
+模型输出 ` ```ldw ` 代码块时，**不能让它流进正文**（会显示在网页记录里）。
+必须做 hold-back：检测到 ```ldw 开头就缓冲，直到 ``` 闭合，然后：
 1. 把代码块解析成 `tool-call` 块
 2. 块外文本正常流出
 
@@ -180,7 +180,7 @@ cuckoo **没有**长休机制 —— 所以本插件**也不加**（用户要求
 
 ## 五、验收标准
 
-- [ ] 模型能输出 ```dsh 块并被解析成合法 `tool-call` chunk
+- [ ] 模型能输出 ```ldw 块并被解析成合法 `tool-call` chunk
 - [ ] 代码块**不泄漏**到正文（网页记录里看不到）
 - [ ] 工具结果作为下一轮增量发出
 - [ ] 工具目录体量 < 8,000 字符（对比 web-login 的 5 万）
