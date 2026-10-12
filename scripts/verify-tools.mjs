@@ -160,6 +160,7 @@ const loadFn = (_b, _pat, nm) => {
 const buildToolSignature = loadFn(bundle, /function buildToolSignature\(/, 'buildToolSignature')
 const buildToolCatalog = loadFn(bundle, /function buildToolCatalog\(/, 'buildToolCatalog')
 const buildToolSection = loadFn(bundle, /function buildToolSection\(/, 'buildToolSection')
+const buildPlatformInfo = loadFn(bundle, /function buildPlatformInfo\(/, 'buildPlatformInfo')
 const parseToolCalls = loadFn(bundle, /function parseToolCalls\(/, 'parseToolCalls')
 const serializeMessage = loadFn(bundle, /function serializeMessage\(/, 'serializeMessage')
 const serializeMessages = loadFn(bundle, /function serializeMessages\(/, 'serializeMessages')
@@ -236,6 +237,8 @@ console.log('\n[3] 工具段体量（防封号：不能像 web-login 那样 5 �
   const section = buildToolSection(TOOLS)
   check('含协议', section.includes('工具调用协议'), true)
   check('含目录', section.includes('可用工具'), true)
+  check('含运行环境（抄 cuckoo 的 buildPlatformInfo）', section.includes('运行环境'), true)
+  check('运行环境说明命令差异', /bash|pwsh/i.test(section), true)
   // 实测：60 个工具 × 约 80 字符 ≈ 5000
   const sixtyTools = Array.from({ length: 60 }, (_, i) => ({
     name: `tool_${i}`,
@@ -245,6 +248,25 @@ console.log('\n[3] 工具段体量（防封号：不能像 web-login 那样 5 �
   const big = buildToolSection(sixtyTools)
   console.log(`       60 个工具的段长: ${big.length} 字符`)
   check('⭐ 60 个工具仍 < 8000 字符', big.length < 8000, true)
+}
+
+console.log('\n[3b] 平台信息：Windows 上必须说清 cmd/pwsh 差异（DSH 的 system 没给）')
+{
+  const win = buildPlatformInfo('win32', 'x64')
+  check('标明 Windows', win.includes('Windows'), true)
+  check('cmd.exe 语法', win.includes('cmd.exe'), true)
+  check('PowerShell 语法', win.includes('PowerShell'), true)
+  check('路径分隔符说明', win.includes('反斜杠'), true)
+
+  const mac = buildPlatformInfo('darwin', 'arm64')
+  check('macOS 用 zsh/bash', mac.includes('zsh'), true)
+  const linux = buildPlatformInfo('linux', 'x64')
+  check('Linux 用 bash', linux.includes('bash'), true)
+
+  // ⚠️ 不能重复注入 DSH 已给的东西（体量 = 封号风险）
+  const section = buildToolSection(TOOLS)
+  check('⭐ 不重复注入项目目录（DSH system 已有）', /working directory is/i.test(section), false)
+  check('⭐ 不重复注入身份（DSH system 已有）', section.includes('You are a'), false)
 }
 
 console.log('\n[4] 序列化：tool-call 块 → 文本（用实测形状）')

@@ -362,6 +362,91 @@ boot → navigating → restoring → reloading → live
 
 ---
 
+## 工具调用（抄 cuckoo 的 JS 代码块协议）
+
+### 为什么用 JS 代码块，不用 JSON
+
+cuckoo 的 `src/prompt/deepseek.md` 原文：
+
+> - 多行文本一律使用反引号（`）模板字符串，直接换行，**不需要任何转义**
+> - **不要输出 JSON 格式的工具调用**，也不要对字符串做 JSON 转义
+
+对比 web-login 的 JSON 协议 —— 它的指令里塞满了**转义失败的补救条款**
+（「引号必须转义为 `\"`」「不能有真实换行」「围栏会泄漏到可见记录」）。
+**JSON 要求模型做转义（易错），模板字符串不要求（不会错）**。
+
+### 协议
+
+````
+需要调用工具时，输出一个 ```cuckoo 代码块，块外不要有任何文字：
+
+```cuckoo
+const r = await read({"path": "src/index.ts"});
+log(r);
+```
+````
+
+### 实测拿到的真实契约（没猜）
+
+解压 `~/.dsh/sessions/*.jsonl.zstd`（**分帧 zstd**，逐帧解压）拿到 4951 行、
+851 行含工具调用的真实数据：
+
+```json
+// tool-call：assistant content 里的块，arguments 是 JSON 字符串
+{ "type": "tool-call", "id": "call_00_…", "name": "read_image",
+  "arguments": "{\"file_path\":\"C:\\\\…\"}" }
+```
+
+**关键：`tool-result` 不是 content block**，而是 `role: 'tool'` 的独立消息：
+
+```json
+{ "role": "tool", "toolCallId": "call_00_…",
+  "content": [{ "type": "text", "text": "…" }], "isError": false }
+```
+
+字段名猜错 = 静默失败，所以先 dump 真货再写代码。
+
+### chunk 契约（实测序列）
+
+```
+block-start(text) → text-delta → block-end
+→ block-start(tool-call) → tool-call-delta → block-end
+→ finish(tool-calls)          ← 有调用时必须这个，否则 DSH 不执行
+```
+
+`tool-call-delta` 的字段名是 **`argumentsDelta`**，`block-end.block` 里是
+**`arguments`**（不是 `args`）—— `verify:tool-chunks` 专门断言这些字段名。
+
+### 项目初始化：只补 DSH 缺的那部分
+
+cuckoo 的 `initProject()` 注入 6 类内容。逐条核对（`docs/project-init-compare.md`）：
+
+| # | cuckoo 章节 | DSH 是否已给 | 本插件 |
+|---|---|---|---|
+| 1 | 平台信息 | ⚠️ system 只提了一次 Windows（讲 exit code） | **补**（cmd/pwsh 差异） |
+| 2 | 项目目录 | ✅ system 末尾 `Your working directory is …` | 不补 |
+| 3 | 项目介绍 | ✅ `AGENTS.md` 走 user 消息自动进入 | 不补 |
+| 4 | 工具清单 | ⚠️ 走 `options.tools`，需自己格式化 | **补** |
+| 5 | 技能清单 | ✅ skill 工具在清单里 | 不补 |
+| 6 | MCP 清单 | ✅ MCP 工具在清单里 | 不补 |
+| — | 身份与原则 | ✅ system 提供 | **不补**（重复会冲突） |
+
+**为什么不照抄全部**：① cuckoo 是 harness（system 由它写），本插件是 adapter
+（system 由 DSH 给），重复注入 = 两份冲突指令；② **体量是封号风险**
+（参考实现实测：单次输入涨到 293k token，四个账号两天内被限制）。
+
+### 体量控制
+
+```
+首轮 prompt: system + 工具协议 + 运行环境 + 工具目录 + 首条消息
+后续轮 prompt: 只有增量（实测 11 字符）
+60 个工具的工具段: 4,080 字符（对比 web-login 的 5 万）
+```
+
+工具结果超 4000 字符自动截断（防一次读大文件把 prompt 顶爆）。
+
+---
+
 ## 当前进度
 
 | 阶段 | 内容 | 状态 |
@@ -570,7 +655,7 @@ adapter 现在对 `purpose === 'compaction'` 的调用**立即拒绝**（实测 
 ### 验证
 
 ```bash
-npm run check        # 构建 + 全部离线校验（272 项）
+npm run check        # 构建 + 全部离线校验（355 项）
 npm run verify:e2e   # ⭐ 端到端：真浏览器 + 真登录态 + 真发送 + 真回复
 npm run probe:chain  # 全链路真实验证（会消耗一次网页版额度）
 ```
@@ -711,7 +796,7 @@ if (lease === undefined || lease.owner !== owner || lease.attached
 
 ```bash
 npm install       # 首次
-npm run check     # 构建 + 全部校验（272 项）
+npm run check     # 构建 + 全部校验（355 项）
 ```
 
 拆开跑：

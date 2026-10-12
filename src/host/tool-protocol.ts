@@ -58,12 +58,49 @@ export interface ParseResult {
 const FENCE_LANG = 'cuckoo'
 
 /**
+ * 平台信息（抄 cuckoo 的 `buildPlatformInfo()`）。
+ *
+ * ## 为什么要自己补（实测确认 DSH 没给）
+ *
+ * 解压 `~/.dsh/sessions/*.jsonl.zstd` 读 `role:'system'` 消息（5943 字符），
+ * 里面**只提到一次 Windows**，而且是讲 exit code 语义：
+ *
+ * > On Windows a killed process settles as `[exit code: 1]` …
+ *
+ * **没有** cuckoo 那种「命令差异」说明。而模型最容易犯的错就是
+ * 在 Windows 上写 Unix 命令（`ls` / `cat` / `pwd`），或在 pwsh 里用 bash 语法。
+ *
+ * cuckoo 的原文（`prompt-builder.ts:76`）：
+ *
+ * > - 操作系统：Windows（x64）
+ * >   - bash 使用 cmd.exe（Windows 命令：cd / dir / echo %cd% / type / findstr）
+ * >   - pwsh 使用 PowerShell（Get-Location / $env:VAR / Get-ChildItem）
+ * >   - 路径分隔符为反斜杠 \，传给工具的相对路径统一用正斜杠 /
+ *
+ * ⚠️ 只在**首轮**带（与工具目录同一个段），后续轮不重复。
+ */
+export function buildPlatformInfo(platform: string, arch: string): string {
+  if (platform === 'win32') {
+    return [
+      '- 操作系统：Windows（' + arch + '）',
+      '  - bash 用 cmd.exe 语法：cd / dir / echo %cd% / type / findstr',
+      '  - pwsh 用 PowerShell 语法：Get-Location / $env:VAR / Get-ChildItem',
+      '- 路径分隔符是反斜杠 \\，传给工具的相对路径统一用正斜杠 /',
+    ].join('\n')
+  }
+  if (platform === 'darwin') {
+    return ['- 操作系统：macOS（' + arch + '）', '  - bash 用 zsh/bash：pwd / ls / cat / grep', '- 路径分隔符是正斜杠 /'].join('\n')
+  }
+  return ['- 操作系统：Linux（' + arch + '）', '  - bash 用 bash：pwd / ls / cat / grep', '- 路径分隔符是正斜杠 /'].join('\n')
+}
+
+/**
  * 工具调用协议指令。
  *
  * 刻意**只讲怎么调**，不讲身份/原则 —— 本插件在 adapter 位置，
- * system 由 DSH 提供（实测会话里有 3 条 `role:'system'` 消息）。
+ * system 由 DSH 提供（实测会话里有 3 条 `role:'system'` 消息，5943 字符）。
  * cuckoo 的模板是完整系统提示词（含身份、核心原则、项目信息），
- * 那部分在这里是**重复且冲突**的。
+ * 那部分在这里是**重复且冲突**的（详见 `docs/project-init-compare.md`）。
  */
 export const TOOL_PROTOCOL = [
   '# 工具调用协议',
@@ -141,15 +178,30 @@ export function buildToolCatalog(tools: ToolSchema[]): string {
 }
 
 /**
- * 拼出首轮要带的工具段（协议 + 目录）。
+ * 拼出首轮要带的工具段（协议 + 目录 + 平台信息）。
  *
  * ⚠️ **只在首轮带**（与差分发送一致）：后续轮只发增量，
  * 不重复这段 —— 否则每轮都多几千字符，直接推高单次请求体量。
+ *
+ * ## 为什么不带「项目目录」「项目介绍」
+ *
+ * 实测确认 DSH 已经给了（详见 `docs/project-init-compare.md`）：
+ *   - **项目目录**：system 末尾有 `Your working directory is …`
+ *   - **项目介绍**：`AGENTS.md` 由 `dsh-agent-instructions` 作为
+ *     **user 消息**注入（带 `<system-reminder>` 包裹），
+ *     会原样进入 `options.messages`，本插件自动带上
+ *
+ * 重复注入 = 白占体量，而体量是封号风险的主要嫌疑（参考实现实测记录）。
+ *
+ * @param tools - DSH 下发的工具清单
+ * @param platform - `process.platform` 的值（默认取宿主）
+ * @param arch - `process.arch` 的值
  */
-export function buildToolSection(tools: ToolSchema[]): string {
+export function buildToolSection(tools: ToolSchema[], platform?: string, arch?: string): string {
   if (tools.length === 0) return ''
   const catalog = buildToolCatalog(tools)
-  return [TOOL_PROTOCOL, '', '# 可用工具', '', catalog].join('\n')
+  const plat = buildPlatformInfo(platform ?? process.platform, arch ?? process.arch)
+  return [TOOL_PROTOCOL, '', '# 运行环境', '', plat, '', '# 可用工具', '', catalog].join('\n')
 }
 
 // ---------------------------------------------------------------------------
