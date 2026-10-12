@@ -137,18 +137,47 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
 
   // ---------- 输入框 ----------
 
-  function findInput() {
-    var sels = INPUT_SELECTORS;
-    for (var i = 0; i < sels.length; i++) {
+  /**
+   * 找可用的输入框 —— 返回**候选列表**（按选择器优先级）。
+   *
+   * ## 为什么返回列表而不是第一个
+   *
+   * 之前只返回第一个命中的元素，一旦它填不进去（隐藏的镜像 textarea、
+   * 只读的 role=textbox…）整轮就报 fill-failed 放弃。
+   * 现在调用方可以**依次试**到能填进去的那个为止。
+   */
+  function findInputs() {
+    var out = [];
+    var seen = [];
+    for (var i = 0; i < INPUT_SELECTORS.length; i++) {
       var list;
-      try { list = document.querySelectorAll(sels[i]); } catch (e) { continue; }
+      try { list = document.querySelectorAll(INPUT_SELECTORS[i]); } catch (e) { continue; }
       for (var j = 0; j < list.length; j++) {
         var el = list[j];
-        if (!visible(el) || disabled(el)) continue;
-        return { el: el, how: sels[i] };
+        if (!visible(el) || disabled(el) || readOnly(el)) continue;
+        var dup = false;
+        for (var k = 0; k < seen.length; k++) if (seen[k] === el) { dup = true; break; }
+        if (dup) continue;
+        seen.push(el);
+        out.push({ el: el, how: INPUT_SELECTORS[i] });
       }
     }
-    return null;
+    return out;
+  }
+
+  /** 只读的输入框填不进去 —— 及早排除，别浪费一次尝试。 */
+  function readOnly(el) {
+    try {
+      if (el.readOnly === true) return true;
+      if (el.getAttribute && el.getAttribute('aria-readonly') === 'true') return true;
+      if (el.isContentEditable === false && el.getAttribute('contenteditable') === 'false') return true;
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+
+  function findInput() {
+    var list = findInputs();
+    return list.length > 0 ? list[0] : null;
   }
 
   // ---------- 发送目标 ----------
@@ -273,22 +302,53 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
 
   // ---------- 填入 ----------
 
+  /**
+   * 把 CRLF / CR 归一化成 LF。
+   *
+   * ⚠️ **这不是可选的清理，是写入成功判定的前提**。
+   *
+   * HTML 规范要求 textarea 的 value 把 CR+LF 归一化成单个 LF。
+   * 所以拿原始值去全等比较**必然失败**（Windows 上工具输出全是 CRLF）——
+   * 用户实测报的就是 native-setter-noop，而且只在跑过工具之后复发。
+   *
+   * 网页版自己也是按 LF 处理的，归一化不丢信息。
+   */
+  function toLf(s) {
+    return String(s).replace(/\\r\\n?/g, '\\n').replace(/\\n\\r/g, '\\n');
+  }
+
   function setText(el, value) {
     el.focus();
+    value = toLf(value);
     if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
       // React 受控组件：必须走原型链上的原生 setter，直接 el.value = x 不触发 onChange
       var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       var desc = Object.getOwnPropertyDescriptor(proto, 'value');
       if (desc && desc.set) desc.set.call(el, value);
       else el.value = value;
-      if (el.value !== value) return { ok: false, how: 'native-setter-noop' };
-      // 两路事件都发：React 16/17 监听 input，个别实现监听 InputEvent
+
+      // 事件**先发**（不管后面比较结果如何，页面都得知道值变了）
       try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
       try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
       try {
         el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: false, inputType: 'insertText', data: value }));
       } catch (e) {}
-      return { ok: true, how: 'native-setter' };
+
+      /**
+       * ⚠️ 判据是「**非空**」而不是「逐字节全等」。
+       *
+       * 之前是全等比较，于是浏览器任何规范化（textarea 把 CR+LF 折成 LF、
+       * 去尾随换行…）都会被当成「写入失败」，整轮直接放弃 ——
+       * 用户实测的 native-setter-noop 就是这么来的。
+       *
+       * 值非空 = 真的写进去了。内容若有差异，如实报告 mismatch
+       * 但不阻断（下游还有 readInput() 复核）。
+       */
+      var got = toLf(el.value || '');
+      if (got === '') return { ok: false, how: 'native-setter-noop' };
+      return got === value
+        ? { ok: true, how: 'native-setter' }
+        : { ok: true, how: 'native-setter', mismatch: true };
     }
     if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
       // contenteditable：优先 paste（cuckoo 的做法，长文本最快且不触发附件识别）
@@ -413,16 +473,16 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     var deadline = Date.now() + timeoutMs;
     return new Promise(function (resolve) {
       (function attempt() {
-        var found = findInput();
-        if (found) { resolve(found); return; }
+        var found = findInputs();
+        if (found.length > 0) { resolve(found); return; }
         if (Date.now() > deadline) { resolve(null); return; }
         setTimeout(attempt, 300);
       })();
     });
   }
 
-  waitForInput(12000).then(function (found) {
-    if (!found) {
+  waitForInput(12000).then(function (foundList) {
+    if (!foundList || foundList.length === 0) {
       resolve(JSON.stringify({
         ok: false, stage: 'no-input',
         message: '等了 12 秒仍找不到可见的输入框（页面结构可能已变，或还停在登录页）',
@@ -435,21 +495,56 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
       }));
       return;
     }
-    var input = found.el;
 
-    var filled = setText(input, TEXT);
-    if (!filled.ok) {
-      resolve(JSON.stringify({ ok: false, stage: 'fill-failed', message: '输入框类型不支持：' + filled.how, how: filled.how }));
+    /**
+     * **依次试每个候选**，直到有一个真的把文本吃进去。
+     *
+     * 之前只用第一个候选，它填不进去就整轮报 fill-failed 放弃 ——
+     * 而页面上往往还有别的可用输入框（隐藏的镜像、只读的 role=textbox…）。
+     * 现在失败的候选会留下记录，全部失败时一并报告，便于定位。
+     */
+    var filled = null;
+    var input = null;
+    var tried = [];
+    for (var fi = 0; fi < foundList.length; fi++) {
+      var cand = foundList[fi];
+      var attempt = setText(cand.el, TEXT);
+      tried.push({ how: cand.how, tag: cand.el.tagName, result: attempt.how });
+      if (!attempt.ok) continue;
+      /** 复核真的非空 —— 合成事件可能被页面拒绝。 */
+      if (readInput(cand.el).trim().length === 0) {
+        tried[tried.length - 1].result += '+empty-after-fill';
+        continue;
+      }
+      filled = attempt;
+      input = cand.el;
+      break;
+    }
+
+    if (filled === null || input === null) {
+      resolve(JSON.stringify({
+        ok: false, stage: 'fill-failed',
+        message: '试了 ' + tried.length + ' 个候选输入框都没写进去（页面结构可能已变）',
+        tried: tried,
+        diag: {
+          textareas: document.querySelectorAll('textarea').length,
+          editables: document.querySelectorAll('[contenteditable="true"]').length,
+          url: location.href
+        }
+      }));
       return;
     }
 
-    // 校验真的填进去了 —— contenteditable 的合成事件可能被页面拒绝
+    /**
+     * 复核：上面循环里已经查过一次非空，这里再查一次是为了覆盖
+     * 「填进去之后又被页面清掉」的情况（受控组件会回滚非法输入）。
+     */
     var after = readInput(input);
     if (after.trim().length === 0) {
       resolve(JSON.stringify({
         ok: false, stage: 'fill-failed',
         message: '填入后输入框仍为空（页面拒绝了合成输入事件）',
-        how: filled.how, inputHow: found.how
+        how: filled.how, tried: tried
       }));
       return;
     }

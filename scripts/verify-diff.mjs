@@ -84,6 +84,12 @@ const src = [
   // diffPrompt 现在走 serializeMessages 做消息序列化（支持 tool-call / tool 消息），
   // 所以要把它的传递闭包一起带上 —— 否则 `serializeMessages is not defined`。
   extract(bundle, /function fingerprint\(/, 'fingerprint'),
+  /**
+   * `serializeMessage` / `serializeMessages` 现在都调用 `normalizeNewlines`
+   * （把 CRLF 折成 LF，见 verify-fill.mjs）。少了它就
+   * `ReferenceError: normalizeNewlines is not defined`（踩过）。
+   */
+  extract(bundle, /function normalizeNewlines\(/, 'normalizeNewlines'),
   extract(bundle, /function serializeMessage\(/, 'serializeMessage'),
   extract(bundle, /function serializeMessages\(/, 'serializeMessages'),
   extract(bundle, /function contentToText\(/, 'contentToText'),
