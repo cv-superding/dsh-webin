@@ -140,7 +140,83 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
     var incomplete = false;
     var businessError = null;
 
+    /**
+     * ## fragment 索引 → 类型 的映射（**修复思考丢失 / 围栏丢失的关键**）
+     *
+     * ## 实测现象（用户报的两个症状，同一根因）
+     *
+     * 1. 网页版显示了思考（「已思考（用时 1 秒）」），但 DSH 只收到 **2 个字符**
+     *    （就是「用户」两个字）。
+     * 2. 工具调用的围栏**开头的三个反引号丢了**：
+     *    实际收到的是「ldw + 换行 + const r = await pwsh(...)」开头，
+     *    于是解析器找不到 ldw 围栏，整段被当正文显示在对话区。
+     *
+     * ## 根因
+     *
+     * 网页版的 response.fragments 是**数组**，每个 fragment 有 type
+     * （THINK / RESPONSE）。SSE 里只有**首帧**带完整路径
+     * （response/fragments/-1/content），后续全是**裸增量帧**（没有 p）。
+     *
+     * 裸增量归给谁，只能靠「最近一次路径帧指向哪个 fragment」。
+     * 早期实现**没跟踪这个** —— 裸增量一律 text += v，于是：
+     *   - 思考的裸增量全被当正文 ⇒ think 只剩路径帧那一小段
+     *   - 正文的裸增量接在 ldw 后面 ⇒ 围栏看起来「丢了」
+     *
+     * ## 修法
+     *
+     * 维护 fragmentTypes[i]（类型表）与 currentIndex（当前指向）：
+     *   - 路径帧 response/fragments/&lt;i&gt;/&lt;field&gt; ⇒ 更新类型表并切 currentIndex
+     *   - -1 表示「最后一个 fragment」，解析成实际下标
+     *   - 裸增量按 fragmentTypes[currentIndex] 分流到 think / text
+     *
+     * 这样即使网页端只发一次路径帧，后续裸增量也能正确归位。
+     *
+     * ⚠️ 本注释在模板字符串内，**不能出现反引号**（会让构建报 PARSE_ERROR）。
+     */
+    var fragmentTypes = [];
+    var currentIndex = -1;
+
     function lastSeg(p) { return typeof p === 'string' ? p.split('/').pop() : ''; }
+
+    /**
+     * 从路径里解析 fragment 下标。
+     *
+     * response/fragments/0/content  ⇒ 0
+     * response/fragments/-1/content ⇒ 最后一个（= fragmentTypes.length - 1）
+     *
+     * ## ⚠️ `-1` 的语义（这里是第一个坑）
+     *
+     * `-1` 意思是「最后一个 fragment」。但**首帧就是 `-1`** 时，
+     * 类型表还是空的 —— 早期实现返回 null，于是类型表**从未登记**，
+     * 后续裸增量全部走错分支（这正是思考只有 2 个字的根因）。
+     *
+     * 正确做法：`-1` 且表为空 ⇒ **分配下标 0**（第一个 fragment）。
+     *
+     * @returns 下标；不是 fragment 路径时返回 null。
+     */
+    function fragmentIndexOf(p) {
+      if (typeof p !== 'string') return null;
+      var m = /^response\/fragments\/(-?\d+)\//.exec(p);
+      if (m === null) return null;
+      var i = Number(m[1]);
+      if (i < 0) {
+        /** -1 = 最后一个。表为空时视为「第 0 个」（首帧就是 -1 的情况）。 */
+        return fragmentTypes.length > 0 ? fragmentTypes.length - 1 : 0;
+      }
+      return i;
+    }
+
+    /** 路径里的字段名是不是「思考」字段。 */
+    function isThinkField(p) {
+      var seg = lastSeg(p);
+      return seg === 'reasoning_content' || seg === 'thinking_content';
+    }
+
+    /** 路径里的字段名是不是「正文」字段。 */
+    function isTextField(p) {
+      var seg = lastSeg(p);
+      return seg === 'content' || seg === 'text' || seg === 'markdown' || seg === 'delta';
+    }
 
     /** JSON Patch 路径 → 判断是不是正文/思考文本。 */
     function classify(p) {
@@ -150,6 +226,20 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       if (!inResponse) return null;
       if (seg === 'content' || seg === 'text' || seg === 'markdown' || seg === 'delta') return 'text';
       return null;
+    }
+
+    /** 当前 fragment 是不是思考。 */
+    function currentIsThink() {
+      if (currentIndex < 0 || currentIndex >= fragmentTypes.length) return false;
+      return String(fragmentTypes[currentIndex]).toUpperCase() === 'THINK';
+    }
+
+    /** 把一段文本按当前 fragment 类型分流。 */
+    function route(piece, forceKind) {
+      if (!piece) return;
+      var kind = forceKind !== undefined && forceKind !== null ? forceKind : (currentIsThink() ? 'think' : 'text');
+      if (kind === 'think') think += piece;
+      else text += piece;
     }
 
     /**
@@ -211,9 +301,15 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
           var f = obj.v[i];
           if (!f || typeof f !== 'object') continue;
           var piece = typeof f.content === 'string' ? f.content : (typeof f.text === 'string' ? f.text : '');
+          /**
+           * ⚠️ **先登记类型再分流** —— 每个新 fragment 都要进类型表，
+           * 这样后续裸增量才知道自己该去哪（见 fragmentTypes 的说明）。
+           */
+          var idx = fragmentTypes.length;
+          fragmentTypes.push(typeof f.type === 'string' ? f.type : 'RESPONSE');
+          currentIndex = idx;
           if (!piece) continue;
-          if (f.type === 'THINK') think += piece;
-          else text += piece;
+          route(piece, String(f.type).toUpperCase() === 'THINK' ? 'think' : 'text');
         }
         return;
       }
@@ -228,13 +324,50 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
             var g = frags[j];
             if (!g || typeof g !== 'object') continue;
             var s = typeof g.content === 'string' ? g.content : (typeof g.text === 'string' ? g.text : '');
+            /**
+             * 快照是权威全量：**重建类型表**（而不是叠加）。
+             * 否则重复快照会让类型表越堆越长，-1 会解析到错误下标。
+             */
+            fragmentTypes[j] = typeof g.type === 'string' ? g.type : 'RESPONSE';
             if (!s) continue;
-            if (g.type === 'THINK') k += s;
+            if (String(g.type).toUpperCase() === 'THINK') k += s;
             else t += s;
           }
-          // 快照是权威全量，直接覆盖
+          fragmentTypes.length = frags.length;
+          currentIndex = frags.length - 1;
           if (t) text = t;
           if (k) think = k;
+        }
+        return;
+      }
+
+      /**
+       * fragment 路径帧：response/fragments/&lt;i&gt;/&lt;field&gt;
+       *
+       * ⚠️ **这是修复思考丢失 / 围栏丢失的关键分支。**
+       *
+       * 网页端只在 fragment 开始时发一次带路径的帧，后续全是裸增量。
+       * 这里记下「当前指向哪个 fragment」以及「它是什么类型」，
+       * 裸增量才能正确分流到 think / text。
+       *
+       * 实测：-1 指「最后一个 fragment」。思考阶段它指向 THINK，
+       * 正文阶段指向 RESPONSE —— 所以**必须在切换时更新类型**。
+       */
+      var fragIdx = fragmentIndexOf(obj.p);
+      if (fragIdx !== null && typeof obj.v === 'string') {
+        currentIndex = fragIdx;
+        /**
+         * 该字段决定这个 fragment 是什么类型：
+         * reasoning_content ⇒ THINK；content / text ⇒ RESPONSE。
+         * 以字段为准（比 type 字段可靠 —— 路径帧不带 type）。
+         */
+        if (isThinkField(obj.p)) fragmentTypes[fragIdx] = 'THINK';
+        else if (isTextField(obj.p)) fragmentTypes[fragIdx] = 'RESPONSE';
+        var kindFrag = isThinkField(obj.p) ? 'think' : isTextField(obj.p) ? 'text' : null;
+        if (kindFrag === 'think') think += obj.v;
+        else if (kindFrag === 'text') {
+          if (obj.o === 'APPEND' || obj.o === undefined) text += obj.v;
+          else text = obj.v;
         }
         return;
       }
@@ -249,13 +382,15 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       }
 
       /**
-       * **裸文本增量**（正文主体）—— 见 isBareTextDelta 的说明。
+       * **裸文本增量**（正文/思考的主体）—— 见 isBareTextDelta 的说明。
        *
-       * 放在最后判断：前面的路径匹配、fragments、快照都优先。
-       * 这是修复「只回一个字」的关键分支。
+       * ⚠️ **不能一律当正文**：按当前 fragment 类型分流。
+       * 早期实现写死 text += obj.v，导致两个症状（实测复现）：
+       *   1. 思考的裸增量全进正文 ⇒ think 只剩路径帧那 2 个字
+       *   2. 正文的裸增量接在 ldw 后面 ⇒ 工具围栏开头的三反引号看起来丢了
        */
       if (isBareTextDelta(obj)) {
-        text += obj.v;
+        route(obj.v);
         return;
       }
     }

@@ -68,7 +68,18 @@ const checks = [
 
   // ---- 「只回一个字」的根因（实测抓帧定位）----
   ['处理裸文本增量帧（正文主体）', src.includes('isBareTextDelta')],
-  ['裸文本帧真的被追加到正文', /if \(isBareTextDelta\(obj\)\) \{\s*text \+= obj\.v/.test(src)],
+  /**
+   * ⚠️ 断言**必须跟着修复走**。
+   *
+   * 早期这里是 `text += obj.v`（裸增量一律进正文）—— 那正是两个 bug 的根因：
+   *   1. 思考的裸增量全进正文 ⇒ 思考只剩路径帧那 2 个字
+   *   2. 正文的裸增量接错位置 ⇒ 工具围栏开头的三反引号看起来丢了
+   *
+   * 现在改为按当前 fragment 类型分流（`route(obj.v)`）。
+   */
+  ['裸文本帧按 fragment 类型分流（不再一律进正文）', /if \(isBareTextDelta\(obj\)\) \{\s*route\(obj\.v\)/.test(src)],
+  ['跟踪 fragment 类型表（分流依据）', src.includes('fragmentTypes')],
+  ['首帧 -1 也能登记类型（思考不再截断）', /fragmentTypes\.length > 0 \? fragmentTypes\.length - 1 : 0/.test(src)],
   ['裸文本帧排除错误信封', src.includes('typeof obj.code === \'number\'')],
 
   // ---- 「每次重启新建对话」的修复 ----

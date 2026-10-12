@@ -458,12 +458,20 @@ console.log('\n[6] hook 侧：reasoning_content 能被提取（网页确实会�
   const hook = readFileSync(join(ROOT, 'src', 'client', 'hook.ts'), 'utf8')
   check('⭐ 认 reasoning_content', hook.includes("'reasoning_content'"), true)
   check('⭐ 认 thinking_content', hook.includes("'thinking_content'"), true)
-  check('⭐ 认 THINK 片段类型', /f\.type === 'THINK'/.test(hook), true)
-  check('⭐ 快照里的 THINK 也认', /g\.type === 'THINK'/.test(hook), true)
-
-  // 大小写不敏感（网页可能给 Think / think）
-  const cuckooStyle = /String\(.*\)\.toUpperCase\(\) === 'THINK'|=== 'THINK'/.test(hook)
-  check('THINK 判据（实测网页用大写）', cuckooStyle, true)
+  /**
+   * ⚠️ 断言跟着修复走。
+   *
+   * 早期是「fragment 里 type === 'THINK' 就直接 think +=」——
+   * 但**裸增量帧没有 type**，所以思考的绝大部分内容被当正文了
+   * （实测：网页显示「已思考（用时 1 秒）」，DSH 只收到 2 个字）。
+   *
+   * 现在改为：维护 fragmentTypes 类型表 + currentIndex，
+   * 裸增量按当前 fragment 类型分流。
+   */
+  check('⭐ 有 fragment 类型表', hook.includes('fragmentTypes'), true)
+  check('⭐ 裸增量按类型分流', /route\(obj\.v\)/.test(hook), true)
+  check('⭐ 大小写不敏感判 THINK', /toUpperCase\(\) === 'THINK'/.test(hook), true)
+  check('⭐ 快照重建类型表（不叠加）', /fragmentTypes\.length = frags\.length/.test(hook), true)
 }
 
 cleanupState()
