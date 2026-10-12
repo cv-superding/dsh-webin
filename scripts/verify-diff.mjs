@@ -127,7 +127,8 @@ const am = (t) => ({ role: 'assistant', content: t })
  * @param ok - 模拟投递是否成功。传 false 可验证「失败不推进游标」。
  */
 const send = (opts, ok = true) => {
-  const r = diffPrompt(opts)
+  // 平台是游标分文件持久化的维度；测试统一用 deepseek
+  const r = diffPrompt({ platform: 'deepseek', ...opts })
   if (ok) r.commit()
   return r
 }
@@ -289,7 +290,7 @@ console.log('\n[10] ⭐ 投递失败**不得**推进游标（否则上下文永�
   // 第一轮：投递失败
   const r1 = send({ system: SYS, messages: [um('第一句')], sessionKey: 's1', cursors: c }, false)
   check('失败时仍然返回了内容（供重试）', r1.text.includes('第一句'), true)
-  check('失败后游标未建立', c.get('s1'), undefined)
+  check('失败后游标未建立', c.get('deepseek', 's1'), undefined)
 
   // 第二轮：同样的历史重试 —— 必须重新算出**完整**增量
   const r2 = send({ system: SYS, messages: [um('第一句')], sessionKey: 's1', cursors: c })
@@ -304,7 +305,7 @@ console.log('\n[10] ⭐ 投递失败**不得**推进游标（否则上下文永�
 
   // 中途失败不会让已成功的进度回退
   const r4 = send({ system: SYS, messages: [um('第一句'), am('答复'), um('第二句'), am('答复2'), um('第三句')], sessionKey: 's1', cursors: c }, false)
-  check('失败那轮没推进游标', c.get('s1').sentCount, 3)
+  check('失败那轮没推进游标', c.get('deepseek', 's1').sentCount, 3)
   const r5 = send({ system: SYS, messages: [um('第一句'), am('答复'), um('第二句'), am('答复2'), um('第三句')], sessionKey: 's1', cursors: c })
   check('重试补齐了第三句', r5.text.includes('第三句'), true)
   check('重试没有重复发第二句', r5.text.includes('第二句'), false)

@@ -16,6 +16,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
+import { isolate } from './lib/isolate.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const require = createRequire(import.meta.url)
@@ -138,6 +139,13 @@ function safeJson(s) {
 
 console.log('=== dsh-webin host 半验证 ===\n')
 
+/**
+ * ⚠️ 隔离状态目录：插件会往 `~/.dsh/webin/`（含**会话游标**）读写。
+ * 不隔离的话测试会污染真实状态，而且**测试之间互相污染** ——
+ * 落盘的游标让第二次运行判定「无增量」⇒ 不派发任务 ⇒ 本测试全挂。
+ * 详见 `scripts/lib/isolate.mjs`。
+ */
+const cleanupState = isolate('webin-host')
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply, name } = mod
 
@@ -399,4 +407,5 @@ console.log('\n[9] logger 畸形形态不得让插件加载失败')
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
+cleanupState()
 process.exitCode = fail === 0 ? 0 : 1

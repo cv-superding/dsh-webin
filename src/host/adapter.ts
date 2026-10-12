@@ -74,6 +74,25 @@ interface Job {
    * host 在任务上带上「期望对话 URL」，client 不匹配就先导航再发。
    */
   expectUrl?: string
+  /**
+   * 该任务**必须在新对话里发**（首轮，或原绑定已失效）。
+   *
+   * ## 为什么需要这个（第二个封号级缺陷）
+   *
+   * `expectUrl` 只覆盖「已绑定」的情况。**首轮没有绑定**，于是 client
+   * 退化成「在当前页发」—— 而当前页可能是**别的会话的对话**。实测后果：
+   *
+   * ```
+   * 会话A 首轮 → 在当前页 X 发 → 绑定 A→X
+   * 会话B 首轮 → 无绑定 → 仍在 X 发 → 绑定 B→X   ← 两个会话挤进 X！
+   * ```
+   *
+   * 这正是用户报的「换了几个 DSH 窗口，全都是在网页版的同一个会话窗口」。
+   *
+   * 所以首轮必须**显式开新对话**（点「新对话」或导航到 homeUrl），
+   * 绝不能复用当前页。
+   */
+  freshChat?: boolean
 }
 
 class JobQueue {
@@ -81,7 +100,13 @@ class JobQueue {
   private seq = 0
 
   /** 派一个新任务。 */
-  enqueue(prompt: string, thinking: boolean, platform: string, expectUrl?: string): Job {
+  enqueue(
+    prompt: string,
+    thinking: boolean,
+    platform: string,
+    expectUrl?: string,
+    freshChat?: boolean,
+  ): Job {
     const job: Job = {
       id: `job-${Date.now()}-${++this.seq}`,
       prompt,
@@ -89,6 +114,7 @@ class JobQueue {
       platform,
       createdAt: Date.now(),
       ...(expectUrl === undefined ? {} : { expectUrl }),
+      ...(freshChat === true ? { freshChat: true } : {}),
     }
     this.jobs.set(job.id, job)
     // 只保留最近 50 条，避免长会话内存堆积
@@ -204,27 +230,81 @@ interface SessionCursor {
   at: number
 }
 
-/** 会话游标表。 */
+/**
+ * 游标持久化接口（host 半注入；测试时可省略）。
+ *
+ * ## 为什么必须持久化（用户实测发现的缺陷）
+ *
+ * 用户重启 DSH 后：「网页版又新开了一个会话，没有接上之前的那个窗口」。
+ *
+ * 根因：游标只在 host **内存**里。重启后 `cursors.get(sessionKey)` 是 undefined
+ * ⇒ `diff.chatUrl` 为空 ⇒ job 不带 `expectUrl` ⇒ client 在首页发 ⇒ **新开对话**。
+ *
+ * 而且差分游标本身也丢了 —— 重启后第一轮会**重发全部历史**（网页记录里
+ * 又出现超长提示词，正是之前修过的那个问题）。
+ *
+ * 所以游标必须落盘：会话 ↔ 网页对话 的绑定关系 + 已发送进度。
+ */
+export interface CursorStore {
+  /** 读某个平台的**全部**会话游标（启动时恢复用）。 */
+  load(platform: string): Record<string, SessionCursor>
+  /** 写/删某个平台的一个会话游标（`undefined` = 删除）。 */
+  save(platform: string, key: string, cursor: SessionCursor | undefined): void
+}
+
+/** 会话游标表（内存 + 可选磁盘持久化）。 */
 class SessionCursors {
   private readonly map = new Map<string, SessionCursor>()
 
-  constructor(private readonly limit = 32) {}
+  constructor(
+    private readonly limit = 32,
+    private readonly store?: CursorStore,
+  ) {}
 
-  get(key: string): SessionCursor | undefined {
-    return this.map.get(key)
+  /**
+   * 启动时恢复某个平台的游标。
+   *
+   * ⚠️ 惰性恢复（首次访问该平台时才读盘）而不是构造时全读：
+   * 平台是运行时才知道的（`registry.all()`），构造 `SessionCursors` 时
+   * 还不知道有哪些平台。
+   */
+  private restored = new Set<string>()
+  private ensureRestored(platform: string): void {
+    if (this.store === undefined || this.restored.has(platform)) return
+    this.restored.add(platform)
+    try {
+      for (const [k, v] of Object.entries(this.store.load(platform))) {
+        if (v !== null && typeof v === 'object') this.map.set(`${platform}::${k}`, v)
+      }
+    } catch {
+      /* 读不动就当空表 */
+    }
   }
 
-  set(key: string, cursor: SessionCursor): void {
-    this.map.set(key, cursor)
-    if (this.map.size > this.limit) {
-      const oldest = [...this.map.entries()].sort((a, b) => a[1].at - b[1].at)[0]
-      if (oldest !== undefined) this.map.delete(oldest[0])
+  get(platform: string, key: string): SessionCursor | undefined {
+    this.ensureRestored(platform)
+    return this.map.get(`${platform}::${key}`)
+  }
+
+  set(platform: string, key: string, cursor: SessionCursor): void {
+    this.ensureRestored(platform)
+    this.map.set(`${platform}::${key}`, cursor)
+    this.store?.save(platform, key, cursor)
+    // 淘汰：按平台分别算，避免一个平台的活跃会话挤掉另一个平台
+    const mine = [...this.map.entries()].filter(([k]) => k.startsWith(`${platform}::`))
+    if (mine.length > this.limit) {
+      const oldest = mine.sort((a, b) => a[1].at - b[1].at)[0]
+      if (oldest !== undefined) {
+        this.map.delete(oldest[0])
+        this.store?.save(platform, oldest[0].slice(platform.length + 2), undefined)
+      }
     }
   }
 
   /** 会话被压缩/重置时清掉进度。 */
-  reset(key: string): void {
-    this.map.delete(key)
+  reset(platform: string, key: string): void {
+    this.map.delete(`${platform}::${key}`)
+    this.store?.save(platform, key, undefined)
   }
 
   size(): number {
@@ -261,6 +341,8 @@ function fingerprint(text: string): string {
 function diffPrompt(options: {
   system?: string
   messages: ReadonlyArray<DshMessage>
+  /** 平台 id —— 游标按平台分文件持久化，避免跨平台撞键。 */
+  platform: string
   sessionKey: string
   cursors: SessionCursors
   /** 工具段（协议 + 目录）；**只在首轮**带，见下方说明。 */
@@ -275,10 +357,10 @@ function diffPrompt(options: {
   /** 投递成功后调用，推进游标。失败时**不要**调。 */
   commit: () => void
 } {
-  const { messages, cursors, sessionKey } = options
+  const { messages, cursors, sessionKey, platform } = options
   const system = typeof options.system === 'string' ? options.system.trim() : ''
   const fp = fingerprint(system)
-  const prev = cursors.get(sessionKey)
+  const prev = cursors.get(platform, sessionKey)
 
   const historyShrank = prev !== undefined && messages.length < prev.sentCount
   const isFirst = prev === undefined || historyShrank
@@ -322,7 +404,7 @@ function diffPrompt(options: {
     skippedOwnReply,
     chatUrl: prev?.chatUrl,
     commit: () => {
-      cursors.set(sessionKey, {
+      cursors.set(platform, sessionKey, {
         sentCount: messages.length,
         systemFingerprint: fp,
         at: Date.now(),
@@ -350,6 +432,13 @@ export interface AdapterDeps {
   claimGraceMs?: number
   /** 平台注册表（多平台支持）。省略则用内置表。 */
   registry?: ProviderRegistry
+  /**
+   * 游标持久化（host 半注入 `~/.dsh/webin/sessions/`）。
+   *
+   * 不注入则纯内存 —— 重启后**会话↔对话绑定丢失**，网页版会新开对话
+   * （用户实测踩过），且差分游标丢失导致重发全部历史。
+   */
+  cursorStore?: CursorStore
 }
 /** 构造 adapter（鸭子类型对象；不继承 LlmAdapter 基类，所以方法要齐）。 */
 export function createAdapter(deps: AdapterDeps) {
@@ -358,7 +447,7 @@ export function createAdapter(deps: AdapterDeps) {
   const timeoutMs = deps.timeoutMs ?? 10 * 60 * 1000
   const pollMs = deps.pollMs ?? 250
   /** 每会话的发送进度（差分发送的核心状态）。 */
-  const cursors = new SessionCursors()
+  const cursors = new SessionCursors(32, deps.cursorStore)
 
   /**
    * 模型 id 的全局唯一化。
@@ -586,7 +675,7 @@ export function createAdapter(deps: AdapterDeps) {
      * （cuckoo 的格式是「`name(签名)` — 首句」，对所有工具一视同仁）。
      */
     const toolSection = buildToolSection([...(options.tools ?? [])])
-    const diff = diffPrompt({ ...options, sessionKey, cursors, toolSection })
+    const diff = diffPrompt({ ...options, platform: provider.id, sessionKey, cursors, toolSection })
     const prompt = diff.text
 
     if (prompt.trim() === '') {
@@ -602,7 +691,19 @@ export function createAdapter(deps: AdapterDeps) {
       return
     }
 
-    const job = queue.enqueue(prompt, spec.thinking === true, provider.id, diff.chatUrl)
+    /**
+     * **首轮必须开新对话**（`freshChat`）。
+     *
+     * 没有绑定时不能「在当前页发」—— 当前页可能是别的会话的对话，
+     * 两个 DSH 会话就会挤进同一个网页对话（用户实测报的封号级缺陷）。
+     */
+    const job = queue.enqueue(
+      prompt,
+      spec.thinking === true,
+      provider.id,
+      diff.chatUrl,
+      diff.chatUrl === undefined,
+    )
     deps.logger?.debug?.(
       `job ${job.id} 已派发（平台=${provider.id}，${diff.note}，${prompt.length} 字符，thinking=${String(spec.thinking)}）`,
     )
@@ -648,14 +749,14 @@ export function createAdapter(deps: AdapterDeps) {
      * （verify-session-route 的 ⭐ 断言就是抓这个的）。
      */
     if (typeof result.chatUrl === 'string' && result.chatUrl !== '') {
-      const cur = cursors.get(sessionKey)
-      cursors.set(sessionKey, {
+      const cur = cursors.get(provider.id, sessionKey)
+      cursors.set(provider.id, sessionKey, {
         sentCount: cur?.sentCount ?? messages.length,
         systemFingerprint: cur?.systemFingerprint ?? fp,
         at: Date.now(),
         chatUrl: result.chatUrl,
       })
-      deps.logger?.debug?.(`${sessionKey} 绑定对话 ${result.chatUrl}`)
+      deps.logger?.debug?.(`${sessionKey} 绑定对话 ${result.chatUrl}（已落盘）`)
     }
 
     /**

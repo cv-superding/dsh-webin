@@ -31,11 +31,12 @@
  * 不同 cookie / localStorage ⇒ **登录态天然隔离**，且不需要改 DSH 一行。
  */
 import { mkdir, readFile, writeFile, rename, readdir, unlink } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
+import type { CursorStore, SessionCursor } from './adapter'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
 
 export const name = 'dsh-webin'
@@ -113,6 +114,30 @@ async function removeCustomProvider(id: string): Promise<boolean> {
   if (!existsSync(path)) return false
   await unlink(path)
   return true
+}
+
+/**
+ * 会话游标的持久化目录：`~/.dsh/webin/sessions/<platform>.json`。
+ *
+ * ## 为什么必须落盘（用户实测发现的缺陷）
+ *
+ * 「重启 DSH 后网页版又新开了一个会话，没接上之前那个窗口」。
+ *
+ * 根因：游标只在 host 内存里，重启即丢：
+ *   1. `diff.chatUrl` 为空 ⇒ job 不带 `expectUrl` ⇒ client 在首页发 ⇒ **新开对话**
+ *   2. 差分游标也丢 ⇒ 重启后第一轮**重发全部历史**（网页记录里又出现超长提示词）
+ *
+ * 落盘后两个问题一起解决：重启 → 恢复游标 → 任务带 `expectUrl` →
+ * client 导航回原对话 → 差分继续按原进度走。
+ */
+function sessionsDir(): string {
+  return join(stateRoot(), 'sessions')
+}
+
+/** 单个平台的会话映射文件。 */
+function sessionsPath(platform: string): string {
+  const safe = /^[A-Za-z0-9_-]{1,64}$/.test(platform) ? platform : 'unknown'
+  return join(sessionsDir(), `${safe}.json`)
 }
 
 /** 读请求体（有上限）。 */
@@ -272,7 +297,51 @@ export async function apply(ctx: {
   // （实测踩过）。adapter 同理，重复注册会抛 "provider already registered"。
   const registry = new ProviderRegistry()
   const queue = new JobQueue()
-  const adapter = createAdapter({ queue, logger: log, registry })
+  /**
+   * 游标落盘 —— **重启后接回原对话的关键**。
+   *
+   * 不落盘的话重启后：`chatUrl` 丢失 ⇒ 任务不带 `expectUrl` ⇒
+   * client 在首页发 ⇒ **新开一个网页对话**（用户实测：「没接上之前的那个窗口」）；
+   * 同时差分游标也丢 ⇒ 第一轮重发全部历史。
+   */
+  const adapter = createAdapter({
+    queue,
+    logger: log,
+    registry,
+    cursorStore: {
+      load: (platform) => {
+        const path = sessionsPath(platform)
+        try {
+          if (!existsSync(path)) return {}
+          const parsed = JSON.parse(readFileSync(path, 'utf8')) as { sessions?: Record<string, SessionCursor> }
+          return parsed.sessions ?? {}
+        } catch (error) {
+          log.warn?.(`读取会话映射失败 ${platform}: ${(error as Error)?.message ?? String(error)}`)
+          return {}
+        }
+      },
+      save: (platform, key, cursor) => {
+        const path = sessionsPath(platform)
+        try {
+          let all: Record<string, SessionCursor> = {}
+          if (existsSync(path)) {
+            try {
+              const parsed = JSON.parse(readFileSync(path, 'utf8')) as { sessions?: Record<string, SessionCursor> }
+              all = parsed.sessions ?? {}
+            } catch {
+              /* 文件坏了就重写 */
+            }
+          }
+          if (cursor === undefined) delete all[key]
+          else all[key] = cursor
+          mkdirSync(sessionsDir(), { recursive: true })
+          writeFileSync(path, JSON.stringify({ sessions: all }, null, 2), 'utf8')
+        } catch (error) {
+          log.warn?.(`写入会话映射失败 ${platform}: ${(error as Error)?.message ?? String(error)}`)
+        }
+      },
+    },
+  })
 
   /** 当前注册了哪些路由（自定义 provider 增删后要重注册）。 */
   let registeredRoutes: string[] = []
@@ -351,6 +420,11 @@ export async function apply(ctx: {
              * 否则所有 DSH 会话挤一个网页对话（封号级缺陷）。
              */
             ...(job.expectUrl === undefined ? {} : { expectUrl: job.expectUrl }),
+            /**
+             * 首轮（无绑定）：client 必须**开新对话**，不能占用当前页 ——
+             * 否则两个 DSH 会话会挤进同一个网页对话。
+             */
+            ...(job.freshChat === true ? { freshChat: true } : {}),
           },
         })
         return

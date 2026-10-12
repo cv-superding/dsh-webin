@@ -867,7 +867,7 @@ export function LdwHost(): unknown {
         if (!res.ok) return
         const data = (await res.json()) as {
           ok: boolean
-          job: { id: string; prompt: string; thinking: boolean; expectUrl?: string } | null
+          job: { id: string; prompt: string; thinking: boolean; expectUrl?: string; freshChat?: boolean } | null
           /** host 说这个任务已被取消。 */
           cancel?: string
         }
@@ -941,6 +941,62 @@ export function LdwHost(): unknown {
               .then((r: unknown) => r === true)
               .catch(() => false)
             if (!ready) console.warn('[dsh-webin] 导航后未见输入框，仍尝试发送')
+          }
+        }
+
+        /**
+         * ## 首轮必须**开新对话**（不能占用当前页）
+         *
+         * `expectUrl` 只覆盖「已绑定」的情况。首轮没有绑定，早期实现退化成
+         * 「在当前页发」—— 而当前页可能是**别的会话的对话**。实测后果：
+         *
+         * ```
+         * 会话A 首轮 → 在当前页 X 发 → 绑定 A→X
+         * 会话B 首轮 → 无绑定 → 仍在 X 发 → 绑定 B→X   ← 两个会话挤进 X！
+         * ```
+         *
+         * 这正是用户报的「换了几个 DSH 窗口，全都是在网页版的同一个会话窗口」。
+         *
+         * 所以 `freshChat` 时**显式开新对话**：导航到 homeUrl。
+         * 网页版对 homeUrl 的处理就是「新建/当前空白对话」，
+         * 不会复用已有对话的内容（实测：重启后导航 homeUrl 会开新对话）。
+         */
+        if (data.job.freshChat === true && data.job.expectUrl === undefined) {
+          const current = await el
+            .executeJavaScript('location.href')
+            .then((u: unknown) => String(u))
+            .catch(() => '')
+          /**
+           * 只在**确实停在某个对话里**时才导航 —— 已经在首页/新对话就不动，
+           * 避免多余的页面重载（每次重载都是一次真实的浏览器行为，
+           * 频繁重载本身就是可疑模式）。
+           */
+          const inChat = /\/a\/chat\/s\//.test(current)
+          if (inChat) {
+            console.log('[dsh-webin] 首轮：开新对话（不占用当前页）', { from: current.slice(-48) })
+            await element_loadURL(el, provider.homeUrl)
+            await el
+              .executeJavaScript(
+                `(function () {
+                  var sels = ${JSON.stringify(provider.input.selectors)};
+                  var deadline = Date.now() + 25000;
+                  return new Promise(function (resolve) {
+                    (function attempt() {
+                      for (var i = 0; i < sels.length; i++) {
+                        var list;
+                        try { list = document.querySelectorAll(sels[i]); } catch (e) { continue; }
+                        for (var j = 0; j < list.length; j++) {
+                          var el = list[j];
+                          if (el.offsetWidth > 0 && el.offsetHeight > 0) { resolve(true); return; }
+                        }
+                      }
+                      if (Date.now() > deadline) { resolve(false); return; }
+                      setTimeout(attempt, 300);
+                    })();
+                  });
+                })()`,
+              )
+              .catch(() => false)
           }
         }
 

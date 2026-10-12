@@ -26,6 +26,7 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isolate } from './lib/isolate.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -128,6 +129,9 @@ function makeCtx() {
   return { ctx, routes, adapters, logs }
 }
 
+/** 每轮独立会话号（见 runRound 里的说明）。 */
+let roundSeq = 0
+
 /** 实测形状的工具 schema。 */
 const TOOLS = [
   {
@@ -147,7 +151,14 @@ async function runRound(adapter, route, opts) {
   const stream = adapter.stream({
     provider: 'webin-deepseek',
     model: 'ldw-fast',
-    sessionId: opts.sessionId ?? 'chunk-test',
+    /**
+     * ⚠️ 默认 sessionId 必须**每次唯一**。
+     *
+     * 用固定值时，第一个测试跑完游标就落盘了，后面的测试再发同一批消息
+     * 会被差分判定为「无增量」⇒ 不派发任务 ⇒ chunk 序列为空
+     * ⇒ 表现为「finish.reason 是 undefined」这种莫名其妙的失败（踩过）。
+     */
+    sessionId: opts.sessionId ?? `chunk-${++roundSeq}`,
     messages: opts.messages,
     ...(opts.system === undefined ? {} : { system: opts.system }),
     ...(opts.tools === undefined ? {} : { tools: opts.tools }),
@@ -183,6 +194,13 @@ async function runRound(adapter, route, opts) {
 
 console.log('=== 工具调用 chunk 契约测试 ===\n')
 
+/**
+ * ⚠️ 隔离状态目录：插件会往 `~/.dsh/webin/`（含**会话游标**）读写。
+ * 不隔离的话测试会污染真实状态，而且**测试之间互相污染** ——
+ * 落盘的游标让第二次运行判定「无增量」⇒ 不派发任务 ⇒ 本测试全挂。
+ * 详见 `scripts/lib/isolate.mjs`。
+ */
+const cleanupState = isolate('webin-tool-chunks')
 const mod = await import(pathToFileURL(join(ROOT, 'lib', 'index.js')).href)
 const { apply } = mod
 
@@ -351,4 +369,5 @@ console.log('\n[6] 工具结果回灌：role:tool 消息进入下一轮增量')
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
+cleanupState()
 process.exitCode = fail === 0 ? 0 : 1
