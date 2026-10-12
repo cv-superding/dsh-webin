@@ -283,7 +283,13 @@ console.log('\n[3] 静态：client 侧防插队闸门与超时兜底')
   check('有待办闸门（hasPending）', src.includes('hasPending'))
   check('闸门在领活之前生效', /if \(hasPending\) return/.test(src))
   check('有待办超时兜底', src.includes('pendingSinceRef'))
-  check('超时后交回错误解锁循环', src.includes('客户端 5 分钟兜底'))
+  /**
+   * ⚠️ 放弃门槛已改为**从配置读**（`replyTimeoutMs * 0.8`），不再硬编码。
+   *
+   * 硬编码「5 分钟」会在慢回复时**提前掐断** —— 配置默认 10 分钟，
+   * 而注释里记着「实测最慢一次网页回复 6 分 12 秒」。
+   */
+  check('超时后交回错误解锁循环', src.includes('等待网页回复超时'))
   check('轮询带 running 参数', src.includes('running='))
   check('取消时调停止脚本', src.includes('buildStopScript'))
   // 产物里 `undefined` 被压缩成 `void 0`，所以两种写法都要认

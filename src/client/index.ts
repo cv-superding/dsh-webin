@@ -1221,6 +1221,19 @@ export function LdwHost(): unknown {
    * 所以发送前记下条数，之后等它超过这个基线。
    */
   const baselineRef = useRef<number>(0)
+  /**
+   * 派发任务时页面上最后一条回复的内容。
+   *
+   * ## 为什么条数之外还要记内容
+   *
+   * 「条数增长」是主判据，但有漏洞：如果页面把回复渲染在基线选择器
+   * **匹配不到**的容器里（改版、A/B 测试），`count` 永远不增长，
+   * 我们就会一直等到 5 分钟超时 —— 用户看到的是「一直等」。
+   *
+   * 记下基线内容后，只要页面上出现了**不一样的**内容就能交付。
+   * 两个判据取「任一成立」，比只看条数稳得多。
+   */
+  const baselineTextRef = useRef<string>('')
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
@@ -1399,6 +1412,24 @@ export function LdwHost(): unknown {
          */
         const waitedMs = Date.now() - pendingSinceRef.current
 
+        /**
+         * 放弃门槛：**从配置读**，比 adapter 的 `timeoutMs` 早一点。
+         *
+         * ## 为什么不能硬编码（之前的缺陷）
+         *
+         * 原来写死 5 分钟。但配置里的 `replyTimeoutMs` 默认是 **10 分钟**
+         * （注释记着「实测最慢一次网页回复 6 分 12 秒」）——
+         * 于是慢回复会在 5 分钟被**提前掐断**，用户看到「超时」，
+         * 而网页版其实还在正常生成。
+         *
+         * 现在按配置的 80% 算（留出余量让 adapter 那次超时不会先触发），
+         * 用户调大「等回复超时」时这里跟着变。
+         *
+         * ⚠️ 用 `currentConfig()` 直接读，不用下面的 `cfgNow` ——
+         * 那个变量在这个位置还没声明（会踩 TDZ）。
+         */
+        const giveUpMs = Math.max(60_000, Math.round(currentConfig().replyTimeoutMs * 0.8))
+
         if (hasPending && waitedMs > 3_000) {
           const jobId = pendingJobRef.current!
           const scrapedRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
@@ -1416,12 +1447,19 @@ export function LdwHost(): unknown {
               const count = typeof scraped.count === 'number' ? scraped.count : 0
 
               /**
-               * 本轮回复来了吗？—— **条数比基线多**，且内容够长。
+               * ## 本轮回复来了吗？—— 两个判据**任一**成立
                *
-               * 用条数而不是「内容变了」：页面重渲染/动画也会改内容，
-               * 但只有真的新增一条 assistant 消息才会让条数增长。
+               *   1. **条数比基线多** —— 正常情况（新增了一条 assistant 消息）
+               *   2. **内容与基线不同** —— 兜底：页面把回复渲染在基线选择器
+               *      匹配不到的容器里、或者原地替换而不是追加
+               *
+               * 只判条数不够稳：选择器一旦没覆盖到真实容器，`count` 永远
+               * 不增长，就会一直等到 5 分钟超时（用户看到的就是「一直等」）。
+               * 加上内容比对后，只要页面上出现了**新的**内容就能交付。
                */
-              if (scraped.ok === true && count > baselineRef.current && last.length >= 8) {
+              const countGrew = count > baselineRef.current
+              const contentChanged = last !== '' && last !== baselineTextRef.current
+              if (scraped.ok === true && last.length >= 8 && (countGrew || contentChanged)) {
                 /**
                  * 稳定性判据：连续两次读到**相同**内容才算生成完。
                  *
@@ -1436,7 +1474,9 @@ export function LdwHost(): unknown {
 
                 console.log('[dsh-webin] DOM 读到本轮回复', {
                   chars: last.length,
+                  thinkChars: think.length,
                   count,
+                  判据: countGrew ? '条数增长' : '内容变化',
                   selector: scraped.selector,
                 })
                 pendingJobRef.current = undefined
@@ -1463,9 +1503,9 @@ export function LdwHost(): unknown {
           }
         }
 
-        if (hasPending && waitedMs > 300_000) {
+        if (hasPending && waitedMs > giveUpMs) {
           const stuck = pendingJobRef.current!
-          console.warn('[dsh-webin] 待办超时，放弃任务', stuck)
+          console.warn('[dsh-webin] 待办超时，放弃任务', stuck, { waitedMs, giveUpMs })
           pendingJobRef.current = undefined
           pendingSinceRef.current = 0
           scrapedRef.current = undefined
@@ -1474,7 +1514,7 @@ export function LdwHost(): unknown {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               error:
-                '等待网页回复超时（客户端 5 分钟兜底）。' +
+                `等待网页回复超时（${Math.round(giveUpMs / 1000)} 秒）。` +
                 '页面上没有可读取的回复内容 —— 请检查网页版里的状态。',
             }),
           }).catch(() => undefined)
@@ -1641,10 +1681,12 @@ export function LdwHost(): unknown {
           const baseRaw = await execJs<string>(el, buildScrapeScript(), 8_000)
           if (baseRaw !== EXEC_TIMEOUT) {
             try {
-              const base = JSON.parse(String(baseRaw)) as { count?: number }
+              const base = JSON.parse(String(baseRaw)) as { count?: number; last?: string }
               baselineRef.current = typeof base.count === 'number' ? base.count : 0
+              baselineTextRef.current = typeof base.last === 'string' ? base.last : ''
             } catch {
               baselineRef.current = 0
+              baselineTextRef.current = ''
             }
           }
         }

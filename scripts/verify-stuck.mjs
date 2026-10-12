@@ -259,8 +259,37 @@ console.log('\n[8] ⭐ DOM 读回复是**主路径**（不再是 20s 兜底）')
   /** 连续两次读到相同内容才算生成完（避免交半截回复）。 */
   check('⭐ 内容稳定才交（防半截）', /scrapedRef\.current !== last/.test(clientSrc), true)
   check('⭐ 派发前记基线', /baselineRef\.current = typeof base\.count === 'number'/.test(clientSrc), true)
-  check('仍有 5 分钟放弃', /waitedMs > 300_000/.test(clientSrc), true)
-  check('放弃时也交错误给 host', /等待网页回复超时（客户端 5 分钟兜底）/.test(clientSrc), true)
+  /**
+   * ⭐ 放弃门槛**从配置读**，不硬编码。
+   *
+   * 原来写死 5 分钟，但配置里 `replyTimeoutMs` 默认 **10 分钟**
+   * （注释记着「实测最慢一次网页回复 6 分 12 秒」）——
+   * 于是慢回复会在 5 分钟被**提前掐断**，用户看到「超时」，
+   * 而网页版其实还在正常生成。
+   */
+  check('⭐ 放弃门槛取配置的 80%', /currentConfig\(\)\.replyTimeoutMs \* 0\.8/.test(clientSrc), true)
+  check('⭐ 不再硬编码 5 分钟', /waitedMs > 300_000/.test(clientSrc), false)
+  check('有下限保护（至少 60 秒）', /Math\.max\(60_000, Math\.round\(currentConfig\(\)/.test(clientSrc), true)
+  check('放弃时也交错误给 host', /等待网页回复超时（\$\{Math\.round\(giveUpMs \/ 1000\)\} 秒）/.test(clientSrc), true)
+  /**
+   * ⚠️ 不能用下面的 `cfgNow` —— 那个变量在这个位置还没声明（TDZ）。
+   */
+  check('用 currentConfig() 而不是 cfgNow（避免 TDZ）', /const giveUpMs = [^\n]*currentConfig\(\)/.test(clientSrc), true)
+}
+
+console.log('\n[8b] ⭐ 交付判据：条数增长 **或** 内容变化（任一成立）')
+{
+  /**
+   * 只判条数有漏洞：页面若把回复渲染在基线选择器**匹配不到**的容器里
+   * （改版 / A/B 测试），`count` 永远不增长 ⇒ 一直等到超时。
+   * 加上内容比对后，只要出现**新内容**就能交付。
+   */
+  const i = clientSrc.indexOf('const countGrew = count > baselineRef.current')
+  check('⭐ 有 countGrew 判据', i > 0, true)
+  check('⭐ 有 contentChanged 判据', /const contentChanged = last !== '' && last !== baselineTextRef\.current/.test(clientSrc), true)
+  check('⭐ 两者取「或」', /\(countGrew \|\| contentChanged\)/.test(clientSrc), true)
+  check('⭐ 派发时记基线的内容', /baselineTextRef\.current = typeof base\.last === 'string'/.test(clientSrc), true)
+  check('有 baselineTextRef 声明', /const baselineTextRef = useRef<string>\(''\)/.test(clientSrc), true)
 }
 
 console.log('\n[9] ⭐ Hook 自愈守护（「收到 0 条」的根治）')
