@@ -215,55 +215,220 @@ const CSS = `
 .webin-badge-off{color:var(--dsw-alias-label-quaternary);
   background:var(--dsw-alias-bg-layer-2)}
 
-/* ---- 设置页（settings.section）----
-   全部用 DSH 的主题 token，不写死颜色 —— 否则切浅色/深色主题会花。 */
-.ldw-set{padding:4px 2px 24px;display:flex;flex-direction:column;gap:10px}
-.ldw-set-title{margin:0;font:var(--dsw-font-lg-16);color:var(--dsw-alias-label-primary)}
-.ldw-set-sub{margin:8px 0 0;font:var(--dsw-font-sm-14);color:var(--dsw-alias-label-primary)}
-.ldw-set-note{margin:0;font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-tertiary);line-height:1.6}
-.ldw-set-grid{display:flex;flex-direction:column;gap:8px}
-.ldw-set-card{padding:10px 12px;border-radius:var(--dsw-radius-md,8px);
-  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);
-  display:flex;flex-direction:column;gap:8px}
-.ldw-set-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
-.ldw-set-head strong{font:var(--dsw-font-sm-14);color:var(--dsw-alias-label-primary)}
-.ldw-set-id{font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-quaternary)}
-.ldw-set-tag{padding:1px 6px;border-radius:var(--dsw-radius-sm,6px);font:var(--dsw-font-xxxs-11);
-  color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-layer-3)}
-.ldw-set-rows{display:flex;flex-direction:column;gap:3px}
-.ldw-set-row{display:flex;gap:8px;font:var(--dsw-font-xs-12);line-height:1.5}
-.ldw-set-label{flex:none;min-width:52px;color:var(--dsw-alias-label-quaternary)}
-.ldw-set-value{color:var(--dsw-alias-label-secondary);word-break:break-all}
-.ldw-set-actions{display:flex;gap:8px}
-.ldw-set-btn{padding:4px 12px;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;
-  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-2);
-  font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-secondary)}
-.ldw-set-btn:disabled{opacity:.5;cursor:default}
-.ldw-set-btn-primary{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3)}
-.ldw-set-input{width:100%;box-sizing:border-box;padding:8px;border-radius:var(--dsw-radius-sm,6px);
-  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);
-  color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12);resize:vertical}
-.ldw-set-err{padding:8px 10px;border-radius:var(--dsw-radius-sm,6px);
-  font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);
-  background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)}
+/* ══════════════════════════════════════════════════════════════════════
+   LDW 设置页 · 视觉系统
+   ──────────────────────────────────────────────────────────────────────
+   令牌：所有色值取自宿主 --dsw-alias-* 变量，昼夜由宿主切换，本页不写死颜色。
+   层级：layer-3 凹槽/页面底 · layer-2 面板 · layer-1 浮起元素。
+   动效：transform/opacity 优先；常规 150–300ms、覆盖层 300–400ms。
+   ══════════════════════════════════════════════════════════════════════ */
+.ldw-set{--ease-instrument:cubic-bezier(.16,1,.3,1);--ease-settle:cubic-bezier(.34,1.4,.4,1);
+  display:flex;flex-direction:column;gap:20px;max-width:1080px;font-size:13px;line-height:1.55;
+  color:var(--dsw-alias-label-primary);-webkit-font-smoothing:antialiased}
+.ldw-set *{box-sizing:border-box}
+.ldw-set ::selection{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 24%,transparent)}
+/* 键盘可达性：只给键盘聚焦画环，鼠标点击不出现 */
+.ldw-set :focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 78%,transparent);
+  outline-offset:2px;box-shadow:0 0 0 4px color-mix(in srgb,var(--dsw-alias-state-business-primary) 13%,transparent)}
 
-/* ---- 配置表单 ---- */
-.ldw-set-details{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,8px);
-  padding:8px 12px;background:var(--dsw-alias-bg-layer-1)}
-.ldw-set-details>summary{cursor:pointer;margin:0;list-style:none}
-.ldw-set-details>summary::-webkit-details-marker{display:none}
-.ldw-set-details>summary::before{content:"▸ ";color:var(--dsw-alias-label-quaternary)}
-.ldw-set-details[open]>summary::before{content:"▾ "}
-.ldw-set-config{display:flex;flex-direction:column;gap:12px;margin-top:8px}
-.ldw-set-group{display:flex;flex-direction:column;gap:6px}
-.ldw-set-group-title{margin:0;font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-primary)}
-.ldw-set-field{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:var(--dsw-font-xs-12)}
-.ldw-set-field-label{flex:none;min-width:150px;color:var(--dsw-alias-label-secondary)}
-.ldw-set-num{width:88px;padding:3px 6px;border-radius:var(--dsw-radius-sm,6px);
-  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-2);
-  color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12)}
-.ldw-set-unit{flex:none;color:var(--dsw-alias-label-quaternary);min-width:24px}
-.ldw-set-hint{color:var(--dsw-alias-label-quaternary);font:var(--dsw-font-xxxs-11);line-height:1.5}
+/* ══ 页头 hero ═══════════════════════════════════════════════════════ */
+.ldw-hero{position:relative;display:flex;flex-direction:column;gap:14px;padding:22px 24px;border-radius:20px;
+  border:1px solid color-mix(in srgb,var(--dsw-alias-border-l2) 78%,transparent);
+  background:linear-gradient(165deg,color-mix(in srgb,var(--dsw-alias-bg-layer-3) 88%,transparent),
+    color-mix(in srgb,var(--dsw-alias-bg-layer-1) 82%,transparent));overflow:hidden}
+.ldw-hero::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(120% 150% at 12% -20%,color-mix(in srgb,var(--dsw-alias-state-business-primary) 13%,transparent),transparent 58%),
+    radial-gradient(90% 120% at 88% 130%,color-mix(in srgb,var(--dsw-alias-state-success-primary) 7%,transparent),transparent 60%)}
+.ldw-hero>*{position:relative}
+.ldw-pagehead{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap}
+.ldw-pagetitle{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ldw-pagetitle h2{margin:0;font-size:23px;font-weight:760;letter-spacing:-.6px;line-height:1.2;
+  background:linear-gradient(120deg,var(--dsw-alias-label-primary) 20%,
+    color-mix(in srgb,var(--dsw-alias-label-primary) 55%,var(--dsw-alias-state-business-primary)));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.ldw-pagesub{margin:0;font-size:12.5px;color:var(--dsw-alias-label-secondary);max-width:70ch}
+.ldw-pills{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.ldw-pill{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;
+  border:1px solid var(--dsw-alias-border-l1);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 78%,transparent);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 4%);font-size:11.5px;
+  color:var(--dsw-alias-label-secondary);white-space:nowrap;
+  transition:border-color .16s ease,color .16s ease}
+.ldw-pill.strong{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l2)}
+.ldw-dot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-label-tertiary);flex:none}
+@keyframes ldw-dot-breathe{0%,100%{opacity:1}50%{opacity:.55}}
+.ldw-dot.ok{background:var(--dsw-alias-state-success-primary);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary) 18%,transparent);
+  animation:ldw-dot-breathe 2.6s ease-in-out infinite}
+.ldw-dot.warn{background:var(--dsw-alias-state-warning-primary,#f0a441);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 18%,transparent)}
+.ldw-dot.err{background:var(--dsw-alias-state-error-primary);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-error-primary) 18%,transparent)}
+
+/* ══ 区块与分节 ══════════════════════════════════════════════════════ */
+.ldw-sec{display:flex;flex-direction:column;gap:10px}
+.ldw-sechead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding-bottom:6px;
+  border-bottom:1px solid var(--dsw-alias-border-l1)}
+.ldw-sec-title{font-size:14px;font-weight:680;letter-spacing:-.2px}
+.ldw-sec-hint{font-size:11.5px;color:var(--dsw-alias-label-tertiary);margin-left:auto}
+.ldw-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(252px,1fr));gap:10px}
+
+/* ══ 卡片（双层 bezel：hairline 边框 + 顶部内高光 + 柔和外阴影）═════ */
+.ldw-card{position:relative;display:flex;flex-direction:column;gap:8px;padding:12px 13px;border-radius:13px;
+  border:1px solid var(--dsw-alias-border-l2);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 80%,transparent);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 6%),
+    0 1px 2px color-mix(in srgb,var(--dsw-alias-state-business-primary) 7%,transparent),
+    0 3px 10px color-mix(in srgb,var(--dsw-alias-state-business-primary) 4%,transparent);
+  transition:transform .2s cubic-bezier(.32,.72,0,1),box-shadow .24s ease,border-color .18s ease}
+.ldw-card:hover{transform:translateY(-2px);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 66%,var(--dsw-alias-border-l2));
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 9%),
+    0 16px 34px color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}
+.ldw-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ldw-card-name{font-size:13.5px;font-weight:640;letter-spacing:-.15px}
+.ldw-card-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+  color:var(--dsw-alias-label-quaternary)}
+
+/* ══ 面板（浮起容器）══════════════════════════════════════════════════ */
+.ldw-panel{padding:16px;border-radius:16px;border:1px solid var(--dsw-alias-border-l2);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 82%,transparent);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 5%),0 2px 6px rgb(0 0 0 / 4%);
+  display:flex;flex-direction:column;gap:12px}
+.ldw-glass{background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 68%,transparent);
+  backdrop-filter:blur(16px) saturate(150%);-webkit-backdrop-filter:blur(16px) saturate(150%);
+  border:1px solid color-mix(in srgb,var(--dsw-alias-border-l2) 78%,transparent);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 6%),0 12px 34px rgb(0 0 0 / 9%)}
+
+/* ══ 键值行 ══════════════════════════════════════════════════════════ */
+.ldw-rows{display:flex;flex-direction:column;gap:4px}
+.ldw-row{display:flex;gap:8px;font-size:12px;line-height:1.5;align-items:baseline}
+.ldw-row-label{flex:none;min-width:56px;color:var(--dsw-alias-label-quaternary)}
+.ldw-row-value{color:var(--dsw-alias-label-secondary);word-break:break-all;min-width:0}
+
+/* ══ 表单控件 ════════════════════════════════════════════════════════ */
+.ldw-field{display:flex;flex-direction:column;gap:4px;min-width:120px}
+.ldw-field-inline{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.ldw-field-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.ldw-input{font:inherit;font-size:12px;padding:6px 10px;border-radius:9px;
+  border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);
+  box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%);color:var(--dsw-alias-label-primary);
+  min-width:0;width:100%;transition:border-color .16s ease,box-shadow .16s ease}
+.ldw-input:focus{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 62%,var(--dsw-alias-border-l2));
+  box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%),0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent)}
+.ldw-num{width:96px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+  padding:5px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);
+  background:var(--dsw-alias-bg-layer-1);box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%);
+  color:var(--dsw-alias-label-primary);transition:border-color .16s ease,box-shadow .16s ease}
+.ldw-num:focus{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 62%,var(--dsw-alias-border-l2));
+  box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%),0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent)}
+.ldw-unit{flex:none;font-size:11px;color:var(--dsw-alias-label-quaternary);min-width:22px}
+.ldw-note{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5;margin:0}
+.ldw-textarea{font:inherit;font-size:11.5px;padding:10px;border-radius:11px;resize:vertical;
+  border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);
+  box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%);color:var(--dsw-alias-label-primary);width:100%;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.6;
+  transition:border-color .16s ease,box-shadow .16s ease}
+.ldw-textarea:focus{border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 62%,var(--dsw-alias-border-l2));
+  box-shadow:inset 0 1px 2px rgb(0 0 0 / 5%),0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-business-primary) 14%,transparent)}
+
+/* ══ 开关（role=switch，圆点带弹性位移）═════════════════════════════ */
+.ldw-switch{display:inline-flex;align-items:center;gap:9px;cursor:pointer;user-select:none;
+  -webkit-tap-highlight-color:transparent;background:none;border:none;padding:0;
+  font:inherit;color:inherit;text-align:left}
+.ldw-switch>i{width:36px;height:20px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);
+  border:1px solid var(--dsw-alias-border-l2);box-shadow:inset 0 1px 3px rgb(0 0 0 / 8%);
+  position:relative;transition:background .2s ease,border-color .2s ease,box-shadow .2s ease;flex:none}
+.ldw-switch:hover>i{filter:brightness(1.05)}
+.ldw-switch[aria-checked="true"]:hover>i{filter:brightness(1.08)}
+.ldw-switch>i::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+  background:var(--dsw-alias-label-secondary);box-shadow:0 1px 3px rgb(0 0 0 / 22%);
+  transition:transform .26s cubic-bezier(.34,1.3,.64,1),background .2s ease,width .16s ease}
+.ldw-switch:active>i::after{width:17px}
+.ldw-switch[aria-checked="true"]>i{background:var(--dsw-alias-state-business-primary);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 85%,#000);
+  box-shadow:inset 0 1px 3px rgb(0 0 0 / 12%)}
+.ldw-switch[aria-checked="true"]>i::after{transform:translateX(16px);background:#fff}
+.ldw-switch[aria-checked="true"]:active>i::after{transform:translateX(13px)}
+.ldw-switch:focus-visible>i{box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-business-primary) 22%,transparent)}
+.ldw-switch:disabled{opacity:.45;cursor:default}
+
+/* ══ 按钮 ════════════════════════════════════════════════════════════ */
+.ldw-btn{font:inherit;font-size:12px;font-weight:580;padding:6px 14px;border-radius:9px;
+  border:1px solid var(--dsw-alias-border-l2);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 84%,transparent);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 5%),0 1px 2px rgb(0 0 0 / 6%);
+  color:var(--dsw-alias-label-primary);cursor:pointer;
+  transition:transform .18s var(--ease-instrument),border-color .2s var(--ease-instrument),
+    background .2s var(--ease-instrument),box-shadow .22s var(--ease-instrument),opacity .16s ease}
+.ldw-btn:hover:not(:disabled){border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 62%,var(--dsw-alias-border-l2));
+  background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 7%,var(--dsw-alias-bg-layer-3));
+  transform:translateY(-1px);box-shadow:inset 0 1px 0 rgb(255 255 255 / 7%),0 3px 8px rgb(0 0 0 / 9%)}
+.ldw-btn:active:not(:disabled){transform:translateY(0)}
+.ldw-btn.primary{background:linear-gradient(180deg,
+    color-mix(in srgb,var(--dsw-alias-state-business-primary) 88%,#fff),
+    var(--dsw-alias-state-business-primary));
+  border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 82%,#000);
+  color:var(--dsw-alias-label-on-accent,#fff);
+  box-shadow:inset 0 1px 0 rgb(255 255 255 / 18%),
+    0 2px 8px color-mix(in srgb,var(--dsw-alias-state-business-primary) 32%,transparent)}
+.ldw-btn.danger:hover:not(:disabled){border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 62%,var(--dsw-alias-border-l2));
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,var(--dsw-alias-bg-layer-3))}
+.ldw-btn:disabled{opacity:.45;cursor:default;box-shadow:none;transform:none}
+.ldw-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+
+/* ══ 折叠区 ══════════════════════════════════════════════════════════ */
+.ldw-details{border:1px solid var(--dsw-alias-border-l2);border-radius:14px;padding:0;
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-2) 72%,transparent);overflow:hidden}
+.ldw-details>summary{cursor:pointer;list-style:none;padding:13px 16px;
+  display:flex;align-items:center;gap:9px;font-size:13px;font-weight:620;
+  transition:background .16s ease}
+.ldw-details>summary:hover{background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 52%,transparent)}
+.ldw-details>summary::-webkit-details-marker{display:none}
+.ldw-details>summary::before{content:"";width:0;height:0;flex:none;
+  border-left:5px solid var(--dsw-alias-label-tertiary);
+  border-top:4px solid transparent;border-bottom:4px solid transparent;
+  transition:transform .22s var(--ease-instrument)}
+.ldw-details[open]>summary::before{transform:rotate(90deg)}
+.ldw-details-body{padding:0 16px 16px;display:flex;flex-direction:column;gap:14px}
+
+/* ══ 配置分组 ════════════════════════════════════════════════════════ */
+.ldw-group{display:flex;flex-direction:column;gap:9px}
+.ldw-group-title{margin:0;font-size:12.5px;font-weight:640;letter-spacing:-.1px;
+  display:flex;align-items:center;gap:7px}
+.ldw-group-title::before{content:"";width:3px;height:12px;border-radius:2px;flex:none;
+  background:var(--dsw-alias-state-business-primary)}
+.ldw-fieldrow{display:grid;grid-template-columns:minmax(150px,1.1fr) auto 1fr;gap:10px;
+  align-items:center;padding:5px 0}
+.ldw-fieldrow .ldw-hint{font-size:11px;color:var(--dsw-alias-label-quaternary);line-height:1.45}
+
+/* ══ 提示条 ══════════════════════════════════════════════════════════ */
+.ldw-callout{display:flex;gap:9px;padding:10px 12px;border-radius:11px;
+  border:1px solid color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 34%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 9%,transparent);
+  font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary)}
+.ldw-callout.err{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 34%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,transparent)}
+.ldw-callout strong{color:var(--dsw-alias-label-primary);font-weight:620}
+.ldw-callout ul{margin:5px 0 0;padding-left:18px}
+.ldw-callout li{margin:2px 0}
+
+/* ══ 标签（自定义 / 状态）════════════════════════════════════════════ */
+.ldw-tag{padding:2px 8px;border-radius:999px;font-size:10.5px;font-weight:560;white-space:nowrap;
+  border:1px solid var(--dsw-alias-border-l1);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 72%,transparent);
+  color:var(--dsw-alias-label-tertiary)}
+.ldw-tag.ok{color:var(--dsw-alias-state-success-primary);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 38%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 11%,transparent)}
+.ldw-tag.warn{color:var(--dsw-alias-state-warning-primary,#f0a441);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 38%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 11%,transparent)}
+
+/* ══ 骨架屏（首次读取时的 shimmer）══════════════════════════════════ */
+@keyframes ldw-shimmer{0%{opacity:.45}50%{opacity:.85}100%{opacity:.45}}
+.ldw-skeleton{animation:ldw-shimmer 1.5s ease-in-out infinite;border-radius:8px;
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 70%,transparent);height:13px}
 `
 
 // ---------------------------------------------------------------------------
@@ -1746,36 +1911,82 @@ export function LdwSettings(): unknown {
     }
   }
 
+  /**
+   * ---- 首次读取：骨架屏 ----
+   *
+   * 不用「正在读取…」一行字 —— 骨架屏能让布局提前稳定，
+   * 数据到位时不会整页跳动。
+   */
   if (state === null) {
-    return createElement('div', { className: 'ldw-set' }, createElement('p', { className: 'ldw-set-note' }, '正在读取…'))
+    return createElement(
+      'div',
+      { className: 'ldw-set' },
+      createElement(
+        'div',
+        { className: 'ldw-hero' },
+        createElement(
+          'div',
+          { className: 'ldw-pagehead' },
+          createElement(
+            'div',
+            { className: 'ldw-pagetitle' },
+            createElement('h2', null, 'LDW · 网页版接入'),
+            createElement('p', { className: 'ldw-pagesub' }, '正在读取平台与配置…'),
+          ),
+        ),
+      ),
+      createElement(
+        'div',
+        { className: 'ldw-grid' },
+        ...[0, 1].map((i) =>
+          createElement(
+            'div',
+            { key: i, className: 'ldw-card' },
+            createElement('div', { className: 'ldw-skeleton', style: { width: '55%' } }),
+            createElement('div', { className: 'ldw-skeleton', style: { width: '85%' } }),
+            createElement('div', { className: 'ldw-skeleton', style: { width: '70%' } }),
+          ),
+        ),
+      ),
+    )
   }
 
-  /** 每个平台一张卡片：登录态 + 模型数 + 是否可删。 */
+  /** 有浏览器在线且已登录的平台数 —— 页头状态点用。 */
+  const liveCount = state.clients.filter((c) => c.loggedIn).length
+  const customCount = state.providers.filter((p) => state.customIds.includes(p.id)).length
+
+  /** 每个平台一张卡片。 */
   const cards = state.providers.map((p) => {
     const beats = state.clients.filter((c) => c.platform === p.id)
     const loggedIn = beats.some((c) => c.loggedIn)
     const live = beats.length > 0
     const isCustom = state.customIds.includes(p.id)
+    /** 状态点：在线且登录=ok；在线未登录=warn；不在线=灰。 */
+    const dot = live ? (loggedIn ? 'ok' : 'warn') : ''
+    const statusText = live
+      ? loggedIn
+        ? '已登录'
+        : '未登录'
+      : '浏览器未打开'
+
     return createElement(
       'div',
-      { key: p.id, className: 'ldw-set-card' },
+      { key: p.id, className: 'ldw-card' },
       createElement(
         'div',
-        { className: 'ldw-set-head' },
-        createElement('strong', null, p.name),
-        createElement('code', { className: 'ldw-set-id' }, p.id),
-        isCustom ? createElement('span', { className: 'ldw-set-tag' }, '自定义') : null,
+        { className: 'ldw-card-head' },
+        createElement('span', { className: `ldw-dot ${dot}`.trim() }),
+        createElement('span', { className: 'ldw-card-name' }, p.name),
+        createElement('span', { className: 'ldw-card-id' }, p.id),
+        createElement('span', { className: 'ldw-tag' + (isCustom ? ' warn' : '') }, isCustom ? '自定义' : '内置'),
       ),
       createElement(
         'div',
-        { className: 'ldw-set-rows' },
+        { className: 'ldw-rows' },
+        row('状态', statusText),
         row('地址', p.homeUrl),
         row('模型', p.models.map((m) => m.name).join('、') || '（无）'),
         row('上下文', `${p.contextWindow.toLocaleString()} token`),
-        row(
-          '状态',
-          live ? (loggedIn ? '已登录，浏览器在线' : '浏览器在线，未登录') : '浏览器未打开（切到 LDW 标签即可）',
-        ),
       ),
       /**
        * 只有**自定义**项能删 —— 内置项删不掉（删了下次启动还在），
@@ -1784,12 +1995,12 @@ export function LdwSettings(): unknown {
       isCustom
         ? createElement(
             'div',
-            { className: 'ldw-set-actions' },
+            { className: 'ldw-actions' },
             createElement(
               'button',
               {
                 type: 'button',
-                className: 'ldw-set-btn',
+                className: 'ldw-btn danger',
                 disabled: busy,
                 onClick: () => void remove(p.id),
               },
@@ -1807,75 +2018,87 @@ export function LdwSettings(): unknown {
     const limit = LIMITS[spec.key as string]
     const scale = spec.scale ?? 1
     const unit = scale === 1000 ? '秒' : (spec.unit ?? '')
+    const rangeText =
+      limit === undefined
+        ? ''
+        : `${Math.round(limit.min / scale)}~${Math.round(limit.max / scale)}${unit}`
 
+    /** 布尔字段：用开关（与参考实现的 Switch 同款交互）。 */
     if (spec.bool === true) {
       return createElement(
-        'label',
-        { key: spec.key as string, className: 'ldw-set-field' },
-        createElement('input', {
-          type: 'checkbox',
-          checked: value === true,
-          onChange: (e: { target: { checked: boolean } }) => setField(spec.key, e.target.checked),
-        }),
-        createElement('span', { className: 'ldw-set-field-label' }, spec.label),
-        spec.hint !== undefined ? createElement('span', { className: 'ldw-set-hint' }, spec.hint) : null,
+        'div',
+        { key: spec.key as string, className: 'ldw-fieldrow' },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'ldw-switch',
+            role: 'switch',
+            'aria-checked': value === true ? 'true' : 'false',
+            onClick: () => setField(spec.key, value !== true),
+          },
+          createElement('i'),
+          createElement('span', { className: 'ldw-field-label' }, spec.label),
+        ),
+        createElement('span'),
+        createElement('span', { className: 'ldw-hint' }, spec.hint ?? ''),
       )
     }
 
     return createElement(
-      'label',
-      { key: spec.key as string, className: 'ldw-set-field' },
-      createElement('span', { className: 'ldw-set-field-label' }, spec.label),
-      createElement('input', {
-        type: 'number',
-        className: 'ldw-set-num',
-        value: scale === 1000 ? Math.round(Number(value) / scale) : Number(value),
-        min: limit === undefined ? undefined : Math.round(limit.min / scale),
-        max: limit === undefined ? undefined : Math.round(limit.max / scale),
-        step: 1,
-        onChange: (e: { target: { value: string } }) => {
-          const n = Number(e.target.value)
-          if (!Number.isFinite(n)) return
-          setField(spec.key, Math.round(n * scale))
-        },
-      }),
-      createElement('span', { className: 'ldw-set-unit' }, unit),
-      limit !== undefined
-        ? createElement(
-            'span',
-            { className: 'ldw-set-hint' },
-            `${Math.round(limit.min / scale)}~${Math.round(limit.max / scale)}${unit}${spec.hint !== undefined ? ` · ${spec.hint}` : ''}`,
-          )
-        : spec.hint !== undefined
-          ? createElement('span', { className: 'ldw-set-hint' }, spec.hint)
-          : null,
+      'div',
+      { key: spec.key as string, className: 'ldw-fieldrow' },
+      createElement('span', { className: 'ldw-field-label' }, spec.label),
+      createElement(
+        'span',
+        { className: 'ldw-field-inline' },
+        createElement('input', {
+          type: 'number',
+          className: 'ldw-num',
+          value: scale === 1000 ? Math.round(Number(value) / scale) : Number(value),
+          min: limit === undefined ? undefined : Math.round(limit.min / scale),
+          max: limit === undefined ? undefined : Math.round(limit.max / scale),
+          step: 1,
+          onChange: (e: { target: { value: string } }) => {
+            const n = Number(e.target.value)
+            if (!Number.isFinite(n)) return
+            setField(spec.key, Math.round(n * scale))
+          },
+        }),
+        createElement('span', { className: 'ldw-unit' }, unit),
+      ),
+      createElement(
+        'span',
+        { className: 'ldw-hint' },
+        [rangeText, spec.hint].filter((s) => s !== undefined && s !== '').join(' · '),
+      ),
     )
   }
 
   /** 配置表单（三个分组）。 */
   const configForm =
     form === null
-      ? createElement('p', { className: 'ldw-set-note' }, '正在读取配置…')
+      ? createElement('p', { className: 'ldw-note' }, '正在读取配置…')
       : createElement(
           'div',
-          { className: 'ldw-set-config' },
+          { style: { display: 'flex', flexDirection: 'column', gap: 18 } },
           ...FIELD_GROUPS.map((group) =>
             createElement(
               'div',
-              { key: group.title, className: 'ldw-set-group' },
-              createElement('h4', { className: 'ldw-set-group-title' }, group.title),
-              createElement('p', { className: 'ldw-set-hint' }, group.note),
+              { key: group.title, className: 'ldw-group' },
+              createElement('h4', { className: 'ldw-group-title' }, group.title),
+              createElement('p', { className: 'ldw-note' }, group.note),
               ...group.fields.map(renderField),
             ),
           ),
           createElement(
             'div',
-            { className: 'ldw-set-actions' },
+            { className: 'ldw-actions' },
             createElement(
               'button',
               {
                 type: 'button',
-                className: 'ldw-set-btn ldw-set-btn-primary',
+                className: 'ldw-btn primary',
                 disabled: busy,
                 onClick: () => void saveConfig(),
               },
@@ -1883,16 +2106,29 @@ export function LdwSettings(): unknown {
             ),
             createElement(
               'button',
-              { type: 'button', className: 'ldw-set-btn', disabled: busy, onClick: () => void resetConfig() },
+              { type: 'button', className: 'ldw-btn', disabled: busy, onClick: () => void resetConfig() },
               '恢复默认',
+            ),
+            createElement(
+              'span',
+              { className: 'ldw-note', style: { marginLeft: 'auto' } },
+              '改完立刻生效，不用重启',
             ),
           ),
           problems.length > 0
             ? createElement(
                 'div',
-                { className: 'ldw-set-err' },
-                createElement('strong', null, `${problems.length} 项被修正`),
-                ...problems.map((p, i) => createElement('div', { key: i }, `${p.field}：${p.reason}`)),
+                { className: 'ldw-callout' },
+                createElement(
+                  'div',
+                  null,
+                  createElement('strong', null, `${problems.length} 项被修正`),
+                  createElement(
+                    'ul',
+                    null,
+                    ...problems.map((p, i) => createElement('li', { key: i }, `${p.field}：${p.reason}`)),
+                  ),
+                ),
               )
             : null,
         )
@@ -1900,81 +2136,142 @@ export function LdwSettings(): unknown {
   return createElement(
     'div',
     { className: 'ldw-set' },
-    createElement('h2', { className: 'ldw-set-title' }, 'LDW · 网页版接入'),
+
+    /* ── 页头 ─────────────────────────────────────────────────────── */
     createElement(
-      'p',
-      { className: 'ldw-set-note' },
-      '用真实浏览器驱动 AI 网页版。切到「LDW」标签可打开浏览器窗口并登录。',
-    ),
-
-    createElement('h3', { className: 'ldw-set-sub' }, `平台（${state.providers.length}）`),
-    cards.length > 0 ? createElement('div', { className: 'ldw-set-grid' }, cards) : createElement('p', null, '（无）'),
-
-    state.errors.length > 0
-      ? createElement(
-          'div',
-          { className: 'ldw-set-err' },
-          createElement('strong', null, `${state.errors.length} 个 provider 文件读不了`),
-          ...state.errors.map((e, i) => createElement('div', { key: i }, `${e.file}：${e.reason}`)),
-        )
-      : null,
-
-    /**
-     * ---- 配置 ----
-     *
-     * 折叠起来：默认不展开，避免设置页一上来就是十几个数字吓人。
-     */
-    createElement(
-      'details',
-      { className: 'ldw-set-details' },
-      createElement('summary', { className: 'ldw-set-sub' }, '插件配置'),
-      configForm,
-    ),
-
-    /** ---- 添加自定义平台（默认折叠）---- */
-    createElement(
-      'details',
-      { className: 'ldw-set-details', open: showAdd },
-      createElement(
-        'summary',
-        { className: 'ldw-set-sub', onClick: () => setShowAdd((v) => !v) },
-        '添加自定义平台',
-      ),
-      createElement(
-        'p',
-        { className: 'ldw-set-note' },
-        '粘贴一个 Provider JSON（字段见 README）。同 id 会覆盖内置项，删掉即可回退。',
-      ),
-      createElement('textarea', {
-        className: 'ldw-set-input',
-        rows: 8,
-        placeholder:
-          '{\n  "id": "my-platform",\n  "name": "我的平台",\n  "homeUrl": "https://example.com/",\n  ...\n}',
-        value: draft,
-        onChange: (e: { target: { value: string } }) => setDraft(e.target.value),
-      }),
+      'header',
+      { className: 'ldw-hero' },
       createElement(
         'div',
-        { className: 'ldw-set-actions' },
+        { className: 'ldw-pagehead' },
         createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'ldw-set-btn ldw-set-btn-primary',
-            disabled: busy || draft.trim() === '',
-            onClick: () => void submit(),
-          },
-          busy ? '处理中…' : '保存',
+          'div',
+          { className: 'ldw-pagetitle' },
+          createElement('h2', null, 'LDW · 网页版接入'),
+          createElement(
+            'p',
+            { className: 'ldw-pagesub' },
+            '用真实浏览器驱动 AI 网页版 —— 真实登录、真实输入、真实发送，回复由页面自己的 SSE 读出。',
+          ),
         ),
         createElement(
-          'button',
-          { type: 'button', className: 'ldw-set-btn', disabled: busy, onClick: () => void refresh() },
-          '刷新',
+          'div',
+          { className: 'ldw-pills' },
+          createElement(
+            'span',
+            { className: 'ldw-pill strong' },
+            createElement('span', { className: `ldw-dot ${liveCount > 0 ? 'ok' : ''}`.trim() }),
+            liveCount > 0 ? `${liveCount} 个已登录` : '浏览器未打开',
+          ),
+          createElement('span', { className: 'ldw-pill' }, `${state.providers.length} 个平台`),
+          customCount > 0 ? createElement('span', { className: 'ldw-pill' }, `${customCount} 个自定义`) : null,
         ),
       ),
     ),
 
-    note !== '' ? createElement('p', { className: 'ldw-set-note' }, note) : null,
+    /* ── 平台 ─────────────────────────────────────────────────────── */
+    createElement(
+      'section',
+      { className: 'ldw-sec' },
+      createElement(
+        'div',
+        { className: 'ldw-sechead' },
+        createElement('span', { className: 'ldw-sec-title' }, '平台'),
+        createElement(
+          'span',
+          { className: 'ldw-sec-hint' },
+          '切到 LDW 标签可打开浏览器窗口并登录',
+        ),
+      ),
+      cards.length > 0
+        ? createElement('div', { className: 'ldw-grid' }, cards)
+        : createElement('p', { className: 'ldw-note' }, '（没有可用平台）'),
+      state.errors.length > 0
+        ? createElement(
+            'div',
+            { className: 'ldw-callout err' },
+            createElement(
+              'div',
+              null,
+              createElement('strong', null, `${state.errors.length} 个 provider 文件读不了`),
+              createElement(
+                'ul',
+                null,
+                ...state.errors.map((e, i) => createElement('li', { key: i }, `${e.file}：${e.reason}`)),
+              ),
+            ),
+          )
+        : null,
+    ),
+
+    /* ── 插件配置（默认折叠，避免一屏全是数字）───────────────────── */
+    createElement(
+      'details',
+      { className: 'ldw-details' },
+      createElement(
+        'summary',
+        null,
+        '插件配置',
+        createElement(
+          'span',
+          { className: 'ldw-sec-hint' },
+          form === null ? '' : describeConfig(form),
+        ),
+      ),
+      createElement('div', { className: 'ldw-details-body' }, configForm),
+    ),
+
+    /* ── 添加自定义平台（默认折叠）───────────────────────────────── */
+    createElement(
+      'details',
+      { className: 'ldw-details', open: showAdd },
+      createElement('summary', { onClick: () => setShowAdd((v) => !v) }, '添加自定义平台'),
+      createElement(
+        'div',
+        { className: 'ldw-details-body' },
+        createElement(
+          'p',
+          { className: 'ldw-note' },
+          '粘贴一个 Provider JSON（字段见 README）。同 id 会覆盖内置项，删掉即可回退。',
+        ),
+        createElement('textarea', {
+          className: 'ldw-textarea',
+          rows: 9,
+          placeholder:
+            '{\n  "id": "my-platform",\n  "name": "我的平台",\n  "homeUrl": "https://example.com/",\n  "urlPattern": "example\\\\.com",\n  "input": { "selectors": ["textarea"] },\n  "send": { "selectors": ["button[type=\\"submit\\"]"] },\n  "completionPath": "/api/chat",\n  "models": [{ "id": "fast", "name": "快速" }],\n  "contextWindow": 131072,\n  "maxOutputTokens": 8192\n}',
+          value: draft,
+          onChange: (e: { target: { value: string } }) => setDraft(e.target.value),
+        }),
+        createElement(
+          'div',
+          { className: 'ldw-actions' },
+          createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'ldw-btn primary',
+              disabled: busy || draft.trim() === '',
+              onClick: () => void submit(),
+            },
+            busy ? '处理中…' : '保存',
+          ),
+          createElement(
+            'button',
+            { type: 'button', className: 'ldw-btn', disabled: busy, onClick: () => void refresh() },
+            '刷新',
+          ),
+        ),
+      ),
+    ),
+
+    /* ── 操作反馈 ─────────────────────────────────────────────────── */
+    note !== ''
+      ? createElement(
+          'div',
+          { className: 'ldw-callout' },
+          createElement('div', null, createElement('strong', null, '提示'), createElement('div', null, note)),
+        )
+      : null,
   )
 }
 

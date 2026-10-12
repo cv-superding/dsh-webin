@@ -292,24 +292,78 @@ console.log('\n[3b] 设置页组件内部逻辑（用假 state 跑完整渲染�
    * 所以改用**源码断言**覆盖卡片分支的关键点。
    */
   const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
-  check('⭐ 有平台卡片渲染', client.includes('ldw-set-card'), true)
-  check('⭐ 卡片显示登录态', /已登录，浏览器在线/.test(client), true)
+  check('⭐ 有平台卡��渲染', client.includes('ldw-card'), true)
+  check('⭐ 卡片显示登录态', /已登录/.test(client), true)
   check('⭐ 卡片显示未打开浏览器的提示', /浏览器未打开/.test(client), true)
   check('⭐ 只对自定义项显示删除按钮', /customIds\.includes/.test(client), true)
-  check('有添加自定义平台的输入框', client.includes('ldw-set-input'), true)
-  check('⭐ 有读盘错误展示', client.includes('ldw-set-err'), true)
+  check('有添加自定义平台的输入框', client.includes('ldw-textarea'), true)
+  check('⭐ 有读盘错误展示', client.includes('ldw-callout'), true)
   check('⭐ 定期刷新登录态', /setInterval/.test(client), true)
 }
 
 console.log('\n[4] 设置页样式齐全（否则渲染出来是裸文本）')
 {
   const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
-  for (const cls of ['ldw-set', 'ldw-set-card', 'ldw-set-btn', 'ldw-set-input', 'ldw-set-row', 'ldw-set-tag']) {
+  for (const cls of [
+    'ldw-set',
+    'ldw-hero',
+    'ldw-pagehead',
+    'ldw-pill',
+    'ldw-card',
+    'ldw-btn',
+    'ldw-textarea',
+    'ldw-row',
+    'ldw-tag',
+    'ldw-switch',
+    'ldw-callout',
+    'ldw-details',
+    'ldw-fieldrow',
+    'ldw-skeleton',
+  ]) {
     check(`样式含 .${cls}`, client.includes(`.${cls}`), true)
   }
   /** 主题 token 而不是写死颜色 —— 否则切浅色主题会花。 */
   check('⭐ 用主题 token（不写死颜色）', client.includes('--dsw-alias-label-primary'), true)
-  check('没有写死的十六进制色值', /\.ldw-set[^}]*#[0-9a-fA-F]{3,6}/.test(client), false)
+  /**
+   * 写死的色值只允许出现在两处（都是**有意为之**）：
+   *   1. `var(--token, #fallback)` 的兜底值 —— 主题没定义该 token 时才用
+   *   2. `#fff` —— 开关圆点在「开」状态下的白色，与主题无关
+   *
+   * 所以判据是「background/color 直接写死十六进制」，
+   * 而不是「出现十六进制就报错」（那样会误报上面两种）。
+   */
+  const hardcoded = [...client.matchAll(/\.ldw-[a-z-]+[^}]*?(?:background|color):\s*#[0-9a-fA-F]{3,6}/g)]
+    /** 开关圆点的白色是有意的（见下），排除。 */
+    .filter((m) => !m[0].includes('background:#fff'))
+    .map((m) => m[0].slice(0, 90))
+  check('⭐ 没有直接写死的 background/color', hardcoded, [])
+  /** 兜底值与白色圆点确实存在（确认上面那条不是「碰巧没匹配到」）。 */
+  check('兜底值写法存在（有意为之）', /var\(--dsw-alias-state-warning-primary,#f0a441\)/.test(client), true)
+  check('开关圆点用白色（有意为之）', /aria-checked="true"\]>i::after\{transform:translateX\(16px\);background:#fff/.test(client), true)
+}
+
+console.log('\n[4b] ⭐ 视觉系统（参考开源实现的成熟做法）')
+{
+  const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  /** 分层阴影：hairline 边框 + 顶部内高光 + 柔和外阴影（"双层 bezel"）。 */
+  check('⭐ 卡片有内高光', /inset 0 1px 0 rgb\(255 255 255/.test(client), true)
+  check('⭐ 卡片有外阴影', /0 3px 10px/.test(client), true)
+  check('⭐ 卡片 hover 抬升', /\.ldw-card:hover\{transform:translateY\(-2px\)/.test(client), true)
+  /** 动效曲线：仪表感 + 回弹。 */
+  check('⭐ 有缓动曲线令牌', client.includes('--ease-instrument') && client.includes('--ease-settle'), true)
+  /** 键盘可达性：只给键盘聚焦画环。 */
+  check('⭐ 用 :focus-visible（鼠标点击不出现环）', client.includes(':focus-visible'), true)
+  /** 开关圆点的弹性位移。 */
+  check('⭐ 开关圆点带过渡', /\.ldw-switch>i::after\{[^}]*transition:transform/.test(client), true)
+  check('⭐ 开关 checked 态位移', /aria-checked="true"\]>i::after\{transform:translateX/.test(client), true)
+  /** 状态点呼吸动画（在线指示）。 */
+  check('⭐ 状态点有呼吸动画', client.includes('ldw-dot-breathe'), true)
+  /** 骨架屏（首次读取不跳动）。 */
+  check('⭐ 有骨架屏', client.includes('ldw-skeleton'), true)
+  /** 用 color-mix 做半透明 —— 跟随主题色，而不是固定 rgba。 */
+  check('⭐ 用 color-mix 跟随主题色', client.includes('color-mix(in srgb'), true)
+  /** 页面最大宽度，避免超宽屏一行太长。 */
+  check('有最大宽度约束', /max-width:1080px/.test(client), true)
 }
 
 console.log('\n[5] 围栏名是中性的 ldw（用户要求）')
