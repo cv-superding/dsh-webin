@@ -14,6 +14,7 @@ import {
   buildDrainScript,
   buildProbeScript,
   buildRestoreScript,
+  buildScrapeScript,
   buildSnapshotScript,
   loadSnapshot,
   saveSnapshot,
@@ -139,6 +140,91 @@ function element_loadURL(el: GuestElement, url: string): Promise<void> {
     () => undefined,
     () => undefined,
   )
+}
+
+/**
+ * ## 带超时护栏的 `executeJavaScript`
+ *
+ * ## 为什么必须有这个（用户实测踩到的死锁）
+ *
+ * 用户症状：「一直深度求索中，网页版早就有回复和思考内容了，但就是不输出」。
+ *
+ * 排查发现状态栏那行的 `how` 字段**还是「思考模式未切换」那条消息**，
+ * 而不是发送方式 —— 说明发送之后的 `setLastSend` **从未执行**。
+ * 也就是说这一句永远没有 settle：
+ *
+ *     const raw = await el.executeJavaScript(buildSendScript(...))
+ *
+ * ## 为什么会永不 settle
+ *
+ * `executeJavaScript` 是**跨进程**调用（渲染进程 ← → 主进程）。
+ * 页面一旦**导航**（`location` 变了、或者 SPA 做了硬跳转），
+ * 旧的 JS 上下文就被销毁，挂在里面的 Promise **静默死掉** ——
+ * 不 resolve、不 reject、不抛错。宿主这边就永远等下去。
+ *
+ * 这解释了全部四个症状：
+ *   1. `setLastSend` 没执行（await 卡住）⇒ 状态栏还是思考那条消息
+ *   2. `busy` 永远为 true ⇒ 整个 `tick` 循环冻死 ⇒ DSH 一直等
+ *   3. 注入的 hook 随导航一起被销毁 ⇒ 「收到 0 条」
+ *   4. 网页版自己跑完了（那是新上下文里的事，我们既没看到也没收到）
+ *
+ * ## 为什么用 Promise.race 而不是给 `executeJavaScript` 传超时
+ *
+ * DSH 的 guest 桥只暴露 `executeJavaScript(code): Promise<unknown>`，
+ * 没有超时参数（实测查过）。所以只能在**外部**赛跑：
+ * 超时就认输，宁可报一个明确的超时错误，也不要静默卡死。
+ *
+ * @param el - guest 元素
+ * @param code - 要执行的脚本
+ * @param timeoutMs - 超时（默认 30s）；超时 resolve 成 sentinel 而不是 reject
+ * @returns 脚本结果；超时返回 {@link EXEC_TIMEOUT}
+ */
+export const EXEC_TIMEOUT = Symbol('dsh-webin:exec-timeout')
+
+/**
+ * 探测 hook 是否**仍在本页面**。
+ *
+ * 判据是 hook 自己写的标记（与 `hook.ts` 的 `MARKER` 必须一致）。
+ * 新文档里那个标记**必然**不存在，所以这个探测能可靠地发现导航。
+ *
+ * @returns 返回 `'true'` / `'false'` 字符串（`executeJavaScript` 的返回值）
+ */
+const MARKER_CHECK = `(function () {
+  try { return window.__dshWebinHookInstalled__ === true ? 'true' : 'false'; }
+  catch (e) { return 'false'; }
+})();`
+
+function execJs<T = unknown>(el: GuestElement, code: string, timeoutMs = 30_000): Promise<T | typeof EXEC_TIMEOUT> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      console.warn(`[dsh-webin] executeJavaScript 超时 ${timeoutMs}ms（页面可能已导航）`)
+      resolve(EXEC_TIMEOUT)
+    }, timeoutMs)
+
+    el.executeJavaScript(code).then(
+      (value) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        resolve(value as T)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(timer)
+        /**
+         * ⚠️ 失败也走 resolve（用 sentinel）而不是 reject ——
+         * 调用方几乎都是「拿到字符串就 JSON.parse」，抛出去会被
+         * 外层 catch 吞掉，反而不如让它们显式处理 sentinel。
+         */
+        console.warn('[dsh-webin] executeJavaScript 失败', error)
+        resolve(EXEC_TIMEOUT)
+      },
+    )
+  })
 }
 
 export const inject = ['slots']
@@ -917,6 +1003,55 @@ export function LdwHost(): unknown {
           // 避免重复起两个定时器。
         })
 
+        /**
+         * ## ⚠️ 导航时**立刻**重新注入 hook（不能只靠 `dom-ready`）
+         *
+         * 用户症状：「一直深度求索中，网页版早就有回复和思考内容了，但就是不输出」，
+         * 状态栏显示「收到 0 条」。
+         *
+         * 根因：hook 是**页面级**的，一次导航就没了。而 `dom-ready` 是在
+         * 页面**主要资源加载完之后**才触发的 —— 此时页面自己的脚本
+         * （包括它发 completion 请求的代码）**早就跑起来了**。
+         *
+         * 于是出现这个致命时序：
+         *
+         *     t0  我们发消息 → 页面从 / 硬跳转到 /a/chat/s/<id>
+         *     t1  导航 ⇒ **hook 被销毁**
+         *     t2  新页面起来，立刻发 completion 请求 ← 此时没有 hook！
+         *     t3  dom-ready 才触发 ⇒ 我们再注入，但请求已经发出去了
+         *     t4  我们看不到任何 SSE ⇒ 收到 0 条 ⇒ DSH 空等
+         *
+         * 新会话（`freshChat`）必然走这条路：首轮会导航到首页/新对话页。
+         *
+         * `did-start-navigation` 在主框架导航**开始**时就触发，比
+         * `dom-ready` 早得多。而且 hook 是**幂等**的（自带 MARKER 标记），
+         * 重复注入只是一次函数调用，代价极低。
+         *
+         * 另外每次导航也把「已就绪」重新置一下 —— 新页面需要重新探测输入框。
+         */
+        element.addEventListener('did-start-navigation', (event) => {
+          if (disposed) return
+          const e = event as unknown as { isMainFrame?: boolean; isSameDocument?: boolean }
+          /** 只关心主框架的**跨文档**导航（同文档 hash 变化不算）。 */
+          if (e.isMainFrame === false || e.isSameDocument === true) return
+          console.log('[dsh-webin] 主框架开始导航，预注入 hook')
+          /**
+           * 这时新文档还没建立，注入大概率打在上一个文档上（无害，幂等）。
+           * 真正的价值是**紧接着的 `dom-ready` 会立刻再注一次** ——
+           * 两次机会总比一次好，而且这次能给日志一个明确的时间点。
+           */
+          void execJs<string>(
+            element,
+            buildDeepSeekHook(provider.completionPath, provider.stopPath),
+            10_000,
+          )
+            .then((r) => {
+              if (disposed) return
+              if (r !== EXEC_TIMEOUT) console.log('[dsh-webin] 预注入 hook:', r)
+            })
+            .catch(() => undefined)
+        })
+
         element.addEventListener('did-fail-load', (event) => {
           if (disposed) return
           const e = event as unknown as { isMainFrame?: boolean; errorCode?: number; errorDescription?: string }
@@ -971,6 +1106,72 @@ export function LdwHost(): unknown {
      */
   }, [provider.id])
 
+  /**
+   * ## ⭐ Hook 自愈守护（**这是「收到 0 条」的根治手段**）
+   *
+   * ## 为什么不能只靠 `dom-ready` 注入
+   *
+   * hook 是**页面级**的，一次导航就没了。而 `dom-ready` 在页面主要资源
+   * 加载完**之后**才触发 —— 此时页面自己的脚本（包括它发 completion
+   * 请求的那段）**早就跑起来了**。于是：
+   *
+   *     t0  我们发消息 → 页面从 / 硬跳到 /a/chat/s/<id>
+   *     t1  导航 ⇒ hook 被销毁
+   *     t2  新页面起来，**立刻**发出 completion 请求 ← 此刻没有 hook
+   *     t3  dom-ready 才到 ⇒ 我们补注入，但请求已经发完了
+   *     t4  我们看不到任何 SSE ⇒ 收到 0 条 ⇒ DSH 一直等
+   *
+   * 用户实测就是这个：「一直深度求索中，网页版早就有回复和思考内容了，
+   * 但就是不输出」。新会话（`freshChat`）**必然**走这条路。
+   *
+   * ## 为什么用「守护」而不是继续加事件监听
+   *
+   * 导航的触发方式太多（`did-start-navigation` / `did-navigate` /
+   * SPA 硬跳 / 页面自己 `location.replace`），靠穷举事件永远有漏网。
+   *
+   * 所以改成**状态自愈**：每 1.5s 问一句「hook 还在吗」，
+   * 不在就装上。判据是 hook 自己写在 window 上的标记 ——
+   * 新文档里那个标记**必然**不存在，所以一定能测出来。
+   *
+   * 代价：每 1.5s 一次 `executeJavaScript`（读一个布尔值）。
+   * 与「抓不到回复导致整轮失败」相比，这个代价可以忽略。
+   */
+  useEffect(() => {
+    if (!ready) return
+    let stopped = false
+    const ensureHook = () => {
+      if (stopped) return
+      const el = hostRef.current?.querySelector('webview') as GuestElement | null
+      if (el === null) return
+      void execJs<string>(el, `${MARKER_CHECK}`, 8_000)
+        .then((r) => {
+          if (stopped) return
+          if (r === EXEC_TIMEOUT) return
+          /**
+           * 返回 'true' = hook 在（新文档里标记不可能存在）。
+           * 注意不能用 `if (!r)` —— 空字符串、'false' 都得重新注入。
+           */
+          if (String(r) === 'true') return
+          console.log('[dsh-webin] hook 不在（页面已导航），重新注入')
+          return execJs<string>(
+            el,
+            buildDeepSeekHook(provider.completionPath, provider.stopPath),
+            10_000,
+          ).then((installed) => {
+            if (stopped) return
+            console.log('[dsh-webin] hook 补注入:', installed)
+          })
+        })
+        .catch(() => undefined)
+    }
+    ensureHook()
+    const timer = window.setInterval(ensureHook, 1_500)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [ready, provider.id, provider.completionPath, provider.stopPath])
+
   // 轮询取走 hook 累积的事件。
   // CustomEvent 跨不过 webview 边界，guest 又是 sandbox 无 preload 拿不到 ipcRenderer，
   // 所以 executeJavaScript 轮询是唯一稳定的桥。
@@ -993,14 +1194,26 @@ export function LdwHost(): unknown {
    * 防止事件丢失导致永久卡住。
    */
   const pendingSinceRef = useRef<number>(0)
+  /**
+   * 已经用 DOM 兜底捞过哪个任务。
+   *
+   * 防止同一个任务被反复捞 —— 每轮都去读 DOM 会把同一段内容重复交回去。
+   * 主路径（hook 的 `done` 事件）拿到结果时也会清掉它。
+   */
+  const scrapedRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
       const el = hostRef.current?.querySelector('webview') as GuestElement | null
       if (el === null) return
-      void el
-        .executeJavaScript(buildDrainScript())
+      /**
+       * ⚠️ 用 `execJs`（带超时）。轮询是 500ms 一次，裸调用在页面导航时
+       * 会堆积一堆永不 settle 的 Promise —— 每个都占着闭包和事件监听。
+       * 超时给 10s（drain 只是读一个数组，正常是毫秒级）。
+       */
+      void execJs<string>(el, buildDrainScript(), 10_000)
         .then((raw) => {
+          if (raw === EXEC_TIMEOUT) return
           const text = String(raw)
           if (text === '[]' || text === '') return
           const events = JSON.parse(text) as Array<{ name: string; detail: Record<string, unknown>; at?: number }>
@@ -1024,11 +1237,10 @@ export function LdwHost(): unknown {
               if (jobId !== undefined) {
                 pendingJobRef.current = undefined
                 pendingSinceRef.current = 0
+                scrapedRef.current = undefined
                 /** 拿页面当前 URL（= 这条消息落地的对话页）。 */
-                void el
-                  .executeJavaScript('location.href')
-                  .then((u: unknown) => String(u))
-                  .catch(() => '')
+                void execJs<string>(el, 'location.href', 8_000)
+                  .then((u) => (u === EXEC_TIMEOUT ? '' : String(u)))
                   .then((chatUrl) => {
                     void fetch(`/dsh-webin/api/job/${jobId}/result`, {
                       method: 'PUT',
@@ -1135,25 +1347,83 @@ export function LdwHost(): unknown {
       busy = true
       try {
         /**
-         * **待办超时兜底。**
+         * ## 等待期间的两道救援（用户实测推动）
          *
-         * 正常情况下 `done` 事件会清掉 `pendingJobRef`。但事件可能丢：
-         * 页面导航了、hook 被清了、回复永远不来。那样 `pendingJobRef`
-         * 会一直挂着 ⇒ 发送循环**永久罢工**（再也不领新任务），
-         * 用户看到的就是「模型一直不回复」。
+         * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，
+         * 但就是不输出」。
          *
-         * 所以超过 5 分钟就主动放弃这个任务，把错误交回 host 并解锁循环。
-         * （adapter 那边的 `timeoutMs` 是 10 分钟，这里更早，避免两边同时超时。）
+         * 正常的 `done` 事件是主路径。但它可能永远不来：
+         * 页面导航了、hook 被清了、请求在 hook 装好之前就发出去了。
+         * 那时 `pendingJobRef` 一直挂着 ⇒ 发送循环**永久罢工**。
+         *
+         * 所以等久了就**主动去页面上把回复捞回来**（两层）：
+         *
+         *   1. **20 秒后**：先试 DOM 兜底 —— 回复如果已经渲染出来，
+         *      直接读走交结果。这是「明明有回复却报超时」的解药。
+         *   2. **5 分钟后**：真的一点都没有，才放弃并交错误
+         *      （adapter 那边是 10 分钟，这里更早，避免两边同时超时）。
+         *
+         * ⚠️ 只捞一次（`scrapedRef` 记着），避免每轮都去读 DOM
+         * 把同一段内容重复交回去。
          */
-        if (hasPending && Date.now() - pendingSinceRef.current > 300_000) {
+        const waitedMs = Date.now() - pendingSinceRef.current
+
+        if (hasPending && waitedMs > 20_000 && scrapedRef.current !== pendingJobRef.current) {
+          const jobId = pendingJobRef.current!
+          const scrapedRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
+          if (scrapedRaw !== EXEC_TIMEOUT) {
+            try {
+              const scraped = JSON.parse(String(scrapedRaw)) as { ok?: boolean; text?: string }
+              if (scraped.ok === true && typeof scraped.text === 'string' && scraped.text.length >= 8) {
+                /**
+                 * 捞到了 —— 但**不能无条件采信**。
+                 *
+                 * DOM 里可能有上一条回复（会话历史）。所以要确认
+                 * 「这轮确实轮到新内容了」：等页面不再生成（输入框可用 /
+                 * 没有停止按钮）再读，读到的才是本轮结果。
+                 */
+                scrapedRef.current = jobId
+                console.warn('[dsh-webin] hook 未捕获回复，用 DOM 兜底捞到', {
+                  chars: scraped.text.length,
+                })
+                pendingJobRef.current = undefined
+                pendingSinceRef.current = 0
+                const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
+                const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
+                await fetch(`/dsh-webin/api/job/${jobId}/result`, {
+                  method: 'PUT',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    text: scraped.text,
+                    think: '',
+                    status: 'finished',
+                    /** 标明来源，便于排查（主路径不该出现这个）。 */
+                    via: 'dom-scrape',
+                    ...(chatUrl === '' ? {} : { chatUrl }),
+                  }),
+                }).catch(() => undefined)
+                return
+              }
+            } catch {
+              /* 解析失败就等下一轮 */
+            }
+          }
+        }
+
+        if (hasPending && waitedMs > 300_000) {
           const stuck = pendingJobRef.current!
           console.warn('[dsh-webin] 待办超时，放弃任务', stuck)
           pendingJobRef.current = undefined
           pendingSinceRef.current = 0
+          scrapedRef.current = undefined
           await fetch(`/dsh-webin/api/job/${stuck}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ error: '等待网页回复超时（客户端 5 分钟兜底）' }),
+            body: JSON.stringify({
+              error:
+                '等待网页回复超时（客户端 5 分钟兜底）。' +
+                '页面上没有可读取的回复内容 —— 请检查网页版里的状态。',
+            }),
           }).catch(() => undefined)
           return
         }
@@ -1212,10 +1482,8 @@ export function LdwHost(): unknown {
          * hook 会重新注入（幂等），输入框由发送脚本自带的 waitForInput 等。
          */
         if (typeof data.job.expectUrl === 'string' && data.job.expectUrl !== '') {
-          const current = await el
-            .executeJavaScript('location.href')
-            .then((u: unknown) => String(u))
-            .catch(() => '')
+          const currentRaw = await execJs<string>(el, 'location.href', 8_000)
+          const current = currentRaw === EXEC_TIMEOUT ? '' : String(currentRaw)
           if (current !== data.job.expectUrl) {
             console.log('[dsh-webin] 切换到该会话的对话', {
               from: current.slice(-48),
@@ -1223,8 +1491,8 @@ export function LdwHost(): unknown {
             })
             await element_loadURL(el, data.job.expectUrl)
             /** 等页面就绪（输入框出现），最多 25s；失败则继续用当前页发。 */
-            const ready = await el
-              .executeJavaScript(
+            const readyRaw = await execJs<unknown>(el,
+              
                 `(function () {
                   var sels = ${JSON.stringify(provider.input.selectors)};
                   var deadline = Date.now() + 25000;
@@ -1243,9 +1511,10 @@ export function LdwHost(): unknown {
                     })();
                   });
                 })()`,
-              )
-              .then((r: unknown) => r === true)
-              .catch(() => false)
+              30_000,
+            )
+            /** 超时/异常一律视为「没就绪」—— 后面警告但仍尝试发送。 */
+            const ready = readyRaw === true
             if (!ready) console.warn('[dsh-webin] 导航后未见输入框，仍尝试发送')
           }
         }
@@ -1268,10 +1537,8 @@ export function LdwHost(): unknown {
          * 不会复用已有对话的内容（实测：重启后导航 homeUrl 会开新对话）。
          */
         if (data.job.freshChat === true && data.job.expectUrl === undefined) {
-          const current = await el
-            .executeJavaScript('location.href')
-            .then((u: unknown) => String(u))
-            .catch(() => '')
+          const currentRaw = await execJs<string>(el, 'location.href', 8_000)
+          const current = currentRaw === EXEC_TIMEOUT ? '' : String(currentRaw)
           /**
            * 只在**确实停在某个对话里**时才导航 —— 已经在首页/新对话就不动，
            * 避免多余的页面重载（每次重载都是一次真实的浏览器行为，
@@ -1301,13 +1568,15 @@ export function LdwHost(): unknown {
                     })();
                   });
                 })()`,
-              )
-              .catch(() => false)
+              30_000,
+            )
+            if (readyRaw !== true) console.warn('[dsh-webin] 新对话页未见输入框，仍尝试发送')
           }
         }
 
         pendingJobRef.current = id
         pendingSinceRef.current = Date.now()
+        scrapedRef.current = undefined
         // 记录派发时刻：只接受此刻之后产生的 done 事件
         sentAtRef.current = Date.now()
         console.log('[dsh-webin] 领到任务', { id, chars: prompt.length })
@@ -1356,34 +1625,70 @@ export function LdwHost(): unknown {
          * 但要明确告诉用户（否则又是一次「点了没反应」的静默失败）。
          */
         try {
-          const thinkRaw = await el.executeJavaScript(buildThinkingScript(data.job.thinking === true))
-          const think = JSON.parse(String(thinkRaw)) as {
-            ok: boolean
-            changed?: boolean
-            before?: boolean
-            after?: boolean
-            reason?: string
-            text?: string
-          }
-          if (think.ok === true) {
-            if (think.changed === true) {
-              console.log(`[dsh-webin] 思考模式已切换 ${think.before} → ${think.after}`, { 开关: think.text })
-            }
+          const thinkRaw = await execJs<string>(el, buildThinkingScript(data.job.thinking === true), 20_000)
+          if (thinkRaw === EXEC_TIMEOUT) {
+            console.warn('[dsh-webin] 思考模式脚本超时，跳过（不阻断发送）')
           } else {
-            console.warn('[dsh-webin] 思考模式未能切换', think)
-            setLastSend({
-              at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-              how: `思考模式未切换（${think.reason ?? '未知'}）`,
-              chars: 0,
-            })
+            const think = JSON.parse(String(thinkRaw)) as {
+              ok: boolean
+              changed?: boolean
+              before?: boolean
+              after?: boolean
+              reason?: string
+              text?: string
+            }
+            if (think.ok === true) {
+              if (think.changed === true) {
+                console.log(`[dsh-webin] 思考模式已切换 ${think.before} → ${think.after}`, { 开关: think.text })
+              }
+            } else {
+              console.warn('[dsh-webin] 思考模式未能切换', think)
+              setLastSend({
+                at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+                how: `思考模式未切换（${think.reason ?? '未知'}）`,
+                chars: 0,
+              })
+            }
           }
         } catch (error) {
           console.warn('[dsh-webin] 思考模式脚本失败', error)
         }
 
-        const raw = await el.executeJavaScript(
+        /**
+         * ## ⚠️ 用 `execJs` 而不是裸 `executeJavaScript`
+         *
+         * 这一句是整个链路最容易死锁的地方：页面一导航，挂着的 Promise
+         * 静默死掉，`await` 永不返回 ⇒ `busy` 永远为 true ⇒ 循环冻死。
+         *
+         * 发送脚本自带 12s 等输入框 + 2.4s 观察，所以正常最多 ~15s；
+         * 给 45s 的宽限（含长文本填充 / 慢机器），超时即认输并交错误结果。
+         */
+        const raw = await execJs<string>(
+          el,
           buildSendScript(prompt, pickSendDelay(cfgNow.sendDelayMinMs, cfgNow.sendDelayMaxMs), sendHintsFor(provider)),
+          45_000,
         )
+
+        if (raw === EXEC_TIMEOUT) {
+          /**
+           * 超时 = 我们不知道页面到底发了没有。**当成失败交回去** ——
+           * 让用户看到明确原因并重试，好过让 DSH 空等到超时
+           * （那正是用户报的「一直深度求索中」）。
+           */
+          pendingJobRef.current = undefined
+          pendingSinceRef.current = 0
+          await fetch(`/dsh-webin/api/job/${id}/result`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              error:
+                '发送脚本执行超时（页面可能在发送途中导航，导致脚本上下文被销毁）。' +
+                '请确认网页版里的状态后重试。',
+            }),
+          }).catch(() => undefined)
+          return
+        }
+
         const outcome = JSON.parse(String(raw)) as {
           ok: boolean
           stage: string

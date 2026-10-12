@@ -792,6 +792,103 @@ export function buildDrainScript(): string {
 }
 
 /**
+ * ## 从**页面 DOM** 兜底抓最后一条回复
+ *
+ * ## 为什么需要这个（用户实测踩到的死局）
+ *
+ * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，但就是不输出」。
+ *
+ * 已经用两层手段保证 hook 在场：
+ *   1. 导航时立即预注入
+ *   2. 每 1.5s 自愈守护（见 `index.ts` 的 hook watchdog）
+ *
+ * 但仍有一类漏网：**页面在 hook 装好之前就发出了请求**。
+ * 那时 SSE 已经在流了，我们一条都看不到 ⇒ 「收到 0 条」。
+ *
+ * 而此刻**回复就明明白白显示在页面上** —— 用户看得见，我们却拿不到，
+ * 这是最不可接受的失败方式。
+ *
+ * 所以加这最后一层：直接从 DOM 把最后一条 assistant 消息读出来。
+ *
+ * ## 代价与风险（诚实说明）
+ *
+ * 这是**兜底**，不是主路径：
+ *   - 读不到思考过程（DOM 里思考是折叠的，且结构随版本变）
+ *   - 可能读到多余的界面文字
+ *   - 选择器依赖页面结构，改版会失效
+ *
+ * 但「拿到不完美的回复」**远好于**「明明有回复却报超时」。
+ * 主路径（hook 抓 SSE）拿到内容时永远不会走到这里。
+ *
+ * 判据：找所有可能的 assistant 消息容器，取**最后一个**文本够长的。
+ * 用多个候选选择器依次尝试，都不中就返回空串（让调用方照常报超时）。
+ */
+export function buildScrapeScript(): string {
+  return `(function () {
+  try {
+    /**
+     * 候选选择器（从最精确到最宽泛）。
+     *
+     * ⚠️ DeepSeek 的 class 名是构建期生成的哈希（如 \`_4f9bf79\`），
+     * **不能依赖具体类名**。所以这里用**结构性 + 语义性**特征：
+     *   - data-* 属性（如果有）
+     *   - markdown 容器（回复正文是 markdown 渲染的）
+     *   - 最后手段：所有 div 里文本最长的那个
+     */
+    var CANDIDATES = [
+      '[data-message-author-role="assistant"]',
+      '[data-role="assistant"]',
+      '[class*="assistant"]',
+      '.ds-markdown',
+      '[class*="markdown"]'
+    ];
+
+    function visible(el) {
+      if (!el) return false;
+      try {
+        if (el.offsetWidth <= 0 || el.offsetHeight <= 0) return false;
+        var s = getComputedStyle(el);
+        return s.visibility !== 'hidden' && s.display !== 'none';
+      } catch (e) { return false; }
+    }
+
+    /** 取元素的可见文本（排除按钮/输入框等交互元素的文字）。 */
+    function textOf(el) {
+      try {
+        var clone = el.cloneNode(true);
+        var junk = clone.querySelectorAll('button, textarea, input, svg, [role="button"], [contenteditable="true"]');
+        for (var i = 0; i < junk.length; i++) {
+          if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+        }
+        return String(clone.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim();
+      } catch (e) { return ''; }
+    }
+
+    var best = '';
+    for (var c = 0; c < CANDIDATES.length; c++) {
+      var list;
+      try { list = document.querySelectorAll(CANDIDATES[c]); } catch (e) { continue; }
+      /** 从**后往前**找 —— 最后一条才是本轮回复。 */
+      for (var i = list.length - 1; i >= 0; i--) {
+        if (!visible(list[i])) continue;
+        var t = textOf(list[i]);
+        /**
+         * 太短的多半是标题/占位，不是回复。
+         * 取第一个够长的就停 —— 不要把所有候选拼起来（那会混入历史消息）。
+         */
+        if (t.length >= 8) { best = t; break; }
+      }
+      if (best !== '') break;
+    }
+
+    return JSON.stringify({ ok: best !== '', text: best, url: location.href });
+  } catch (e) {
+    return JSON.stringify({ ok: false, text: '', error: String(e && e.message) });
+  }
+})();`
+}
+
+/**
  * 导出登录态快照。
  *
  * **为什么需要这个**：DSH 的 guest partition 是

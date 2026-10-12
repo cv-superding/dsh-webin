@@ -205,12 +205,61 @@ console.log('\n[7] 已知陷阱仍在防线上：模板内不能有反引号')
   }
 }
 
-console.log('\n[8] ⭐ 待办超时兜底仍在（事件真丢了也能恢复）')
+console.log('\n[8] ⭐ 两道救援都在（20s DOM 兜底 + 5min 放弃）')
 {
-  /** 5 分钟兜底：即使 done 事件永远不来，也要解锁发送循环。 */
-  check('⭐ 有 5 分钟兜底', /Date\.now\(\) - pendingSinceRef\.current > 300_000/.test(clientSrc), true)
-  check('兜底也交错误给 host', /等待网页回复超时（客户端 5 分钟兜底）/.test(clientSrc), true)
-  check('兜底清掉待办', /const stuck = pendingJobRef\.current!/.test(clientSrc), true)
+  /**
+   * 用户症状：「一直深度求索中，**网页版早就有回复和思考内容了**，
+   * 但就是不输出」。所以等 20 秒后先去页面 DOM 把回复捞回来 ——
+   * 用户看得见的东西，我们就该拿得到。
+   */
+  check('⭐ 有 20s DOM 兜底门槛', /waitedMs > 20_000/.test(clientSrc), true)
+  check('⭐ 有 5 分钟放弃门槛', /waitedMs > 300_000/.test(clientSrc), true)
+  check('⭐ 兜底调用 buildScrapeScript', /buildScrapeScript\(\)/.test(clientSrc), true)
+  check('⭐ 兜底结果标了 via', /via: 'dom-scrape'/.test(clientSrc), true)
+  check('⭐ 只捞一次（scrapedRef 防重复）', /scrapedRef\.current !== pendingJobRef\.current/.test(clientSrc), true)
+  check('放弃时也交错误给 host', /等待网页回复超时（客户端 5 分钟兜底）/.test(clientSrc), true)
+}
+
+console.log('\n[9] ⭐ Hook 自愈守护（「收到 0 条」的根治）')
+{
+  check('⭐ 有 hook 存活探测', /MARKER_CHECK/.test(clientSrc), true)
+  check('⭐ 每 1.5s 检查一次', /setInterval\(ensureHook, 1_500\)/.test(clientSrc), true)
+  check('⭐ 不在就重新注入', /hook 不在（页面已导航），重新注入/.test(clientSrc), true)
+  /** 导航事件预注入（比 dom-ready 早得多）。 */
+  check('⭐ 监听 did-start-navigation', /did-start-navigation/.test(clientSrc), true)
+  check('⭐ 只关心主框架跨文档导航', /isMainFrame === false \|\| e\.isSameDocument === true/.test(clientSrc), true)
+}
+
+console.log('\n[10] ⭐ executeJavaScript 全部有超时护栏（防静默死锁）')
+{
+  check('⭐ 有 execJs 包装', /function execJs</.test(clientSrc), true)
+  check('⭐ 有 EXEC_TIMEOUT sentinel', /export const EXEC_TIMEOUT/.test(clientSrc), true)
+  check('⭐ 发送脚本走 execJs', /const raw = await execJs<string>\(/.test(clientSrc), true)
+  check('⭐ 发送超时当失败交回', /发送脚本执行超时/.test(clientSrc), true)
+  check('⭐ drain 走 execJs', /execJs<string>\(el, buildDrainScript\(\), 10_000\)/.test(clientSrc), true)
+  check('⭐ 思考脚本走 execJs', /execJs<string>\(el, buildThinkingScript/.test(clientSrc), true)
+  /** 超时不能 reject —— 抛出去会被外层 catch 吞掉，反而变静默。 */
+  check('⭐ 超时走 resolve 而不是 reject', /resolve\(EXEC_TIMEOUT\)/.test(clientSrc), true)
+  check('不用 reject 传超时', /reject\(EXEC_TIMEOUT\)/.test(clientSrc), false)
+}
+
+console.log('\n[11] ⭐ DOM 兜底脚本本身（从产物里真跑一遍）')
+{
+  const scrapeSrc = extractFn(bundle, 'buildScrapeScript')
+  check('产物里有 buildScrapeScript', scrapeSrc !== '', true)
+
+  const script = new Function(`${scrapeSrc}; return buildScrapeScript;`)()()
+  check('是自执行脚本', /^\(function \(\) \{/.test(script.trim()), true)
+  /** 必须尝试多种选择器（页面类名是哈希，不能依赖具体类名）。 */
+  check('⭐ 多个候选选择器', (script.match(/data-message-author-role|ds-markdown|class\*="markdown"/g) ?? []).length >= 2, true)
+  check('⭐ 从后往前找（最后一条才是本轮）', /for \(var i = list\.length - 1; i >= 0; i--\)/.test(script), true)
+  /** 剔除按钮/输入框的文字，否则回复里混进界面文字。 */
+  check('⭐ 剔除交互元素文字', /button, textarea, input, svg/.test(script), true)
+  /** 太短的不当回复。 */
+  check('⭐ 有最短长度门槛', /t\.length >= 8/.test(script), true)
+  check('返回 JSON（不是裸文本）', /return JSON\.stringify\(\{ ok: best !== ''/.test(script), true)
+  /** 异常也不能抛（抛了会让调用方卡住）。 */
+  check('⭐ 内部 try/catch 兜底', /catch \(e\) \{\s*return JSON\.stringify\(\{ ok: false/.test(script), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

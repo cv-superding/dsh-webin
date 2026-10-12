@@ -546,12 +546,32 @@ export async function apply(ctx: {
       const resultJobId = jobIdFromPath(pathname, '/result')
       if (method === 'PUT' && resultJobId !== undefined) {
         const body = await readBody(req)
-        let payload: { text?: string; think?: string; status?: string; error?: string; chatUrl?: string }
+        let payload: {
+          text?: string
+          think?: string
+          status?: string
+          error?: string
+          chatUrl?: string
+          /**
+           * 结果来源标记。`dom-scrape` = hook 没抓到 SSE，
+           * 客户端从页面 DOM 兜底捞的（见 `buildScrapeScript`）。
+           *
+           * 不走主路径，所以要**记日志** —— 频繁出现说明 hook
+           * 有问题（而不是「偶发的页面慢」）。
+           */
+          via?: string
+        }
         try {
           payload = JSON.parse(body) as typeof payload
         } catch {
           sendJson(res, 400, { ok: false, reason: 'invalid-json' })
           return
+        }
+        if (payload.via === 'dom-scrape') {
+          log.warn?.(
+            `job ${resultJobId} 的结果来自 DOM 兜底（hook 未捕获 SSE）—— ` +
+              '若频繁出现请点「诊断」查看 postPaths',
+          )
         }
         const settled =
           typeof payload.error === 'string' && payload.error !== ''
