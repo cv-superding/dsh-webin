@@ -23,7 +23,7 @@
  *
  * ## 这个脚本验证什么
  *
- * 用 mock Cordis ctx 起真实的 host 半，直接打 HTTP 接口验证��
+ * 用 mock Cordis ctx 起真实的 host 半，直接打 HTTP 接口验证。
  *   - 取消语义：`?running=<id>` 在任务被取消后返回 `cancel`
  *   - 平台隔离：不同平台领不到彼此的活
  *   - 队列状态：取消后 `hasClaimed()` 不该再报 true

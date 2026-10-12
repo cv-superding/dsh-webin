@@ -244,7 +244,7 @@ check(
 // 对照：旧的 128k 会怎样
 const oldThreshold = Math.floor(Math.min(128_000 * 0.8, 128_000 - 8_192 - headroom))
 check(
-  `对照组：旧 128k 阈值 ${oldThreshold} < ${observed}��确认旧值必然死锁）`,
+  `对照组：旧 128k 阈值 ${oldThreshold} < ${observed}，确认旧值必然死锁）`,
   observed > oldThreshold,
 )
 

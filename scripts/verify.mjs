@@ -57,7 +57,7 @@ const checks = [
   ['restore 报告源与回读校验', src.includes('wrong-origin') && src.includes('verified')],
   ['用阶段机而非计数（某步没发生也不卡住）', src.includes('stageRef')],
   ['加载失败回退阶段（可重试）', /stageRef\.current = ["']boot["']/.test(src)],
-  ['渲��进程崩溃可恢复', src.includes('render-process-gone')],
+  ['渲染进程崩溃可恢复', src.includes('render-process-gone')],
   ['每次 dom-ready 重注入 hook（导航后不失效）', src.includes('buildDeepSeekHook')],
   ['防插队：有待办时不领新活', src.includes('hasPending')],
   ['待办超时兜底（防永久卡死）', src.includes('pendingSinceRef')],

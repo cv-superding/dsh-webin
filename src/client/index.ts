@@ -2194,7 +2194,7 @@ export function LdwHost(): unknown {
  *
  * ## 注册契约（从生态里实测出来的，两个坑）
  *
- * 1. **`register` 必须带 `name` 字段**（就是 slot 名）—— 少了它注��不上，
+ * 1. **`register` 必须带 `name` 字段**（就是 slot 名）—— 少了它注册不上，
  *    而且**不报错**，表现为设置页里凭空少一项，极难排查。
  * 2. **渲染函数必须返回 React 元素**（`createElement(...)`）。
  *    直接返回字符串/数组/`undefined` 会触发 **React #130**

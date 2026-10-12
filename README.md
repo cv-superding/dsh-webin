@@ -3,11 +3,31 @@
 Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（DeepSeek / 通义千问 / …）。
 
 核心思路是**不设计协议，操作界面**：打开真浏览器 → 用真实输入把字打进输入框 →
-页面自己发请求 → 插件只在旁边看着页面自己的 SSE 把回复读出来 →
-工具结果当普通消息打回聊天框。
+页面自己发请求 → **从页面 DOM 把回复读出来** → 工具结果当普通消息打回聊天框。
 
 **没有任何一行在「调 API」** —— 没有 `create_pow_challenge`、没有 `x-ds-pow-response`、
 没有 `x-hif-*` 回放。这是不封号的原因。
+
+## 为什么读 DOM 而不是拦 SSE
+
+插件**同时**有两条读回复的路，但主路径是 **DOM**：
+
+| | 怎么读 | 什么时候能用 |
+|---|---|---|
+| **DOM（主）** | 从页面渲染出来的回复容器里读，并把 `<pre><code>` 还原成围栏代码块 | **随时**（内容在页面上，不依赖任何注入时机） |
+| SSE（辅） | 包一层 `window.fetch` / `XMLHttpRequest` 观察页面自己的流 | 只在请求**发出之前**就装上 hook 才行 |
+
+**SSE 那条路有个绕不过去的时序问题**：要在页面脚本执行**之前**注入 hook，
+唯一的办法是 **preload**。而 DSH 的 webview 门禁会把 webPreferences
+**清空后只设固定几项**（`lib/main.js`），`preload` 不在里面 ——
+所以我们只能等 `dom-ready`，那时页面请求**早就发出去了**。
+
+后果就是「页面明明有回复，插件却收不到」。所以 DOM 成为主路径
+（参考实现 cuckoo 也把 DOM 抓取当默认模式：`src/providers/types.ts` 的
+`useIntercept` 默认 false）。
+
+选择器用的是**实测出来的真实类名**（`ds-markdown` / `ds-think-content` /
+`ds-pow-response`），后面才是语义兜底 —— 不靠猜。
 
 ## 安装
 
@@ -61,13 +81,15 @@ dsh plugin --profile desktop add dsh-webin
 | 真实浏览器驱动（DSH 自带 Chromium guest） | ✅ |
 | 真实登录 + 登录态持久化（重启免登录） | ✅ |
 | 真实发送（填框 + 点发送键 / 合成 Enter） | ✅ |
-| 观察页面自己的 SSE 取回复 | ✅ |
+| **从页面 DOM 读回复**（主路径，含思考） | ✅ |
+| 还原 `pre` 代码块围栏（工具调用靠它） | ✅ |
+| 观察页面自己的 SSE 取回复（辅助路径） | ✅ |
 | **工具调用**（JS 代码块协议） | ✅ |
 | **多平台**（DeepSeek / 通义千问 / 自定义） | ✅ |
 | **每个 DSH 会话绑定独立网页对话**（重启后接回） | ✅ |
 | 差分发送（不重发历史） | ✅ |
 | **设置页**（平台 / 登录态 / **11 项配置** / 增删自定义） | ✅ |
-| 离线测试 | **487 项** |
+| 离线测试 | **865 项** |
 
 ---
 
@@ -242,7 +264,7 @@ adapter.stream(sessionId)
 ### 实测
 
 `npm run verify:session-e2e`：两次发送分别落在两个不同的对话 URL
-��`…/s/8530a042…` 和 `…/s/92020348…`）。
+`…/s/8530a042…` 和 `…/s/92020348…`）。
 
 `npm run verify:session-route`（14 项）：两会话互不串、切回仍回原对话、
 无 chatUrl 时不退化。
@@ -511,10 +533,11 @@ harness 类工具在进入项目时会注入 6 类内容。逐条核对 DSH 已�
 |---|---|---|
 | **P0** | 红框位置注册「LDW」标签 | ✅ 已完成 |
 | **P1** | LDW 面板内挂真实 Chromium guest + 加载 DeepSeek 网页版 + UA 洗白 + 登录态探测 | ✅ 已完成（实测可登录，无「环境异常」） |
-| **P2** | 注入 hook，只读观察页面自己的 SSE | ✅ 已完成 |
+| **P2** | 注入 hook 观察页面自己的 SSE | ✅ 已完成（**辅助路径** —— 见上文「为什么读 DOM 而不是拦 SSE」） |
 | **P3** | 注册 `deepseek-webin` provider，网页回复 → StreamChunk → 进「对话」 | ✅ 已完成 |
-| **P4** | 自动填输入框 + 触发发送 + 工具结果回传 | ✅ 已完成（���策略发送 + 多信号校验） |
+| **P4** | 自动填输入框 + 触发发送 + 工具结果回传 | ✅ 已完成（三段式发送：填充 / 客户端延迟 / 触发） |
 | **P5** | 设置页（`settings.section`）+ 平台增删 | ✅ 已完成 |
+| **P6** | **DOM 读回复成为主路径** + 围栏还原 + 思考读取 | ✅ 已完成 |
 | **P6** | 登录态持久化（重启免登录） | ✅ 已完成（快照 + 目标域回写，见下节） |
 | **P7** | 工具调用（JS 代码块协议） | ✅ 已完成（见「工具调用」节） |
 | **P8** | 每会话独立网页对话 + 重启接回 | ✅ 已完成（游标落盘 + 首轮开新对话） |
@@ -557,7 +580,7 @@ if (lease === void 0 || lease.owner !== owner || lease.attached || params.partit
 两层原因：
 
 1. `about:blank` 是 **opaque origin**，`localStorage` 直接抛 `SecurityError`；
-2. `localStorage` **按源隔离** —— 在 A 源写的值 B 源读不到��
+2. `localStorage` **按源隔离** —— 在 A 源写的值 B 源读不到。
 
 ### 正确时序
 
@@ -657,26 +680,57 @@ thresholdTokens = min(contextWindow × 0.8, contextWindow − maxTokens − head
 | #2 | 31（附件键） | 39 |
 | **分差** | **1** | **175** |
 
-### 4. 发送确认判据不可靠
+### 4. 发送确认判据不可靠 → **改成不确认**
+
+早期尝试用「多信号校验」确认发送成功，但每个信号都不可靠：
 
 `hasStopControl()` 靠文本找「停止生成」—— **DeepSeek 上是纯图标，测不到**。
 而 `grew`（页面正文变长）在 dry-run 里**误报为 true**（页面动画/懒加载也在改文本）。
 
-改成四级判据，并**明确排除 `grew` 单独成立**：
+更糟的是：**校验本身要等待**，于是「填充 → 等 2.4s → 校验 → 可能重试」
+被塞进**一次** `executeJavaScript` —— 那是跨进程调用，**页面一导航就整体死掉**
+（不 resolve、不 reject）⇒ 宿主永远等 ⇒ 用户看到「一直深度求索中」。
 
-| 判据 | 可靠性 |
+**现在的做法**（读参考实现后重构）：发送**三段式**，每段都是短调用 ——
+
+| 段 | 做什么 | 耗时 |
+|---|---|---|
+| ① `buildFillScript` | 只把字填进输入框 | 几百毫秒 |
+| ② 客户端 `setTimeout` | 随机延迟（防封号） | 2–4 秒 |
+| ③ `buildTriggerScript` | 只点发送键（或合成 Enter） | 几十毫秒 |
+
+**等待放在客户端**，不放在页面脚本里 —— 这样单次跨进程调用的存活时间极短，
+导航最多毁掉一次短调用，不会让整条链路僵死。
+
+发送是否成功**不再自证**：由后续的 DOM 轮询来确认「页面上真的出现了新回复」。
+
+### 5. 交付判据：条数增长 **或** 内容变化
+
+判断「本轮回复来了」用两个判据取「或」：
+
+| 判据 | 说明 |
 |---|---|
-| `requestSent`（hook 计数到 completion 请求） | **唯一铁证** |
-| `stopControl`（出现停止控件） | 可靠，但本站测不到 |
-| `cleared`（输入框被清空） | 单独不可���（dry-run 证明没发送时也可能为空） |
-| `grew`（正文变长） | **最弱，不可单独判定** |
+| **条数比基线多** | 主判据 —— 只有真的新增 assistant 消息才会增长 |
+| **内容与基线不同** | 兜底 —— 页面把回复渲染在选择器匹配不到的容器里时仍能交付 |
 
-### 5. 其他
+再加一道**稳定性**判据：连续两次读到**相同**内容才算生成完，
+避免把「流式输出中的半截回复」交回 DSH。
+
+### 6. 放弃门槛必须跟配置走
+
+早期硬编码「5 分钟放弃」，但配置里 `replyTimeoutMs` 默认 **10 分钟**，
+而且注释里记着「**实测最慢一次网页回复 6 分 12 秒**」——
+于是 6 分钟才回完的请求会在 5 分钟被**提前掐断**。
+
+现在按 `replyTimeoutMs * 0.8` 算（留余量让 adapter 那次超时不会先触发），下限 60 秒。
+
+### 7. 其他
 
 | 问题 | 修法 |
 |---|---|
 | 路由 / adapter 未释放 → 重载撞 `duplicate prefix route` | 改用 `ctx.effect()` 交回 disposer |
-| `done` 事件可能串台（把用户自己聊的回复当成任务结果） | 用事件时间戳过滤，只认发送确认之后的事件 |
+| 无超时的 `executeJavaScript` 会静默死锁 | `execJs()` 统一加超时护栏（超时 resolve 成 sentinel，**不 reject** —— 抛出去会被外层 catch 吞掉反而变静默） |
+| 「已发送 · 收到 0 条」+ DSH 一直等 | 异常分支必须**交回结果**（早期只打日志 ⇒ `pendingJobRef` 永挂着 ⇒ 循环僵死） |
 | 发送循环被 `loggedIn` 门控，误判即全链路失效 | 去掉门控，改由发送脚本在页面上自行判断 |
 | 登录误报（登录页也显示「已登录」） | 探针改用 `__appKit_userInfo.id` 做强证据 + 负面证据交叉判定 |
 | `__appKit_userInfo.id` 解不出（明明登录却报 `hasUserId:false`） | 真实形状是 `{"value":{"id":...}}`，id **嵌在 value 里**；两种形状都认 |
@@ -769,7 +823,7 @@ npm run probe:chain  # 全链路真实验证（会消耗一次网页版额度）
 | `npm run probe:done` | 逐秒 dump 事件队列，排查 `done` 事件为何不来 |
 
 ⚠️ 这三个脚本都要求本机有 Chrome/Edge，并会读取 `~/.dsh/webin/auth/default.json`
-的登录态��**页面改版后先跑 `probe:dom`**，比看 minified bundle 猜可靠得多。
+的登录态。**页面改版后先跑 `probe:dom`**，比看 minified bundle 猜可靠得多。
 
 ---
 
@@ -864,12 +918,23 @@ npm run check     # 构建 + 全部校验（355 项）
 | 命令 | 内容 |
 |---|---|
 | `npm run build` | 构建 `lib/index.js` + `lib/client.js` |
-| `npm run verify` | client 半静态校验（26 项） |
-| `npm run verify:host` | host 半行为验证（30 项，独立进程跑真代码） |
-| `npm run preflight` | profile 装配预检（21 项，重启前跑） |
+| `npm run check` | **全部离线测试**（865 项，不需要浏览器） |
+| `npm run verify:scrape` | ⭐ DOM 读回复（53 项，真实 DOM 树桩） |
+| `npm run verify:stuck` | 防僵死 / 交付判据（87 项） |
+| `npm run verify:fill` | 填充与换行归一化（30 项） |
 | `npm run probe:dom` | 真实页面结构 dump（只读） |
 | `npm run probe:send` | 发送脚本 dry-run（只读，拦截点击） |
 | `npm run probe:chain` | **全链路真实验证**（⚠️ 真发送，消耗额度） |
+
+> ⚠️ **需要真浏览器的探针脚本尚未适配发送流程重构**。
+>
+> `probe:send` / `probe:chain` / `probe:done` / `probe:frames` / `probe:stop` /
+> `verify:e2e` / `verify:coldstart` / `verify:session-e2e` 仍引用**已删除**的
+> `buildSendScript()`（改成三段式发送后不存在了）。
+>
+> 它们的文件头已写明怎么改（把 `buildSendScript(...)` 换成
+> `buildTriggerScript(...)`），但**替换后需要真浏览器验证**，所以没有自动改动 ——
+> 用未验证的代码替换已运行的代码只会更糟。离线测试（`npm run check`）不受影响。
 
 装进 profile（Desktop）：
 

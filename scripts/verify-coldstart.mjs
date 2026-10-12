@@ -1,4 +1,22 @@
 #!/usr/bin/env node
+
+/**
+ * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ *
+ * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
+ * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
+ * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ *
+ * 现在拆成三段（见 `src/client/chat.ts`）：
+ *   - `buildFillScript`    只填输入框
+ *   - 客户端 `setTimeout`  随机延迟
+ *   - `buildTriggerScript` 只点发送
+ *
+ * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
+ * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
+ * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ */
+
 /**
  * **冷启动端到端验证** —— 复现并验证用户截图里的 `no-input` 报错已修复。
  *

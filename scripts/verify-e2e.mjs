@@ -1,4 +1,22 @@
 #!/usr/bin/env node
+
+/**
+ * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ *
+ * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
+ * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
+ * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ *
+ * 现在拆成三段（见 `src/client/chat.ts`）：
+ *   - `buildFillScript`    只填输入框
+ *   - 客户端 `setTimeout`  随机延迟
+ *   - `buildTriggerScript` 只点发送
+ *
+ * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
+ * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
+ * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ */
+
 /**
  * **端到端验证**：模拟 DSH agent loop 调 `deepseek-webin` provider，
  * 验证「模型选择器选 LDW → 网页版回复进对话」这最后一环。
@@ -157,7 +175,7 @@ async function main() {
   //
   // ⚠️ 不要在测试脚本里重新解析 bundle —— 那是在维护第二份解析器。
   // client 半的产物把 `BUILTIN_PROVIDERS` 暴露在模块作用域里，
-  // 但它是 CJS bundle 取不到具名导出��所以这里**退一步**：
+  // 但它是 CJS bundle 取不到具名导出，所以这里**退一步**：
   // 只从 host 的 `/status` 拿平台元信息（已经有 models/contextWindow），
   // 选择器这类细节**由页面上的诊断脚本报告** —— 那才是权威来源。
   const providerMeta = platform

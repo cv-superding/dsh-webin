@@ -305,7 +305,7 @@ console.log('\n[3b] 设置页组件内部逻辑（用假 state 跑完整渲染�
    * 所以改用**源码断言**覆盖卡片分支的关键点。
    */
   const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
-  check('⭐ 有平台卡��渲染', client.includes('ldw-card'), true)
+  check('⭐ 有平台卡片渲染', client.includes('ldw-card'), true)
   check('⭐ 卡片显示登录态', /已登录/.test(client), true)
   check('⭐ 卡片显示未打开浏览器的提示', /浏览器未打开/.test(client), true)
   check('⭐ 只对自定义项显示删除按钮', /customIds\.includes/.test(client), true)
