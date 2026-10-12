@@ -1,0 +1,5 @@
+# DSH bundle 装配层。运行时注入（dev_inject_plugin）不读本文件。
+- insert:
+    - id: dsh-webin
+      name: dsh-webin
+      config: {}

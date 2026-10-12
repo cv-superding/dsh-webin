@@ -1,0 +1,73 @@
+{
+  "name": "dsh-webin",
+  "version": "0.0.1",
+  "description": "Unofficial DSH plugin: drive chat.deepseek.com in a REAL browser (DSH's own Chromium webview guest) — real login, real typing, real send, reply captured by observing the page's own SSE. Structurally a port of cuckoo-code's approach.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "provider.example.json"
+  ],
+  "license": "Apache-2.0",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "deepseek",
+    "webview"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify.mjs",
+    "verify:host": "node scripts/verify-host.mjs",
+    "verify:snapshot": "node scripts/verify-snapshot.mjs",
+    "verify:diff": "node scripts/verify-diff.mjs",
+    "verify:restore": "node scripts/verify-restore.mjs",
+    "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
+    "verify:extract": "node scripts/verify-extract.mjs",
+    "verify:session-route": "node scripts/verify-session-route.mjs",
+    "probe:frames": "node scripts/probe-frames.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "check": "node scripts/build.mjs && node scripts/verify.mjs && node scripts/verify-snapshot.mjs && node scripts/verify-diff.mjs && node scripts/verify-restore.mjs && node scripts/verify-lifecycle.mjs && node scripts/verify-extract.mjs && node scripts/verify-session-route.mjs && node scripts/verify-host.mjs && node scripts/preflight.mjs",
+    "probe:dom": "node scripts/probe-dom.mjs",
+    "probe:send": "node scripts/probe-send.mjs",
+    "probe:chain": "node scripts/probe-chain.mjs",
+    "probe:login": "node scripts/probe-login.mjs",
+    "probe:origin": "node scripts/probe-origin.mjs",
+    "probe:stop": "node scripts/probe-stop.mjs",
+    "probe:done": "node scripts/probe-done.mjs",
+    "verify:e2e": "node scripts/verify-e2e.mjs",
+    "verify:coldstart": "node scripts/verify-coldstart.mjs",
+    "verify:session-e2e": "node scripts/verify-session-e2e.mjs"
+  },
+  "engines": {
+    "node": "^22.18.0 || >=24.11.0"
+  },
+  "devDependencies": {
+    "tsdown": "0.22.14",
+    "typescript": "5.9.3"
+  }
+}

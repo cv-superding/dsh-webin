@@ -1,0 +1,48 @@
+{
+  "id": "my-platform",
+  "name": "LDW · 我的平台",
+  "homeUrl": "https://example.com/",
+  "urlPattern": "example\\.com",
+  "input": {
+    "selectors": [
+      "textarea[placeholder*=\"输入\"]",
+      "textarea[placeholder*=\"提问\"]",
+      "textarea",
+      "div[contenteditable=\"true\"]",
+      "[role=\"textbox\"]"
+    ]
+  },
+  "send": {
+    "selectors": [
+      "button[type=\"submit\"]",
+      "button[aria-label*=\"发送\"]",
+      "button[aria-label*=\"send\" i]",
+      "[role=\"button\"][aria-label*=\"发送\"]",
+      "[data-testid*=\"send\" i]"
+    ],
+    "signatures": [
+      ["send-button", 60],
+      ["primary", 30]
+    ],
+    "vetoes": [
+      "toggle",
+      "停止",
+      "stop",
+      "upload",
+      "attach"
+    ]
+  },
+  "userInfoSelector": ".user-name",
+  "completionPath": "/api/v1/chat/completions",
+  "stopPath": "/api/v1/chat/stop",
+  "models": [
+    {
+      "id": "fast",
+      "name": "快速模式",
+      "description": "真实浏览器驱动",
+      "thinking": false
+    }
+  ],
+  "contextWindow": 131072,
+  "maxOutputTokens": 8192
+}

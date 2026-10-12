@@ -1,0 +1,741 @@
+/**
+ * dsh-webin — 页面内网络观察 hook（自包含 IIFE 源码）。
+ *
+ * 设计原则（照搬 cuckoo 的思路，代码自行实现）：
+ *   **只读观察，绝不改写请求。**
+ *   给 `window.fetch` / `XMLHttpRequest` 包一层，原样透传给页面自己用，
+ *   只从 SSE 响应里把 AI 回复文本读出来，通过 `CustomEvent` 抛给宿主。
+ *
+ * 这样 PoW、cookie、`x-hif-*`、TLS/HTTP2 指纹全部由页面自己天然正确 ——
+ * 我们一行协议代码都不用写，也就不存在"不像浏览器"的破绽。
+ *
+ * 为什么不用 cuckoo 的 `hook-sources.ts`：它是 **GPL-3.0-only**，
+ * 直接复制会让本项目也变 GPL。这里按同样的协议理解重写。
+ *
+ * 该函数返回一段字符串，由宿主用 `<webview>.executeJavaScript()` 注入页面主世界。
+ */
+
+/** 正在进行的 completion 请求路径。 */
+const COMPLETION_PATH = '/api/v0/chat/completion'
+
+/** 用户主动停止生成。 */
+const STOP_PATH = '/api/v0/chat/stop_stream'
+
+/** 幂等标记：重复注入不重复打补丁。 */
+const MARKER = '__dshWebinHookInstalled__'
+
+/** 事件缓冲在 window 上的键名（与 hook 内一致）。 */
+export const EVENT_QUEUE_KEY = `${MARKER}_events`
+
+/**
+ * 已观察到的 completion 请求计数在 window 上的键名。
+ *
+ * 用途：`chat.ts` 的发送脚本靠它判断「消息是不是真的发出去了」。
+ * 实测 DeepSeek 的发送键是**纯图标 div**（无 aria-label、无文字），
+ * 无法用「出现停止按钮」判断，而「输入框被清空」在发送失败时也可能发生
+ * （React 受控状态被重置）。**页面自己发出了 completion 请求**才是铁证。
+ */
+export const REQUEST_COUNT_KEY = `${MARKER}_requests`
+
+/**
+ * 生成注入页面的 hook 源码。
+ *
+ * 注入后页面每收到一段回复会派发：
+ *   - `dsh-webin:stream`  `{ text, think, finished }`  —— 流式增量（节流）
+ *   - `dsh-webin:done`    `{ text, think, status }`    —— 本条回复结束
+ *   - `dsh-webin:error`   `{ message }`                —— 请求失败 / 业务错误
+ *
+ * @param completionPath - 该平台 completion 请求的路径（来自 Provider）。
+ *   不同站点不同（DeepSeek 是 `/api/v0/chat/completion`）。
+ * @param stopPath - 停止生成路径（可选）。
+ */
+export function buildDeepSeekHook(completionPath: string, stopPath?: string): string {
+  return `(function () {
+  'use strict';
+  if (window.${MARKER}) return 'already-installed';
+  window.${MARKER} = true;
+
+  var COMPLETION = ${JSON.stringify(completionPath)};
+  var STOP = ${JSON.stringify(stopPath ?? '')};
+  var NS = 'dsh-webin';
+
+  // ---------- SSE 分帧：按空行切（\\n\\n 或 \\r\\n\\r\\n） ----------
+  function createFrameDecoder() {
+    var buffer = '';
+    var scanFrom = 0;
+    return {
+      push: function (text) {
+        buffer += text;
+        var frames = [];
+        var re = /\\r?\\n\\r?\\n/g;
+        var offset = 0;
+        var m;
+        re.lastIndex = scanFrom;
+        while ((m = re.exec(buffer)) !== null) {
+          frames.push(buffer.slice(offset, m.index));
+          offset = m.index + re.lastIndex - m.index;
+          offset = m.index + m[0].length;
+        }
+        buffer = buffer.slice(offset);
+        scanFrom = Math.max(0, buffer.length - 3);
+        return frames;
+      },
+      finish: function () {
+        var frames = [];
+        if (buffer) frames.push(buffer);
+        buffer = '';
+        scanFrom = 0;
+        return frames;
+      }
+    };
+  }
+
+  /** 取出 SSE 块里的 data: 行（多行用 \\n 拼接）。 */
+  function extractData(block) {
+    if (!block || !block.trim()) return null;
+    var data = null;
+    var lines = block.split(/\\r\\n|\\r|\\n/);
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf('data:') === 0) {
+        var d = lines[i].slice(5).trim();
+        data = data === null ? d : data + '\\n' + d;
+      }
+    }
+    return data;
+  }
+
+  function parseBlock(block) {
+    var data = extractData(block);
+    if (data === null || data === '[DONE]') return null;
+    try { return JSON.parse(data); } catch (e) { return null; }
+  }
+
+  // ---------- 请求识别 ----------
+  function samePath(url, path) {
+    try {
+      return new URL(String(url), location.href).pathname === path;
+    } catch (e) {
+      return String(url).indexOf(path) !== -1;
+    }
+  }
+
+  /**
+   * 记一次「页面自己发出了 completion 请求」。
+   *
+   * 这是发送脚本判断发送成功的最强信号（见 chat.ts 的 verify()）。
+   * 只计数，不干预请求。
+   */
+  function noteCompletionRequest() {
+    try {
+      var n = window.${MARKER}_requests;
+      window.${MARKER}_requests = (typeof n === 'number' ? n : 0) + 1;
+    } catch (e) { /* ignore */ }
+  }
+
+  // ---------- 回复提取 ----------
+  function createExtractor() {
+    var text = '';
+    var think = '';
+    var finished = false;
+    var incomplete = false;
+    var businessError = null;
+
+    function lastSeg(p) { return typeof p === 'string' ? p.split('/').pop() : ''; }
+
+    /** JSON Patch 路径 → 判断是不是正文/思考文本。 */
+    function classify(p) {
+      var seg = lastSeg(p);
+      var inResponse = typeof p === 'string' && (p === 'response' || p.indexOf('response/') === 0);
+      if (seg === 'reasoning_content' || seg === 'thinking_content') return 'think';
+      if (!inResponse) return null;
+      if (seg === 'content' || seg === 'text' || seg === 'markdown' || seg === 'delta') return 'text';
+      return null;
+    }
+
+    /**
+     * 帧是不是「裸文本增量」。
+     *
+     * ## ⚠️ 这是「DSH 只收到一个字」的根因（实测抓帧定位）
+     *
+     * 真浏览器抓下来的帧序列长这样：
+     *
+     *     [3]   p=response/fragments/-1/content  o=APPEND  v=渲染   ← 只有首帧带路径
+     *     [4]   p=undefined                      o=undefined  v=网页  ← 正文主体全是这种
+     *     [5]   p=undefined                      o=undefined  v=的
+     *     [6]   p=undefined                      o=undefined  v=流程
+     *     ...
+     *     [130] p=response                       o=BATCH   v=?
+     *     [131] p=response/status                o=SET     v=FINISHED
+     *
+     * 也就是说**正文的绝大部分是裸字符串帧**（没有 p，v 直接是要追加的文本）。
+     * 早期实现只认「带 p 且路径匹配」的帧，于是每个回复只能拿到**第一个字**
+     * —— 用户看到的就是「只回一个字」。
+     *
+     * 判据：没有 p、没有 o（或 o 为 APPEND）、v 是非空字符串。
+     * 注意必须**排除**状态/错误信封（那些有 code / data / p）。
+     */
+    function isBareTextDelta(obj) {
+      if (typeof obj.p === 'string') return false;
+      if (typeof obj.v !== 'string' || obj.v === '') return false;
+      if (typeof obj.code === 'number') return false;
+      if (obj.data !== undefined) return false;
+      // o 允许缺省或 APPEND；SET 会覆盖，不按增量处理
+      if (obj.o !== undefined && obj.o !== 'APPEND') return false;
+      return true;
+    }
+
+    /** 处理一条 SSE 帧。 */
+    function consume(obj) {
+      if (!obj || typeof obj !== 'object') return;
+
+      // 业务错误信封：{ code, msg, data: { biz_code, biz_msg } }
+      if (typeof obj.code === 'number' && obj.code !== 0 && !obj.p) {
+        businessError = String(obj.msg || ('code=' + obj.code));
+        return;
+      }
+      if (obj.data && typeof obj.data.biz_code === 'number' && obj.data.biz_code !== 0) {
+        businessError = String(obj.data.biz_msg || ('biz_code=' + obj.data.biz_code));
+        return;
+      }
+
+      // 状态帧
+      if (obj.p === 'response/status' || obj.p === 'quasi_status') {
+        if (obj.v === 'FINISHED') finished = true;
+        else if (obj.v === 'INCOMPLETE') { incomplete = true; finished = true; }
+        return;
+      }
+
+      // fragments 追加：{ p: 'response/fragments', o: 'APPEND', v: [ {type, content} ] }
+      if (obj.p === 'response/fragments' && obj.o === 'APPEND' && Array.isArray(obj.v)) {
+        for (var i = 0; i < obj.v.length; i++) {
+          var f = obj.v[i];
+          if (!f || typeof f !== 'object') continue;
+          var piece = typeof f.content === 'string' ? f.content : (typeof f.text === 'string' ? f.text : '');
+          if (!piece) continue;
+          if (f.type === 'THINK') think += piece;
+          else text += piece;
+        }
+        return;
+      }
+
+      // 快照：{ v: { response: { fragments: [...] } } }
+      if (obj.p === undefined && obj.v && typeof obj.v === 'object' && obj.v.response) {
+        var frags = obj.v.response.fragments;
+        if (Array.isArray(frags)) {
+          var t = '';
+          var k = '';
+          for (var j = 0; j < frags.length; j++) {
+            var g = frags[j];
+            if (!g || typeof g !== 'object') continue;
+            var s = typeof g.content === 'string' ? g.content : (typeof g.text === 'string' ? g.text : '');
+            if (!s) continue;
+            if (g.type === 'THINK') k += s;
+            else t += s;
+          }
+          // 快照是权威全量，直接覆盖
+          if (t) text = t;
+          if (k) think = k;
+        }
+        return;
+      }
+
+      // 直接路径写入：{ p: 'response/content', o: 'SET', v: '...' }
+      var kind = classify(obj.p);
+      if (kind !== null && typeof obj.v === 'string') {
+        if (kind === 'think') think = obj.v;
+        else if (obj.o === 'APPEND') text += obj.v;
+        else text = obj.v;
+        return;
+      }
+
+      /**
+       * **裸文本增量**（正文主体）—— 见 isBareTextDelta 的说明。
+       *
+       * 放在最后判断：前面的路径匹配、fragments、快照都优先。
+       * 这是修复「只回一个字」的关键分支。
+       */
+      if (isBareTextDelta(obj)) {
+        text += obj.v;
+        return;
+      }
+    }
+
+    return {
+      consume: consume,
+      get text() { return text; },
+      get think() { return think; },
+      get finished() { return finished; },
+      get incomplete() { return incomplete; },
+      get businessError() { return businessError; }
+    };
+  }
+
+  // ---------- 事件派发 ----------
+  //
+  // CustomEvent 只在**本页面**内可见，跨不过 webview 边界。
+  // 所以两件事都做：
+  //   1. 派发 CustomEvent —— 页面内其它脚本可用（也便于 DevTools 手工监听调试）
+  //   2. 压进 window.__dshWebinEvents 环形缓冲 —— 宿主用 executeJavaScript 轮询取走
+  var lastStreamAt = 0;
+  var MAX_EVENTS = 200;
+
+  function emit(name, detail) {
+    var payload = { name: name, detail: detail, at: Date.now() };
+    try {
+      window.dispatchEvent(new CustomEvent(NS + ':' + name, { detail: detail }));
+    } catch (e) { /* ignore */ }
+    try {
+      var q = window.${MARKER}_events;
+      if (!q) { q = []; window.${MARKER}_events = q; }
+      q.push(payload);
+      if (q.length > MAX_EVENTS) q.splice(0, q.length - MAX_EVENTS);
+    } catch (e) { /* ignore */ }
+  }
+
+  function emitStream(ex) {
+    var now = Date.now();
+    if (!ex.finished && now - lastStreamAt < 100) return;
+    lastStreamAt = now;
+    emit('stream', { text: ex.text, think: ex.think, finished: ex.finished });
+  }
+
+  function emitDone(ex, reason) {
+    if (ex.businessError) {
+      emit('error', { message: ex.businessError });
+      return;
+    }
+    emit('done', {
+      text: ex.text,
+      think: ex.think,
+      status: ex.incomplete ? 'incomplete' : (ex.finished ? 'finished' : 'unknown'),
+      reason: reason || null
+    });
+  }
+
+  // ---------- 单次请求的观察会话 ----------
+  function watchResponse(response, onDone) {
+    var ex = createExtractor();
+    var decoder = createFrameDecoder();
+    var reader = response.body.getReader();
+    var dec = new TextDecoder();
+
+    function pump() {
+      return reader.read().then(function (r) {
+        if (r.done) {
+          var rest = decoder.finish();
+          for (var i = 0; i < rest.length; i++) {
+            var p = parseBlock(rest[i]);
+            if (p) ex.consume(p);
+          }
+          emitDone(ex, 'eof');
+          if (onDone) onDone();
+          return;
+        }
+        var chunk = dec.decode(r.value, { stream: true });
+        var frames = decoder.push(chunk);
+        for (var j = 0; j < frames.length; j++) {
+          var parsed = parseBlock(frames[j]);
+          if (parsed) ex.consume(parsed);
+        }
+        emitStream(ex);
+        return pump();
+      });
+    }
+
+    return pump().catch(function (e) {
+      emitDone(ex, 'read-error');
+      if (onDone) onDone();
+    });
+  }
+
+  // ---------- 猴补 fetch（只读，原样透传） ----------
+  var origFetch = window.fetch;
+  if (typeof origFetch === 'function') {
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input
+        : (input && input.url) ? input.url
+        : (input && input.href) ? input.href : '';
+      var method = (init && init.method) || (input && input.method) || 'GET';
+      var p = origFetch.apply(this, arguments);
+
+      try {
+        if (String(method).toUpperCase() === 'POST' && samePath(url, COMPLETION)) {
+          noteCompletionRequest();
+          p.then(function (res) {
+            if (!res || !res.body) {
+              // 非流式：可能是限流等业务错误，读一份副本
+              try {
+                res.clone().json().then(function (j) {
+                  var ex = createExtractor();
+                  ex.consume(j);
+                  if (ex.businessError) emit('error', { message: ex.businessError });
+                }).catch(function () {});
+              } catch (e) { /* ignore */ }
+              return;
+            }
+            // 必须 clone —— 页面自己要消费原 body，我们只看副本
+            try { watchResponse(res.clone()); } catch (e) { /* ignore */ }
+          }).catch(function () {});
+        }
+      } catch (e) { /* ignore */ }
+
+      return p;
+    };
+  }
+
+  // ---------- 猴补 XHR（只读，原样透传） ----------
+  var OrigXHR = window.XMLHttpRequest;
+  if (typeof OrigXHR === 'function') {
+    var origOpen = OrigXHR.prototype.open;
+    var origSend = OrigXHR.prototype.send;
+    var info = new WeakMap();
+
+    OrigXHR.prototype.open = function (method, url) {
+      try { info.set(this, { method: method, url: url }); } catch (e) { /* ignore */ }
+      return origOpen.apply(this, arguments);
+    };
+
+    OrigXHR.prototype.send = function () {
+      var meta = info.get(this);
+      var isTarget = meta && String(meta.method).toUpperCase() === 'POST' && samePath(meta.url, COMPLETION);
+      if (isTarget) {
+        noteCompletionRequest();
+        var ex = createExtractor();
+        var decoder = createFrameDecoder();
+        var lastLen = 0;
+        var done = false;
+
+        this.addEventListener('readystatechange', function () {
+          if (this.readyState !== 3 && this.readyState !== 4) return;
+          var raw;
+          try { raw = this.responseText; } catch (e) { return; }
+          if (typeof raw !== 'string' || raw.length <= lastLen) return;
+          var chunk = raw.slice(lastLen);
+          lastLen = raw.length;
+          var frames = decoder.push(chunk);
+          for (var i = 0; i < frames.length; i++) {
+            var parsed = parseBlock(frames[i]);
+            if (parsed) ex.consume(parsed);
+          }
+          emitStream(ex);
+          if (this.readyState === 4 && !done) {
+            done = true;
+            var rest = decoder.finish();
+            for (var j = 0; j < rest.length; j++) {
+              var p2 = parseBlock(rest[j]);
+              if (p2) ex.consume(p2);
+            }
+            emitDone(ex, 'xhr-end');
+          }
+        });
+      }
+      return origSend.apply(this, arguments);
+    };
+  }
+
+  return 'installed';
+})();`
+}
+
+/**
+ * 探针：读当前页面的登录态与指纹。
+ *
+ * ⚠️ **登录判断不能只看 `userToken` 存在与否**。
+ * DeepSeek 未登录时这个 key 也可能在（空串 / `{"value":""}` 包装），
+ * 早期版本用 `!!localStorage.getItem('userToken')` 导致登录页也报「已登录」。
+ *
+ * ⚠️ **也不能因为判据太严而误报未登录** —— 那会让发送循环整个不工作。
+ * 所以这里返回**分项证据**，由宿主决定怎么用；`loggedIn` 只是综合结论。
+ *
+ * 判据（按强度）：
+ *   1. `__appKit_userInfo` 里能解出非空 `id` —— 最强的正面证据（登录页不会有）
+ *   2. `userToken` 解包后非空
+ *   3. 负面证据：URL 在登录路由上 / 页面上有登录表单
+ *
+ * 结论：`loggedIn = 有正面证据 && 无负面证据`；
+ * 只有 token 而无 userInfo 时也认（老版本页面可能没有 userInfo）。
+ */
+export function buildProbeScript(): string {
+  return `(function () {
+  try {
+    // ---- 1) token：新版网页端把 token 存成 AppKit 包装 JSON {"value":"<token>"} ----
+    function unwrap(raw) {
+      if (typeof raw !== 'string' || raw === '') return '';
+      var s = raw.trim();
+      if (s.charAt(0) === '{') {
+        try {
+          var o = JSON.parse(s);
+          if (o && typeof o.value === 'string') s = o.value;
+        } catch (e) { return ''; }
+      }
+      if (s.length >= 2 && s.charAt(0) === '"' && s.charAt(s.length - 1) === '"') s = s.slice(1, -1);
+      return s;
+    }
+
+    var raw = null;
+    try { raw = localStorage.getItem('userToken'); } catch (e) {}
+    var token = unwrap(raw);
+
+    // ---- 2) userInfo.id：最强的正面证据 ----
+    //
+    // ⚠️ 真实存储形状（实测自 ~/.dsh/webin/auth/default.json）：
+    //     {"value":{"id":"b3a51eb9-..."},"__version":"0"}
+    // id 是**嵌在 value 里**的，不是顶层字段。早期版本只看顶层 parsed.id，
+    // 于是明明登录了却报 hasUserId:false。这里两种形状都认。
+    var userId = '';
+    try {
+      var uiRaw = localStorage.getItem('__appKit_userInfo');
+      if (typeof uiRaw === 'string' && uiRaw !== '') {
+        var ui = JSON.parse(uiRaw);
+        if (ui && typeof ui === 'object') {
+          if (ui.value && typeof ui.value === 'object' && typeof ui.value.id === 'string') {
+            userId = ui.value.id;          // 实际形状
+          } else if (typeof ui.id === 'string') {
+            userId = ui.id;                // 兼容扁平形状
+          }
+        }
+      }
+    } catch (e) {}
+
+    // ---- 3) 负面证据 ----
+    var href = location.href;
+    var onAuthRoute = /\\/(sign_in|sign_up|login|register)/i.test(href);
+
+    var hasLoginForm = false;
+    try {
+      var ph = document.querySelector('input[placeholder*="手机号"], input[placeholder*="phone"], input[type="tel"]');
+      var btns = document.querySelectorAll('button, div[role="button"]');
+      var hasSendCode = false;
+      var hasLoginBtn = false;
+      for (var i = 0; i < btns.length; i++) {
+        var t = (btns[i].textContent || '').trim();
+        if (t === '发送验证码' || t === '获取验证码') hasSendCode = true;
+        if (t === '登录' || t === '登 录') hasLoginBtn = true;
+      }
+      hasLoginForm = !!ph || hasSendCode || hasLoginBtn;
+    } catch (e) {}
+
+    var hasPositive = userId !== '' || token !== '';
+    var loggedIn = hasPositive && !onAuthRoute && !hasLoginForm;
+
+    var brands = [];
+    try {
+      brands = (navigator.userAgentData && navigator.userAgentData.brands || []).map(function (b) {
+        return b.brand + '/' + b.version;
+      });
+    } catch (e) {}
+
+    return JSON.stringify({
+      loggedIn: loggedIn,
+      hasUserId: userId !== '',
+      userIdLength: userId.length,
+      tokenLength: token.length,
+      tokenRawLength: typeof raw === 'string' ? raw.length : 0,
+      onAuthRoute: onAuthRoute,
+      hasLoginForm: hasLoginForm,
+      ua: navigator.userAgent,
+      hasElectron: navigator.userAgent.indexOf('Electron') !== -1,
+      webdriver: navigator.webdriver,
+      brands: brands,
+      hookInstalled: !!window.${MARKER},
+      url: href
+    });
+  } catch (e) {
+    return '{}';
+  }
+})();`
+}
+
+/** 登录态快照的宿主侧 API 前缀（与 host 半一致）。 */
+const API_PREFIX = '/dsh-webin/api'
+
+/** 默认账号槽位。 */
+const DEFAULT_SLOT = 'default'
+
+/**
+ * 把快照存到 **host 侧**（`~/.dsh/webin/auth/<slot>.json`）。
+ *
+ * 不用 `window.localStorage`：那是 DSH 主窗口的存储，不归本插件所有，
+ * 而且跟 guest partition 一样会随 profile 走。host 的文件系统才是真正落盘的。
+ */
+export async function saveSnapshot(snapshotJson: string, slot = DEFAULT_SLOT): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_PREFIX}/auth/${slot}/snapshot`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: snapshotJson,
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 从 host 侧取回快照；没有则返回 undefined。 */
+export async function loadSnapshot(slot = DEFAULT_SLOT): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${API_PREFIX}/auth/${slot}/snapshot`, { method: 'GET' })
+    if (!res.ok) return undefined
+    const text = await res.text()
+    return text === '' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/** 清掉 host 侧快照（退出登录时用）。 */
+export async function clearSnapshot(slot = DEFAULT_SLOT): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_PREFIX}/auth/${slot}/snapshot`, { method: 'DELETE' })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
+/** 取走 hook 累积的事件（取即清空）。
+ *
+ * 用轮询而不是事件订阅：`CustomEvent` 跨不过 webview 边界，
+ * 而 `<webview>` 的 `ipc-message` 需要 guest 里 `require('electron')` —— guest 是 sandbox 且无 preload，拿不到。
+ * 轮询 `executeJavaScript` 是这条路里唯一稳定的桥。
+ */
+export function buildDrainScript(): string {
+  return `(function () {
+  try {
+    var q = window.${EVENT_QUEUE_KEY};
+    if (!q || !q.length) return '[]';
+    window.${EVENT_QUEUE_KEY} = [];
+    return JSON.stringify(q);
+  } catch (e) {
+    return '[]';
+  }
+})();`
+}
+
+/**
+ * 导出登录态快照。
+ *
+ * **为什么需要这个**：DSH 的 guest partition 是
+ * `dsh-sidebar-browser-${randomUUID()}`（`main.js:9638`）—— **没有 `persist:` 前缀，
+ * 是内存分区，连磁盘都不落**。所以 DSH 一重启，cookie / localStorage 全丢，必须重新登录。
+ *
+ * 这里把能救的东西救出来存到 host 侧，下次启动回写。
+ * ⚠️ **局限**：`httpOnly` cookie 读不到（`document.cookie` 看不见它们）。
+ */
+export function buildSnapshotScript(): string {
+  return `(function () {
+  try {
+    var ls = {};
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k === null) continue;
+      // 只存可能承载登录态 / 会话的键，避免把无关缓存也搬走
+      if (k === 'userToken' || k.indexOf('userToken') !== -1 ||
+          k.indexOf('appKit') !== -1 || k.indexOf('hif_') !== -1 ||
+          k.indexOf('__appKit') !== -1) {
+        ls[k] = localStorage.getItem(k);
+      }
+    }
+    return JSON.stringify({
+      localStorage: ls,
+      cookie: (function () { try { return document.cookie; } catch (e) { return ''; } })(),
+      url: location.href,
+      at: Date.now()
+    });
+  } catch (e) {
+    return '{}';
+  }
+})();`
+}
+
+/**
+ * 回写登录态快照。传入 `buildSnapshotScript()` 产出的 JSON 字符串。
+ *
+ * ⚠️ **localStorage 和 cookie 都要回写**。早期版本只写了 localStorage，
+ * 但快照里明明存了 cookie —— 那份 cookie 被白存了。
+ *
+ * ⚠️ **必须在目标域上执行**。`about:blank` 是 opaque origin，
+ * `localStorage` 会直接抛 `SecurityError`，而且 storage 按源隔离 ——
+ * 在错的源上写等于没写。早期实现在 about:blank 上跑这个脚本，
+ * 导致**每次重启 DSH 都要重新登录**（实测，见 `scripts/probe-origin.mjs`）。
+ * 所以下面**显式检测源并报告**，不再让异常被静默吞掉。
+ *
+ * cookie 回写的限制（浏览器安全模型，不是实现问题）：
+ *   - `httpOnly` cookie 用 JS 既读不到也写不了
+ *   - 写 cookie 必须带正确的 `path`（本站是 `/`）
+ *   - 跨域 cookie 需要 `domain`，这里交给浏览器按当前域处理
+ */
+export function buildRestoreScript(snapshotJson: string): string {
+  return `(function () {
+  try {
+    var snap = ${JSON.stringify(snapshotJson)};
+    var data = typeof snap === 'string' ? JSON.parse(snap) : snap;
+    if (!data) return JSON.stringify({ ok: false, restored: 0, cookies: 0, reason: 'no-snapshot' });
+
+    // ---- 0) 源检查：错的源上写了也是白写 ----
+    var origin = '';
+    try { origin = String(location.origin); } catch (e) { origin = ''; }
+    if (!origin || origin === 'null' || origin === 'about:blank') {
+      return JSON.stringify({
+        ok: false,
+        reason: 'wrong-origin',
+        origin: origin,
+        hint: 'restore 必须在目标域上执行（about:blank 是 opaque origin，storage 不可写）'
+      });
+    }
+
+    // ---- 1) localStorage ----
+    var ls = data.localStorage || {};
+    var n = 0;
+    var failed = 0;
+    for (var k in ls) {
+      if (!Object.prototype.hasOwnProperty.call(ls, k)) continue;
+      try { localStorage.setItem(k, ls[k]); n++; } catch (e) { failed++; }
+    }
+
+    // ---- 2) cookie ----
+    // document.cookie 是 "k=v; k2=v2" 形式，逐条写回。
+    var ck = typeof data.cookie === 'string' ? data.cookie : '';
+    var c = 0;
+    if (ck) {
+      var parts = ck.split(';');
+      for (var i = 0; i < parts.length; i++) {
+        var kv = parts[i].trim();
+        if (!kv) continue;
+        var eq = kv.indexOf('=');
+        if (eq <= 0) continue;
+        var name = kv.slice(0, eq);
+        // 跳过带属性的残留片段（Secure / HttpOnly / SameSite 等）
+        if (/^(secure|httponly|samesite|path|domain|expires|max-age)$/i.test(name)) continue;
+        try {
+          // 先清同名的旧值，避免 domain/path 组合残留导致重复
+          document.cookie = name + '=; path=/; max-age=0';
+          document.cookie = kv + '; path=/';
+          c++;
+        } catch (e) {}
+      }
+    }
+
+    // ---- 3) 回读校验：写失败时不静默 ----
+    var verified = 0;
+    for (var k2 in ls) {
+      if (!Object.prototype.hasOwnProperty.call(ls, k2)) continue;
+      try { if (localStorage.getItem(k2) === ls[k2]) verified++; } catch (e) {}
+    }
+
+    return JSON.stringify({
+      ok: verified > 0 || c > 0,
+      restored: n,
+      verified: verified,
+      failed: failed,
+      cookies: c,
+      origin: origin
+    });
+  } catch (e) {
+    return JSON.stringify({
+      ok: false, restored: 0, cookies: 0, reason: 'exception',
+      message: String(e && e.message || e)
+    });
+  }
+})();`
+}

@@ -1,0 +1,604 @@
+/**
+ * dsh-webin — host 半。
+ *
+ * 职责：
+ *   1. 为**每个平台**注册 provider 路由（`webin-deepseek`、`webin-qwen`…），
+ *      让各平台的网页版出现在模型选择器里
+ *   2. 任务队列：把 agent 的 prompt 派给 client，等 client 从真实浏览器取回回复
+ *   3. 登录态快照的**持久化**（`~/.dsh/webin/auth/`，跨 DSH 重启存活）
+ *   4. 自定义 provider 的**持久化**（`~/.dsh/webin/providers/`）
+ *
+ * 为什么持久化放在 host 而不是 client：
+ *   DSH 的 guest partition 是 `dsh-sidebar-browser-${randomUUID()}`
+ *   （`main.js:9638`，**无 `persist:` 前缀 ⇒ 内存分区**）。
+ *   client 侧的 `window.localStorage` 也跟着主窗口 profile 走，不是我们自己的存储；
+ *   只有 host 侧的文件系统是真正由本插件掌控、且跨重启存活的。
+ *
+ * ## 多平台隔离怎么实现的
+ *
+ * `DesktopBrowserGuests.acquire(owner, workspace)` 按 **workspace 字符串**缓存
+ * partition（`main.js:9636-9641`）：
+ *
+ * ```js
+ * let partition = this.partitions.get(workspace);
+ * if (partition === void 0) {
+ *   partition = `dsh-sidebar-browser-${randomUUID()}`;
+ *   this.partitions.set(workspace, partition);
+ * }
+ * ```
+ *
+ * 所以**用 provider.id 当 workspace 名**，各平台自然拿到不同 partition、
+ * 不同 cookie / localStorage ⇒ **登录态天然隔离**，且不需要改 DSH 一行。
+ */
+import { mkdir, readFile, writeFile, rename, readdir, unlink } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
+import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
+
+export const name = 'dsh-webin'
+
+/** 硬依赖 webServer（路由）与 llm（注册 provider）。 */
+export const inject = ['webServer', 'llm']
+
+/** 路由前缀（client 半同源 fetch 这个前缀）。 */
+const API_PREFIX = '/dsh-webin/api'
+
+/** 默认账号槽位名。 */
+const DEFAULT_SLOT = 'default'
+
+/** 请求体上限，防止意外灌爆内存。 */
+const BODY_LIMIT_BYTES = 2 * 1024 * 1024
+
+/** 状态根目录：`~/.dsh/webin/`。 */
+function stateRoot(): string {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(home, 'webin')
+}
+
+/** 单个槽位的快照文件路径。 */
+function snapshotPath(slot: string): string {
+  const safe = /^[A-Za-z0-9_-]{1,64}$/.test(slot) ? slot : DEFAULT_SLOT
+  return join(stateRoot(), 'auth', `${safe}.json`)
+}
+
+/**
+ * 自定义 provider 的存放目录：`~/.dsh/webin/providers/`。
+ *
+ * 一个平台一个 `<id>.json`（内容是单个 Provider 对象）。
+ * 与登录态快照同一套存储策略：host 侧落盘，跨重启存活。
+ */
+function providersDir(): string {
+  return join(stateRoot(), 'providers')
+}
+
+/** 读全部自定义 provider（跳过读不动的文件，不因为一个坏文件全盘失败）。 */
+async function readCustomProviders(): Promise<{ items: unknown[]; errors: Array<{ file: string; reason: string }> }> {
+  const dir = providersDir()
+  const items: unknown[] = []
+  const errors: Array<{ file: string; reason: string }> = []
+  if (!existsSync(dir)) return { items, errors }
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch (error) {
+    return { items, errors: [{ file: dir, reason: (error as Error)?.message ?? String(error) }] }
+  }
+  for (const fileName of names) {
+    if (!fileName.endsWith('.json')) continue
+    try {
+      const text = await readFile(join(dir, fileName), 'utf8')
+      items.push(JSON.parse(text))
+    } catch (error) {
+      errors.push({ file: fileName, reason: (error as Error)?.message ?? String(error) })
+    }
+  }
+  return { items, errors }
+}
+
+/** 写一个自定义 provider（原子写，文件名用 id）。 */
+async function writeCustomProvider(provider: { id: string }): Promise<string> {
+  const dir = providersDir()
+  await mkdir(dir, { recursive: true })
+  const path = join(dir, `${provider.id}.json`)
+  await writeAtomic(path, JSON.stringify(provider, null, 2))
+  return path
+}
+
+/** 删一个自定义 provider。 */
+async function removeCustomProvider(id: string): Promise<boolean> {
+  const path = join(providersDir(), `${id}.json`)
+  if (!existsSync(path)) return false
+  await unlink(path)
+  return true
+}
+
+/** 读请求体（有上限）。 */
+function readBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let total = 0
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length
+      if (total > BODY_LIMIT_BYTES) {
+        reject(new Error('body too large'))
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+/** 统一的 JSON 响应。 */
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-length': Buffer.byteLength(body),
+  })
+  res.end(body)
+}
+
+/** 原子写：先写临时文件再 rename，避免半截文件。 */
+async function writeAtomic(path: string, content: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`
+  await writeFile(tmp, content, { encoding: 'utf8', mode: 0o600 })
+  await rename(tmp, path)
+}
+
+/** 从 URL 取槽位名：`/dsh-webin/api/auth/<slot>/<suffix>`。 */
+function slotFromPath(pathname: string, suffix: string): string | undefined {
+  const prefix = `${API_PREFIX}/auth/`
+  if (!pathname.startsWith(prefix)) return undefined
+  const rest = pathname.slice(prefix.length)
+  if (!rest.endsWith(suffix)) return undefined
+  const slot = rest.slice(0, rest.length - suffix.length)
+  return slot === '' ? undefined : slot
+}
+
+/** 从 URL 取任务 id：`/dsh-webin/api/job/<id>/<suffix>`。 */
+function jobIdFromPath(pathname: string, suffix: string): string | undefined {
+  const prefix = `${API_PREFIX}/job/`
+  if (!pathname.startsWith(prefix)) return undefined
+  const rest = pathname.slice(prefix.length)
+  if (!rest.endsWith(suffix)) return undefined
+  const id = rest.slice(0, rest.length - suffix.length)
+  return id === '' ? undefined : id
+}
+
+/**
+ * 客户端心跳表。
+ *
+ * 作用：host 半（尤其是 adapter）需要知道「LDW 面板此刻在不在线」。
+ * 面板被切走 / 卸载 / 页面没登录，都会体现在这张表上 —— 排查
+ * 「模型不回复」时，`GET /dsh-webin/api/status` 一眼就能定位到哪一环断了。
+ */
+interface ClientBeat {
+  clientId: string
+  /** 该面板驱动哪个平台（一个面板一个 webview）。 */
+  platform: string
+  at: number
+  loggedIn: boolean
+  hasGuest: boolean
+  replyCount: number
+}
+
+/** 心跳超过这个时长即视为离线。 */
+const CLIENT_STALE_MS = 15_000
+
+/**
+ * 安全取一个命名 logger。
+ *
+ * `ctx.logger` 是 Cordis 的 **callable service**（`LoggerService` 用 `createCallable` 包装，
+ * 见 cordis `lib/index.js:594`），所以：
+ *   - `ctx.logger('ns')` → 命名 Logger 实例
+ *   - `ctx.logger.info(...)` → 也合法（`LoggerService.prototype` 上挂了直通方法，`:646`）
+ *
+ * ⚠️ 但**不能假设它一定可调用**：`?.()` 只防 null/undefined，不防"存在但不是函数"。
+ * 宿主版本差异或服务被替换时，一次 TypeError 就会让整个 `apply()` 抛出、
+ * 插件加载失败。所以这里显式判类型，任何异常都退化成空 logger —— 日志丢了不致命，
+ * 插件装不上才致命。
+ */
+function safeLogger(ctx: { logger?: unknown }): {
+  info?: (m: string) => void
+  warn?: (m: string) => void
+  debug?: (m: string) => void
+} {
+  try {
+    const svc = ctx.logger as
+      | (((ns: string) => unknown) & { info?: unknown; warn?: unknown; debug?: unknown })
+      | undefined
+    if (svc === undefined || svc === null) return {}
+
+    let target: unknown = svc
+    if (typeof svc === 'function') target = svc('dsh-webin')
+
+    if (target === null || typeof target !== 'object') {
+      // 退化：直接用服务本身（若它自带 info/warn/debug）
+      target = svc
+    }
+    const t = target as { info?: unknown; warn?: unknown; debug?: unknown }
+    const pick = (fn: unknown): ((m: string) => void) | undefined =>
+      typeof fn === 'function' ? (m: string) => (fn as (m: string) => void).call(target, m) : undefined
+    return { info: pick(t.info), warn: pick(t.warn), debug: pick(t.debug) }
+  } catch {
+    return {}
+  }
+}
+
+export async function apply(ctx: {
+  effect(cb: () => unknown, label?: string): void
+  webServer: {
+    register(route: {
+      kind: 'exact' | 'prefix'
+      path: string
+      handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
+    }): () => void
+  }
+  logger?: unknown
+  llm: {
+    registerAdapter(providers: string[], adapter: unknown): () => void
+  }
+}): void {
+  const log = safeLogger(ctx)
+
+  /** 在线客户端心跳（clientId → 最近一次心跳）。 */
+  const beats = new Map<string, ClientBeat>()
+  const liveClients = (): ClientBeat[] => {
+    const now = Date.now()
+    const out: ClientBeat[] = []
+    for (const [id, beat] of beats) {
+      if (now - beat.at > CLIENT_STALE_MS) {
+        beats.delete(id)
+        continue
+      }
+      out.push(beat)
+    }
+    return out
+  }
+
+  // ---- provider 注册：每个平台一个路由，让它们出现在模型选择器 ----
+  //
+  // ⚠️ 必须走 `ctx.effect` 把 disposer 交回 Cordis。
+  // 直接 `ctx.webServer.register(...)` 而不释放，会在插件卸载后**留下幽灵路由**：
+  // 再次启用时撞上 `webserver: duplicate prefix route "/dsh-webin/api"` 而激活失败
+  // （实测踩过）。adapter 同理，重复注册会抛 "provider already registered"。
+  const registry = new ProviderRegistry()
+  const queue = new JobQueue()
+  const adapter = createAdapter({ queue, logger: log, registry })
+
+  /** 当前注册了哪些路由（自定义 provider 增删后要重注册）。 */
+  let registeredRoutes: string[] = []
+  const syncProviders = (): void => {
+    const routes = registry.all().map((p) => routeFor(p.id))
+    // 路由集合没变就不动 —— 重复注册同一个 provider 会抛 DUPLICATE_ADAPTER
+    if (routes.length === registeredRoutes.length && routes.every((r, i) => r === registeredRoutes[i])) return
+    for (const route of registeredRoutes) disposers.get(route)?.()
+    disposers.clear()
+    for (const route of routes) {
+      disposers.set(route, ctx.llm.registerAdapter([route], adapter))
+    }
+    registeredRoutes = routes
+    log.info?.(`已注册 provider 路由：${routes.join(', ')}`)
+  }
+  const disposers = new Map<string, () => void>()
+
+  ctx.effect(() => () => {
+    for (const dispose of disposers.values()) dispose()
+    disposers.clear()
+    registeredRoutes = []
+  }, 'dsh-webin: llm adapters')
+
+  // 首次装配：先读磁盘上的自定义 provider，再注册
+  const initial = await readCustomProviders()
+  if (initial.items.length > 0) {
+    const loaded = registry.loadCustom(initial.items)
+    if (loaded.accepted.length > 0) log.info?.(`已加载自定义 provider：${loaded.accepted.join(', ')}`)
+    for (const r of loaded.rejected) log.warn?.(`自定义 provider #${r.index} 校验失败：${r.reason}`)
+  }
+  for (const e of initial.errors) log.warn?.(`自定义 provider 文件读取失败 ${e.file}：${e.reason}`)
+  syncProviders()
+
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      const pathname = url.pathname
+      const method = (req.method ?? 'GET').toUpperCase()
+
+      // ---- 任务队列：client 领活 / 交结果 ----
+      // GET /job/next —— client 领一个待办任务
+      // `?platform=<id>` 让每个平台的 webview 只领自己的活
+      if (method === 'GET' && pathname === `${API_PREFIX}/job/next`) {
+        const platform = url.searchParams.get('platform') ?? undefined
+        /**
+         * `?running=<jobId>` —— client 报告「我正在跑哪个任务」。
+         *
+         * 用途：用户按停止后 host 会把任务标记为 `cancelled`，
+         * client 靠这个参数问「我这个任务还算数吗」。
+         * 不算数就去按页面的停止按钮，别让页面白生成到结束（烧配额）。
+         */
+        const running = url.searchParams.get('running') ?? undefined
+        if (running !== undefined && running !== '') {
+          const current = queue.get(running)
+          if (current === undefined || current.cancelled === true) {
+            sendJson(res, 200, { ok: true, job: null, cancel: running })
+            return
+          }
+        }
+
+        const job = queue.claimNext(platform)
+        if (job === undefined) {
+          sendJson(res, 200, { ok: true, job: null, clientOnline: queue.hasClaimed() })
+          return
+        }
+        sendJson(res, 200, {
+          ok: true,
+          job: {
+            id: job.id,
+            prompt: job.prompt,
+            thinking: job.thinking,
+            platform: job.platform,
+            /**
+             * 该任务所属 DSH 会话绑定的网页对话 URL。
+             * client 发现当前页面不在这里时，先导航过去再发送 ——
+             * 否则所有 DSH 会话挤一个网页对话（封号级缺陷）。
+             */
+            ...(job.expectUrl === undefined ? {} : { expectUrl: job.expectUrl }),
+          },
+        })
+        return
+      }
+
+      // PUT /job/<id>/result —— client 交结果
+      const resultJobId = jobIdFromPath(pathname, '/result')
+      if (method === 'PUT' && resultJobId !== undefined) {
+        const body = await readBody(req)
+        let payload: { text?: string; think?: string; status?: string; error?: string; chatUrl?: string }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const settled =
+          typeof payload.error === 'string' && payload.error !== ''
+            ? queue.settle(resultJobId, { error: payload.error })
+            : queue.settle(resultJobId, {
+                text: String(payload.text ?? ''),
+                think: String(payload.think ?? ''),
+                status: String(payload.status ?? 'finished'),
+                /**
+                 * 发送成功后所在的页面 URL —— host 记住它，
+                 * 让该 DSH 会话的后续任务都导航回这个对话接着聊。
+                 */
+                ...(typeof payload.chatUrl === 'string' && payload.chatUrl !== ''
+                  ? { chatUrl: payload.chatUrl }
+                  : {}),
+              })
+        log.debug?.(`job ${resultJobId} settled=${String(settled)}`)
+        sendJson(res, settled ? 200 : 404, { ok: settled })
+        return
+      }
+
+      // GET /auth/<slot>/snapshot —— 取快照
+      const getSlot = slotFromPath(pathname, '/snapshot')
+      if (method === 'GET' && getSlot !== undefined) {
+        const path = snapshotPath(getSlot)
+        if (!existsSync(path)) {
+          sendJson(res, 404, { ok: false, reason: 'no-snapshot' })
+          return
+        }
+        const text = await readFile(path, 'utf8')
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(text)
+        return
+      }
+
+      // PUT /auth/<slot>/snapshot —— 存快照
+      if (method === 'PUT' && getSlot !== undefined) {
+        const body = await readBody(req)
+        try {
+          JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        await writeAtomic(snapshotPath(getSlot), body)
+        log.info?.(`auth snapshot saved: slot=${getSlot} bytes=${body.length}`)
+        sendJson(res, 200, { ok: true, slot: getSlot, bytes: body.length })
+        return
+      }
+
+      // DELETE /auth/<slot>/snapshot —— 清快照（退出登录）
+      if (method === 'DELETE' && getSlot !== undefined) {
+        const path = snapshotPath(getSlot)
+        if (existsSync(path)) await unlink(path)
+        sendJson(res, 200, { ok: true, slot: getSlot })
+        return
+      }
+
+      // GET /auth —— 列出所有槽位
+      if (method === 'GET' && pathname === `${API_PREFIX}/auth`) {
+        let slots: string[] = []
+        try {
+          slots = (await readdir(join(stateRoot(), 'auth')))
+            .filter((f) => f.endsWith('.json'))
+            .map((f) => f.slice(0, -5))
+        } catch {
+          slots = []
+        }
+        sendJson(res, 200, { ok: true, slots, root: stateRoot() })
+        return
+      }
+
+      // POST /client/heartbeat —— client 上报在线状态
+      if (method === 'POST' && pathname === `${API_PREFIX}/client/heartbeat`) {
+        const body = await readBody(req)
+        let payload: {
+          clientId?: string
+          platform?: string
+          loggedIn?: boolean
+          hasGuest?: boolean
+          replyCount?: number
+        }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const clientId = typeof payload.clientId === 'string' && payload.clientId !== '' ? payload.clientId : 'anonymous'
+        const platform =
+          typeof payload.platform === 'string' && payload.platform !== '' ? payload.platform : DEFAULT_PROVIDER_ID
+        beats.set(clientId, {
+          clientId,
+          platform,
+          at: Date.now(),
+          loggedIn: payload.loggedIn === true,
+          hasGuest: payload.hasGuest === true,
+          replyCount: typeof payload.replyCount === 'number' ? payload.replyCount : 0,
+        })
+        sendJson(res, 200, { ok: true, clients: liveClients().length })
+        return
+      }
+
+      // GET /status —— 自检
+      if (method === 'GET' && pathname === `${API_PREFIX}/status`) {
+        const clients = liveClients()
+        sendJson(res, 200, {
+          ok: true,
+          plugin: name,
+          /**
+           * 平台清单 —— 每个平台一个 provider 路由，模型选择器里是独立分组。
+           * `overridden` 标出哪些内置平台被用户自定义 JSON 覆盖了。
+           */
+          platforms: registry.all().map((p) => ({
+            id: p.id,
+            name: p.name,
+            route: routeFor(p.id),
+            homeUrl: p.homeUrl,
+            models: p.models.map((m) => ({ id: `${p.id}:${m.id}`, name: m.name })),
+            contextWindow: p.contextWindow,
+            custom: registry.overriddenIds().includes(p.id),
+          })),
+          root: stateRoot(),
+          providersDir: providersDir(),
+          /**
+           * 面板在线情况 —— 模型不回复时先看这里。
+           * `online: 0` 表示没有任何 LDW 面板在跑，任务必然无人领取。
+           */
+          clients: {
+            online: clients.length,
+            loggedIn: clients.filter((c) => c.loggedIn).length,
+            detail: clients.map((c) => ({
+              clientId: c.clientId,
+              platform: c.platform,
+              ageMs: Date.now() - c.at,
+              loggedIn: c.loggedIn,
+              hasGuest: c.hasGuest,
+              replyCount: c.replyCount,
+            })),
+          },
+          routes: [
+            `GET    ${API_PREFIX}/status`,
+            `GET    ${API_PREFIX}/providers`,
+            `POST   ${API_PREFIX}/providers`,
+            `DELETE ${API_PREFIX}/providers/<id>`,
+            `POST   ${API_PREFIX}/client/heartbeat`,
+            `GET    ${API_PREFIX}/job/next?platform=<id>`,
+            `PUT    ${API_PREFIX}/job/<id>/result`,
+            `GET    ${API_PREFIX}/auth`,
+            `GET    ${API_PREFIX}/auth/<slot>/snapshot`,
+            `PUT    ${API_PREFIX}/auth/<slot>/snapshot`,
+            `DELETE ${API_PREFIX}/auth/<slot>/snapshot`,
+          ],
+        })
+        return
+      }
+
+      // ---- 自定义 provider 管理 ----
+      // GET /providers —— 列出自定义项与校验结果
+      if (method === 'GET' && pathname === `${API_PREFIX}/providers`) {
+        const { items, errors } = await readCustomProviders()
+        const probe = new ProviderRegistry()
+        const loaded = probe.loadCustom(items)
+        sendJson(res, 200, {
+          ok: true,
+          dir: providersDir(),
+          accepted: loaded.accepted,
+          rejected: loaded.rejected.map((r) => ({ index: r.index, reason: r.reason })),
+          fileErrors: errors,
+          count: items.length,
+        })
+        return
+      }
+
+      // POST /providers —— 装一个自定义 provider（JSON body = Provider 对象）
+      if (method === 'POST' && pathname === `${API_PREFIX}/providers`) {
+        const body = await readBody(req)
+        let payload: unknown
+        try {
+          payload = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const check = new ProviderRegistry()
+        const loaded = check.loadCustom([payload])
+        if (loaded.accepted.length === 0) {
+          sendJson(res, 400, {
+            ok: false,
+            reason: loaded.rejected[0]?.reason ?? 'provider 校验失败',
+          })
+          return
+        }
+        const id = loaded.accepted[0]!
+        const path = await writeCustomProvider(payload as { id: string })
+        // 热加载：让新平台立刻出现在模型选择器里
+        registry.loadCustom([payload])
+        syncProviders()
+        log.info?.(`自定义 provider 已装入：${id}`)
+        sendJson(res, 200, { ok: true, id, path, route: routeFor(id) })
+        return
+      }
+
+      // DELETE /providers/<id> —— 移除一个自定义 provider
+      if (method === 'DELETE' && pathname.startsWith(`${API_PREFIX}/providers/`)) {
+        const id = decodeURIComponent(pathname.slice(`${API_PREFIX}/providers/`.length))
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+          sendJson(res, 400, { ok: false, reason: 'invalid-id' })
+          return
+        }
+        const removed = await removeCustomProvider(id)
+        log.info?.(`自定义 provider 已移除：${id}（${removed ? '文件已删' : '无文件'}）`)
+        sendJson(res, 200, { ok: true, id, removed })
+        return
+      }
+
+      sendJson(res, 404, { ok: false, reason: 'not-found', path: pathname })
+    } catch (error) {
+      log.warn?.(`request failed: ${(error as Error)?.message ?? String(error)}`)
+      try {
+        sendJson(res, 500, { ok: false, reason: (error as Error)?.message ?? 'internal' })
+      } catch {
+        /* 响应可能已开始，忽略 */
+      }
+    }
+  }
+
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'prefix', path: API_PREFIX, handler }),
+    'dsh-webin: api routes',
+  )
+  log.info?.(`host ready; api=${API_PREFIX} state=${stateRoot()}`)
+}
