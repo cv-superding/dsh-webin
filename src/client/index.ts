@@ -2092,14 +2092,56 @@ export function LdwHost(): unknown {
             onClick: () => {
               const el = hostRef.current?.querySelector('webview') as GuestElement | null
               if (el === null) return
-              void el
-                .executeJavaScript(buildDiagnoseScript(sendHintsFor(provider)))
-                .then((raw) => {
-                  const text = String(raw)
-                  setDiagnosis(text)
-                  console.log('[dsh-webin] 页面结构诊断', text)
-                })
-                .catch((e) => setDiagnosis(`诊断失败：${String(e)}`))
+              /**
+               * ## 诊断要回答「DOM 抓取到底看到了什么」
+               *
+               * 现在整个设计押在 DOM 抓取上，所以诊断必须包含它 ——
+               * 否则用户说「还是不行」时我只能靠猜。
+               *
+               * 两份数据合并：
+               *   1. `buildDiagnoseScript` —— 输入框/按钮/POST 路径
+               *   2. `buildScrapeScript`   —— **它实际读到了哪几条回复**
+               *      （`count` / `selector` / 每条的长度与前 80 字）
+               */
+              void (async () => {
+                try {
+                  const raw = await execJs<string>(el, buildDiagnoseScript(sendHintsFor(provider)), 15_000)
+                  const base = raw === EXEC_TIMEOUT ? '{"error":"诊断脚本超时"}' : String(raw)
+                  const scrapeRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
+                  let merged = base
+                  try {
+                    const parsed = JSON.parse(base) as Record<string, unknown>
+                    if (scrapeRaw !== EXEC_TIMEOUT) {
+                      const s = JSON.parse(String(scrapeRaw)) as {
+                        ok?: boolean
+                        count?: number
+                        selector?: string
+                        last?: string
+                        think?: string
+                      }
+                      parsed.scrape = {
+                        ok: s.ok === true,
+                        /** 读到几条回复 —— 这里若是 0，说明选择器没匹配上。 */
+                        count: s.count ?? 0,
+                        /** 命中的选择器（`longest-div` = 走了兜底）。 */
+                        selector: s.selector ?? '',
+                        最后一条长度: (s.last ?? '').length,
+                        最后一条开头: (s.last ?? '').slice(0, 80),
+                        思考长度: (s.think ?? '').length,
+                      }
+                    } else {
+                      parsed.scrape = { error: 'DOM 抓取脚本超时' }
+                    }
+                    merged = JSON.stringify(parsed, null, 2)
+                  } catch {
+                    /* JSON 解析失败就用原文 */
+                  }
+                  setDiagnosis(merged)
+                  console.log('[dsh-webin] 页面结构诊断', merged)
+                } catch (e) {
+                  setDiagnosis(`诊断失败：${String(e)}`)
+                }
+              })()
             },
           },
           '诊断',

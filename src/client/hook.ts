@@ -835,15 +835,24 @@ export function buildScrapeScript(): string {
     /**
      * 回复容器候选（从最精确到最宽泛）。
      *
-     * ⚠️ DeepSeek 的 class 是构建期哈希（如 _4f9bf79），**不能依赖类名**，
-     * 所以用语义属性 + markdown 容器这类结构性特征。
+     * ## ⭐ 前面的来自**真实页面的类名**（不是猜的）
+     *
+     * 从用户会话记录里提取出 DeepSeek 网页版的 「ds-*」 类名体系：
+     *   - 「ds-markdown」       —— 回复正文容器（**最精确的命中**）
+     *   - 「ds-pow-response」   —— 回复包装
+     *   - 「ds-think-content」  —— 思考内容（由 readThink 单独处理）
+     *
+     * 后面几个是**语义/结构兜底** —— 页面改版换掉类名时还能用。
+     * ⚠️ 但要小心：「[class*="markdown"]」 会命中 「ds-markdown-code-copy-button」
+     * 这类子元素，所以精确类名必须排在前面（顺序即优先级）。
      */
     var CANDIDATES = [
+      '.ds-markdown',
       '[data-message-author-role="assistant"]',
       '[data-role="assistant"]',
-      '.ds-markdown',
-      '[class*="markdown"]',
-      '[class*="assistant"]'
+      '.ds-pow-response',
+      '[class*="assistant"]',
+      '[class*="markdown"]'
     ];
 
     /** 反引号用 charCode 拼，避免模板字符串里出现裸反引号。 */
@@ -928,8 +937,22 @@ export function buildScrapeScript(): string {
      * ⚠️ 找不到就返回空串，**不能让整条回复失败**。
      */
     function readThink() {
-      /** 思考容器的候选选择器。 */
+      /**
+       * 思考容器的候选选择器。
+       *
+       * ## ⭐ 前两个来自**真实页面的类名**（不是猜的）
+       *
+       * 从用户会话记录里提取出 DeepSeek 网页版的 「ds-*」 类名体系，其中：
+       *   - 「ds-think-content」  —— 思考内容容器（精确命中）
+       *   - 「ds-markdown」       —— 回复正文容器
+       *   - 「ds-pow-response」   —— 回复包装
+       *   - 「ds-markdown-code-copy-button」 —— 代码块上的复制按钮（界面元素，要剔除）
+       *
+       * 所以优先用 「ds-think-content」（精确），后面几个是页面改版时的兜底。
+       */
       var SEL = [
+        '.ds-think-content',
+        '[class*="think-content"]',
         '[class*="thinking"]',
         '[class*="reasoning"]',
         '[class*="think"]',
@@ -940,9 +963,11 @@ export function buildScrapeScript(): string {
       for (var i = 0; i < SEL.length && !found; i++) {
         var list;
         try { list = document.querySelectorAll(SEL[i]); } catch (e) { continue; }
-        /** 取**最后一个**可见的（最新一轮的思考）。 */
+        /** 取**最后一个**（最新一轮的思考）。可见性不作硬要求 —— */
+        /** 折叠时容器可能高度为 0，但内容仍在 DOM 里。 */
         for (var j = list.length - 1; j >= 0; j--) {
-          if (visible(list[j])) { found = list[j]; break; }
+          found = list[j];
+          break;
         }
       }
       if (!found) return '';

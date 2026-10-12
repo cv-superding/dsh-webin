@@ -132,25 +132,35 @@ function el(tag, opts = {}, ...children) {
 function run(script, roots) {
   const g = globalThis
   const saved = { document: g.document, getComputedStyle: g.getComputedStyle, location: g.location }
-  /** 支持 `[class*="markdown"]` 这种子串匹配（脚本里用到了）。 */
-  const containsMatch = (n, sel) => {
-    const m = /^\[class\*=["']([^"']+)["']\]$/.exec(sel)
-    if (m === null) return null
-    return String(n.className).includes(m[1])
+
+  /**
+   * 完整的选择器匹配 —— 桩的 `querySelectorAll` 只处理了简单形式，
+   * 但真实页面选择器有 `.class` / `[attr]` / `[class*="x"]` 三类混用。
+   *
+   * ⚠️ 这里**必须和真实 DOM 语义一致**，否则测试会因为桩的缺陷
+   * 而误报（踩过：`.ds-markdown` 没被识别，脚本掉到模糊兜底分支）。
+   */
+  const matches = (n, sel) => {
+    if (n.nodeType !== 1) return false
+    const s = sel.trim()
+    if (s.startsWith('.')) return String(n.className).split(/\s+/).includes(s.slice(1))
+    const star = /^\[class\*=["']([^"']+)["']\]$/.exec(s)
+    if (star !== null) return String(n.className).includes(star[1])
+    const attr = /^\[([\w-]+)(?:=["']?([^\]"']*)["']?)?\]$/.exec(s)
+    if (attr !== null) {
+      const v = n.getAttribute(attr[1])
+      return attr[2] === undefined ? v !== null : v === attr[2]
+    }
+    return n.tagName === s.toUpperCase()
   }
+
   g.document = {
     querySelectorAll(sel) {
       const out = []
       for (const root of roots) {
-        const direct = root.querySelectorAll(sel)
-        for (const d of direct) out.push(d)
-        /** 处理 `[class*=...]`（桩的 querySelectorAll 不支持子串）。 */
-        const cm = containsMatch(root, sel)
-        if (cm === true) out.push(root)
-        const all = collectAll(root)
-        for (const n of all) if (containsMatch(n, sel) === true) out.push(n)
+        if (matches(root, sel)) out.push(root)
+        for (const n of collectAll(root)) if (matches(n, sel)) out.push(n)
       }
-      /** 去重。 */
       return [...new Set(out)]
     },
     querySelector(sel) {
@@ -381,6 +391,52 @@ console.log('\n[14] 「已思考（用时 N 秒）」标题要从思考里剥掉
   const r = run(script, [reply])
   check('⭐ 剥掉标题行', /已思考/.test(r.think), false)
   check('⭐ 保留思考正文', r.think.includes('真正的思考内容'), true)
+}
+
+console.log('\n[15] ⭐⭐ 选择器必须含**真实页面类名**（不是猜的）')
+{
+  /**
+   * 从用户会话记录里提取出 DeepSeek 网页版的 `ds-*` 类名体系：
+   *   ds-markdown / ds-pow-response / ds-think-content / ds-textarea
+   *   ds-markdown-code-copy-button（界面元素，要剔除）
+   *
+   * 这些是**实测存在**的类名，比「猜一个看起来合理的」可靠得多。
+   */
+  check('⭐⭐ 回复用 .ds-markdown', /CANDIDATES = \[[\s\S]{0,200}'\.ds-markdown'/.test(script), true)
+  check('回复兜底含 ds-pow-response', script.includes('ds-pow-response'), true)
+  check('⭐⭐ 思考用 .ds-think-content', /SEL = \[[\s\S]{0,200}'\.ds-think-content'/.test(script), true)
+  /** 精确类名必须排在模糊匹配前面（顺序即优先级）。 */
+  const iExact = script.indexOf("'.ds-markdown'")
+  const iLoose = script.indexOf("'[class*=\"markdown\"]'")
+  check('⭐ 精确类名排在模糊之前', iExact > 0 && iLoose > 0 && iExact < iLoose, true)
+}
+
+console.log('\n[16] ⭐ 用真实类名跑一遍（模拟页面真实结构）')
+{
+  /**
+   * 按真实页面的类名体系造结构：
+   *   ds-markdown（正文）+ ds-think-content（思考）
+   *   + ds-markdown-code-copy-button（界面元素，必须剔除）
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('div', { cls: 'ds-think-content' }, el('p', {}, text('先说结论：需要确认输出目录。'))),
+    el('p', {}, text('已经生成好了，这是最终回复。')),
+    el(
+      'pre',
+      {},
+      el('code', { cls: 'language-js' }, text('await pwsh({command:"Get-Date"});')),
+      /** 代码块右上角的复制按钮 —— 界面元素。 */
+      el('button', { cls: 'ds-markdown-code-copy-button' }, text('复制')),
+    ),
+  )
+  const r = run(script, [reply])
+  check('⭐ 命中 ds-markdown', r.selector, '.ds-markdown')
+  check('读到正文', r.last.includes('已经生成好了'), true)
+  check('⭐ 思考也读到了', r.think.includes('需要确认输出目录'), true)
+  check('⭐ 复制按钮被剔除', r.last.includes('复制'), false)
+  check('⭐ 代码围栏还原', /```js\n[\s\S]*?Get-Date[\s\S]*?\n```/.test(r.last), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
