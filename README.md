@@ -2,9 +2,9 @@
 
 Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（DeepSeek / 通义千问 / …）。
 
-结构上模仿 [cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code)：
-**不设计协议，操作界面**。打开真浏览器 → 用真实输入把字打进输入框 → 页面自己发请求 →
-插件只在旁边看着页面自己的 SSE 把回复读出来 → 工具结果当普通消息打回聊天框。
+核心思路是**不设计协议，操作界面**：打开真浏览器 → 用真实输入把字打进输入框 →
+页面自己发请求 → 插件只在旁边看着页面自己的 SSE 把回复读出来 →
+工具结果当普通消息打回聊天框。
 
 **没有任何一行在「调 API」** —— 没有 `create_pow_challenge`、没有 `x-ds-pow-response`、
 没有 `x-hif-*` 回放。这是不封号的原因。
@@ -32,11 +32,11 @@ dsh plugin --profile desktop add dsh-webin
 | 真实登录 + 登录态持久化（重启免登录） | ✅ |
 | 真实发送（填框 + 点发送键 / 合成 Enter） | ✅ |
 | 观察页面自己的 SSE 取回复 | ✅ |
-| **工具调用**（抄 cuckoo 的 JS 代码块协议） | ✅ |
+| **工具调用**（JS 代码块协议） | ✅ |
 | **多平台**（DeepSeek / 通义千问 / 自定义） | ✅ |
-| **每个 DSH 会话绑定独立网页对话** | ✅ |
+| **每个 DSH 会话绑定独立网页对话**（重启后接回） | ✅ |
 | 差分发送（不重发历史） | ✅ |
-| 离线测试 | **355 项** |
+| 离线测试 | **380 项** |
 
 ---
 
@@ -96,8 +96,8 @@ if (partition === void 0) {
 
 ### 运行时校验
 
-TS 类型运行时被擦除，"必须实现接口"靠 `validateProvider()` 真正强制
-（cuckoo 的 `validate.ts` 做同样的事）。校验覆盖：id 格式（会用作 workspace 名）、
+TS 类型运行时被擦除，"必须实现接口"靠 `validateProvider()` 真正强制。
+校验覆盖：id 格式（会用作 workspace 名）、
 URL 合法性、正则可编译、models 非空、contextWindow 为正数…
 
 ### 加一个平台（三步）
@@ -257,24 +257,17 @@ provider 的请求体。对 HTTP provider 这没问题 —— 每次请求本来
 2. **上下文被重复计数** —— 模型看到的是「历史 + 又一份历史」，
    有效上下文被砍半，还容易被判成刷屏。
 
-### cuckoo 为什么没这问题
+### 为什么 harness 类工具没这问题
 
-因为 **cuckoo 不是 LLM adapter，而是 harness**：
+因为**它们不是 LLM adapter，而是 harness** —— 自己驱动 AI 页面，
+系统提示词只在进入项目时发一次：
 
-| | cuckoo | 本插件（第一版） |
+| | harness 类工具 | 本插件（第一版） |
 |---|---|---|
 | 架构位置 | Electron 外壳，自己驱动 AI 页面 | DSH 的 `llm` adapter |
-| 系统提示词 | `initProject()` 时**只发一次** | 每轮都随历史重发 |
-| 每轮发送 | `sendToChat()` 只发**新消息** | flatten 全量历史 |
+| 系统提示词 | 初始化时**只发一次** | 每轮都随历史重发 |
+| 每轮发送 | 只发**新消息** | flatten 全量历史 |
 | 页面角色 | 就是记忆体 | 被当成无状态 API |
-
-`prompt-builder.ts` 的日志写得很清楚 —— 模板在**项目初始化**时组装并发送一次：
-
-```
-[Cuckoo Code] 准备发送初始提示（不含目录树），长度: <N>
-```
-
-之后每轮走 `chat-input.ts` 的 `sendToChat(msg)`，只发那一条。
 
 ### 本插件的做法
 
@@ -391,25 +384,30 @@ boot → navigating → restoring → reloading → live
 
 ---
 
-## 工具调用（抄 cuckoo 的 JS 代码块协议）
+## 工具调用（JS 代码块协议）
 
 ### 为什么用 JS 代码块，不用 JSON
 
-cuckoo 的 `src/prompt/deepseek.md` 原文：
+网页版没有原生 function calling，所以要让模型把调用写成**代码块**。
+设计上有两条路：JSON 协议，或 JS 代码块协议。本插件选后者，理由是
+**JSON 要求模型做转义，而转义是失败之源**：
 
-> - 多行文本一律使用反引号（`）模板字符串，直接换行，**不需要任何转义**
-> - **不要输出 JSON 格式的工具调用**，也不要对字符串做 JSON 转义
+| | JSON 协议 | JS 代码块协议 |
+|---|---|---|
+| 多行文本 | 必须写成 `\n`（模型常写成真实换行 ⇒ 解析失败） | 反引号模板字符串，**直接换行** |
+| 值里的引号 | 必须转义为 `\"` | 不用管 |
+| 反斜杠路径 | `C:\\Users\\…` 双层转义 | 不用管 |
+| 需要补的补救条款 | 一大堆（引号、换行、反斜杠…） | 无需 |
 
-对比 web-login 的 JSON 协议 —— 它的指令里塞满了**转义失败的补救条款**
-（「引号必须转义为 `\"`」「不能有真实换行」「围栏会泄漏到可见记录」）。
-**JSON 要求模型做转义（易错），模板字符串不要求（不会错）**。
+所以协议里直接写死：**多行文本用反引号模板字符串，不做任何转义**。
+少一整类失败模式。
 
 ### 协议
 
 ````
-需要调用工具时，输出一个 ```cuckoo 代码块，块外不要有任何文字：
+需要调用工具时，输出一个 ```dsh 代码块，块外不要有任何文字：
 
-```cuckoo
+```dsh
 const r = await read({"path": "src/index.ts"});
 log(r);
 ```
@@ -448,9 +446,10 @@ block-start(text) → text-delta → block-end
 
 ### 项目初始化：只补 DSH 缺的那部分
 
-cuckoo 的 `initProject()` 注入 6 类内容。逐条核对（`docs/project-init-compare.md`）：
+harness 类工具在进入项目时会注入 6 类内容。逐条核对 DSH 已经给了什么
+（详见 `docs/project-init-compare.md`）：
 
-| # | cuckoo 章节 | DSH 是否已给 | 本插件 |
+| # | 章节 | DSH 是否已给 | 本插件 |
 |---|---|---|---|
 | 1 | 平台信息 | ⚠️ system 只提了一次 Windows（讲 exit code） | **补**（cmd/pwsh 差异） |
 | 2 | 项目目录 | ✅ system 末尾 `Your working directory is …` | 不补 |
@@ -460,9 +459,8 @@ cuckoo 的 `initProject()` 注入 6 类内容。逐条核对（`docs/project-ini
 | 6 | MCP 清单 | ✅ MCP 工具在清单里 | 不补 |
 | — | 身份与原则 | ✅ system 提供 | **不补**（重复会冲突） |
 
-**为什么不照抄全部**：① cuckoo 是 harness（system 由它写），本插件是 adapter
-（system 由 DSH 给），重复注入 = 两份冲突指令；② **体量是封号风险**
-（参考实现实测：单次输入涨到 293k token，四个账号两天内被限制）。
+**为什么不全补**：① 本插件是 adapter（system 由 DSH 给），重复注入 = 两份冲突指令；
+② **体量是封号风险**（实测记录：单次输入涨到 293k token，四个账号两天内被限制）。
 
 ### 体量控制
 
@@ -918,19 +916,16 @@ partition = `dsh-sidebar-browser-${randomUUID()}`;   // ⚠️ 没有 persist: �
 并发多窗口实测 6 分钟封 1 天。单轮体量同理，继续用 DSH 自己的 compaction 压上下文
 （现已修正 `contextWindow`，见上）。
 
-## 与 cuckoo / web-login 的关系
+## 设计取舍：为什么不用现成的传输层方案
 
-| 来源 | 拿什么 | 许可 |
-|---|---|---|
-| **cuckoo-code** | `providers/hooks/deepseek.ts`（632 行 SSE 拦截器）、`hooks/shared/sse.ts`、`generated/hook-sources.ts`（纯字符串产物）、`infra/user-agent.ts`、`overlay/chat-input.ts` 的填/发逻辑 | ⚠️ **GPL-3.0-only** — 直接抄代码会让本项目也变 GPL，只能参考思路重写 |
-| **dsh-deepseek-web-login** | 账号库 `accounts.ts`、`auth.ts`、`paths.ts`、设置页 `client/index.ts`、`protocol.ts`、`gate.ts` | ✅ Apache-2.0，可自由复用 |
+早期实现走过「手工构造 HTTP 请求」的路线，后来全部推倒 —— 那条路是封号之源：
 
-**必须丢掉**（web-login 的封号风险源）：
-
-- `src/webapi.ts:95` 的 `x-deepseek-harness` 头 —— **最高风险单点**，每个请求都发
-- `src/browser-transport.ts` 整个文件（about:blank 代理 + 页面内 PoW + `--headless=new --no-sandbox` 等自动化 flag）
-- `buildDsHeaders()` 手工拼 `origin`/`referer`/`cookie` —— 在页面里会被浏览器**静默丢弃**，实际发出去的是 `Origin: null` + 无 Cookie
-- `src/transport.ts` 的传输层开关（真浏览器方案里不存在这个概念）
+| 丢掉的东西 | 为什么 |
+|---|---|
+| 伪造的 `x-deepseek-harness` 头 | **最高风险单点**，每个请求都发 |
+| about:blank 代理 + 页面内 PoW | 需要 `--headless=new --no-sandbox` 等自动化 flag，指纹特征明显 |
+| 手工拼 `origin`/`referer`/`cookie` | 在页面里会被浏览器**静默丢弃**，实际发出去的是 `Origin: null` + 无 Cookie |
+| 传输层开关（HTTP / 浏览器二选一） | 真浏览器方案里不存在这个概念 |
 
 **换真浏览器也解决不了的**：并发多窗口（实测双窗口 6 分钟封 1 天）与单轮体量。
 LDW 必须**全局单例**，并继续用 DSH 自己的 compaction 压上下文。
@@ -944,12 +939,12 @@ LDW 必须**全局单例**，并继续用 DSH 自己的 compaction 压上下文�
 
 | 项目 | 许可 | 参考了什么 |
 |---|---|---|
-| [cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code) | **GPL-3.0-only** | 「操作界面，不调 API」的整体思路；` ```cuckoo ` JS 代码块工具协议；「`name(签名)` — 首句」的工具目录格式；2000~4000ms 随机发送间隔 |
+| [cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code) | **GPL-3.0-only** | 「操作界面，不调 API」的整体思路；JS 代码块工具协议；「`name(签名)` — 首句」的工具目录格式；2000~4000ms 随机发送间隔 |
 | [dsh-deepseek-web-login](https://github.com/cv-superding/dsh-deepseek-web-login) | Apache-2.0 | **只用了公开的实测结论**（如「双窗口并发生成 6 分钟内触发账号限制」「单次请求体量是被限制的主要嫌疑」），未取用代码 |
 
-### 为什么不能直接抄 cuckoo 的代码
+### 为什么只参考思路、不抄代码
 
-cuckoo 是 **GPL-3.0-only**。直接复制其源码会让本项目也被 GPL 覆盖。
+cuckoo-code 是 **GPL-3.0-only**。直接复制其源码会让本项目也被 GPL 覆盖。
 所以本项目**只参考设计思路，全部代码自行实现** —— 这也是仓库里
 不含任何第三方文件的原因。
 

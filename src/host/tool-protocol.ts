@@ -54,8 +54,13 @@ export interface ParseResult {
   failed: string[]
 }
 
-/** 代码块的语言标记（cuckoo 用 ```cuckoo）。 */
-const FENCE_LANG = 'cuckoo'
+/**
+ * 代码块的语言标记。
+ *
+ * 用 `dsh` 而不是参考实现用的那个词：这是**模型要原样输出的标记**，
+ * 属于本插件自己的对外协议，不该带别人的项目名。
+ */
+const FENCE_LANG = 'dsh'
 
 /**
  * 平台信息（抄 cuckoo 的 `buildPlatformInfo()`）。

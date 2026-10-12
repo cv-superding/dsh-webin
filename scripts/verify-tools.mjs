@@ -11,14 +11,14 @@
  *    - `tool-call` 是 assistant content 里的块
  *    - **`tool-result` 是 `role:'tool'` 的独立消息**（不是 content block！）
  * 3. **cuckoo 的协议**（`src/prompt/deepseek.md`）：
- *    ```cuckoo 代码块 + 「多行文本用反引号，不做任何转义」
+ *    ```dsh 代码块 + 「多行文本用反引号，不做任何转义」
  *
  * ## 验证什么
  *
  * - 工具目录格式（cuckoo 的「`name(签名)` — 首句」）
  * - 协议指令（含「不要输出 JSON」「不做转义」）
  * - 序列化：tool-call 块 / role:tool 消息 → 文本
- * - 解析：```cuckoo 块 → tool-call（含各种走样参数的修复）
+ * - 解析：```dsh 块 → tool-call（含各种走样参数的修复）
  * - 代码块**不泄漏**到正文
  */
 import { readFileSync } from 'node:fs'
@@ -222,14 +222,21 @@ console.log('[1] 工具目录格式（抄 cuckoo 的「`name(签名)` — 首句
   check('描述取首句（不拖长尾）', lines[1].includes('— 在 PowerShell 中执行命令。'), true)
 }
 
-console.log('\n[2] 协议指令（cuckoo 的核心：不做转义）')
+console.log('\n[2] 协议指令（核心：不做转义）')
 {
-  check('含 ```cuckoo 围栏', TOOL_PROTOCOL.includes('```cuckoo'), true)
+  check('含 ```dsh 围栏', TOOL_PROTOCOL.includes('```dsh'), true)
   check('明确要求 JSON 对象参数', TOOL_PROTOCOL.includes('JSON 对象'), true)
   check('⭐ 明确禁止转义', /不要做任何转义/.test(TOOL_PROTOCOL), true)
   check('明确禁止 JSON 格式调用', TOOL_PROTOCOL.includes('不要输出 JSON 格式的工具调用'), true)
   check('禁止 XML/HTML 标记', TOOL_PROTOCOL.includes('XML/HTML'), true)
   check('一次只调一个', TOOL_PROTOCOL.includes('一次只调一个工具'), true)
+  /**
+   * 围栏名必须保持中性的 `dsh`。
+   *
+   * 它是**模型要原样输出的标记**，属于本插件自己的对外协议，
+   * 不该带任何第三方项目名（用户明确要求过）。
+   */
+  check('⭐ 围栏名不含第三方项目名', /```(?!dsh)\w/.test(TOOL_PROTOCOL), false)
 }
 
 console.log('\n[3] 工具段体量（防封号：不能像 web-login 那样 5 万字符）')
@@ -288,7 +295,7 @@ console.log('\n[4] 序列化：tool-call 块 → 文本（用实测形状）')
   const s = serializeMessage(msg)
   check('含角色标签', s.startsWith('## Assistant'), true)
   check('含正文', s.includes('让我看看。'), true)
-  check('含 cuckoo 代码块（还原当时形态）', s.includes('```cuckoo'), true)
+  check('含 cuckoo 代码块（还原当时形态）', s.includes('```dsh'), true)
   check('含 await 调用', s.includes('await read_image('), true)
   check('⭐ reasoning 不回灌（只给 DSH 展示）', s.includes('我需要读文件'), false)
 }
@@ -319,7 +326,7 @@ console.log('\n[6] 序列化：超长工具结果被截断（防体量爆炸）'
 
 console.log('\n[7] 解析：标准 cuckoo 代码块')
 {
-  const reply = '好的，我来读文件。\n\n```cuckoo\nconst r = await read({"path": "src/index.ts"});\nlog(r);\n```\n'
+  const reply = '好的，我来读文件。\n\n```dsh\nconst r = await read({"path": "src/index.ts"});\nlog(r);\n```\n'
   const r = parseToolCalls(reply, TOOLS)
   check('解析出 1 个调用', r.calls.length, 1)
   check('工具名正确', r.calls[0].name, 'read')
@@ -332,25 +339,25 @@ console.log('\n[7] 解析：标准 cuckoo 代码块')
 console.log('\n[8] 解析：参数走样时的修复（模型常见四种）')
 {
   // ① 键没加引号
-  const r1 = parseToolCalls('```cuckoo\nawait read({path: "a.ts"});\n```', TOOLS)
+  const r1 = parseToolCalls('```dsh\nawait read({path: "a.ts"});\n```', TOOLS)
   check('裸键被修复', JSON.parse(r1.calls[0]?.arguments ?? '{}').path, 'a.ts')
 
   // ② 单引号
-  const r2 = parseToolCalls("```cuckoo\nawait read({'path': 'b.ts'});\n```", TOOLS)
+  const r2 = parseToolCalls("```dsh\nawait read({'path': 'b.ts'});\n```", TOOLS)
   check('单引号被修复', JSON.parse(r2.calls[0]?.arguments ?? '{}').path, 'b.ts')
 
   // ③ 尾逗号
-  const r3 = parseToolCalls('```cuckoo\nawait read({"path": "c.ts",});\n```', TOOLS)
+  const r3 = parseToolCalls('```dsh\nawait read({"path": "c.ts",});\n```', TOOLS)
   check('尾逗号被修复', JSON.parse(r3.calls[0]?.arguments ?? '{}').path, 'c.ts')
 
   // ④ 位置参数（schema 属性顺序兜底）
-  const r4 = parseToolCalls('```cuckoo\nawait read("d.ts");\n```', TOOLS)
+  const r4 = parseToolCalls('```dsh\nawait read("d.ts");\n```', TOOLS)
   check('位置参数按 schema 映射', JSON.parse(r4.calls[0]?.arguments ?? '{}').path, 'd.ts')
 }
 
 console.log('\n[9] 解析：多行文本（cuckoo 的模板字符串，不做转义）')
 {
-  const reply = '```cuckoo\nawait pwsh({"command": `Get-ChildItem\nWrite-Output "done"`});\n```'
+  const reply = '```dsh\nawait pwsh({"command": `Get-ChildItem\nWrite-Output "done"`});\n```'
   const r = parseToolCalls(reply, TOOLS)
   check('多行命令能解析', r.calls.length, 1)
   check('含真实换行（未被转义破坏）', r.calls[0]?.arguments.includes('Get-ChildItem'), true)
@@ -358,7 +365,7 @@ console.log('\n[9] 解析：多行文本（cuckoo 的模板字符串，不做转
 
 console.log('\n[10] 解析：非工具函数不误判（log / JSON 等）')
 {
-  const r = parseToolCalls('```cuckoo\nlog("hello");\nJSON.stringify({a:1});\n```', TOOLS)
+  const r = parseToolCalls('```dsh\nlog("hello");\nJSON.stringify({a:1});\n```', TOOLS)
   check('log 不被当成工具', r.calls.length, 0)
   check('未解析出调用时原文透出（不静默丢弃）', r.text.includes('log("hello")') || r.failed.length > 0, true)
 }
@@ -372,7 +379,7 @@ console.log('\n[11] 解析：无代码块时原样返回')
 
 console.log('\n[12] 解析：一次多个调用（批量）')
 {
-  const reply = '```cuckoo\nawait glob({"pattern": "*.ts"});\nawait read({"path": "a.ts"});\n```'
+  const reply = '```dsh\nawait glob({"pattern": "*.ts"});\nawait read({"path": "a.ts"});\n```'
   const r = parseToolCalls(reply, TOOLS)
   check('解析出 2 个', r.calls.length, 2)
   check('顺序正确', r.calls.map((c) => c.name).join(','), 'glob,read')
@@ -390,7 +397,7 @@ console.log('\n[13] 序列化往返：工具调用历史 → 文本 → 模型�
   ]
   const s = serializeMessages(msgs)
   check('含用户消息', s.includes('## User') && s.includes('读一下 a.ts'), true)
-  check('含调用还原', s.includes('```cuckoo') && s.includes('await read('), true)
+  check('含调用还原', s.includes('```dsh') && s.includes('await read('), true)
   check('含工具结果', s.includes('【工具结果】') && s.includes('文件内容在这里'), true)
 }
 
