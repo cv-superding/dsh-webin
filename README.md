@@ -9,6 +9,35 @@ Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（Deep
 **没有任何一行在「调 API」** —— 没有 `create_pow_challenge`、没有 `x-ds-pow-response`、
 没有 `x-hif-*` 回放。这是不封号的原因。
 
+## 安装
+
+```bash
+# 从本地目录装进 DSH 的 desktop profile
+dsh plugin --profile desktop add link:F:/Code/DSH-Code/dsh-webin/dsh-webin
+
+# 或从 npm（若已发布）
+dsh plugin --profile desktop add dsh-webin
+```
+
+装完**重启 DSH**（host 半没有热重载）。然后在对话区会出现 **LDW** 标签，
+模型选择器里出现「LDW · DeepSeek 网页版」。
+
+首次使用：切到 LDW 标签 → 登录一次 → 回到对话选 LDW 模型。
+
+## 状态
+
+| 能力 | 状态 |
+|---|---|
+| 真实浏览器驱动（DSH 自带 Chromium guest） | ✅ |
+| 真实登录 + 登录态持久化（重启免登录） | ✅ |
+| 真实发送（填框 + 点发送键 / 合成 Enter） | ✅ |
+| 观察页面自己的 SSE 取回复 | ✅ |
+| **工具调用**（抄 cuckoo 的 JS 代码块协议） | ✅ |
+| **多平台**（DeepSeek / 通义千问 / 自定义） | ✅ |
+| **每个 DSH 会话绑定独立网页对话** | ✅ |
+| 差分发送（不重发历史） | ✅ |
+| 离线测试 | **355 项** |
+
 ---
 
 ## 多平台架构
@@ -17,7 +46,7 @@ Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（Deep
 
 平台差异（选择器、评分规则、SSE 路径、模型表、上下文窗口）**全部收敛到
 一个 `Provider`**（[src/shared/providers.ts](dsh-webin/src/shared/providers.ts)），
-驱动层只认接口。新增站点 = 加一个对���。
+驱动层只认接口。新增站点 = 加一个对象。
 
 ```ts
 const MY_PLATFORM: Provider = {
@@ -905,3 +934,38 @@ partition = `dsh-sidebar-browser-${randomUUID()}`;   // ⚠️ 没有 persist: �
 
 **换真浏览器也解决不了的**：并发多窗口（实测双窗口 6 分钟封 1 天）与单轮体量。
 LDW 必须**全局单例**，并继续用 DSH 自己的 compaction 压上下文。
+
+---
+
+## 致谢与来源
+
+本项目是**独立实现**。设计思路参考了以下项目，但**没有复制任何源代码**
+（`git ls-files` 可验证：仓库里不含任何第三方项目的文件）。
+
+| 项目 | 许可 | 参考了什么 |
+|---|---|---|
+| [cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code) | **GPL-3.0-only** | 「操作界面，不调 API」的整体思路；` ```cuckoo ` JS 代码块工具协议；「`name(签名)` — 首句」的工具目录格式；2000~4000ms 随机发送间隔 |
+| [dsh-deepseek-web-login](https://github.com/cv-superding/dsh-deepseek-web-login) | Apache-2.0 | **只用了公开的实测结论**（如「双窗口并发生成 6 分钟内触发账号限制」「单次请求体量是被限制的主要嫌疑」），未取用代码 |
+
+### 为什么不能直接抄 cuckoo 的代码
+
+cuckoo 是 **GPL-3.0-only**。直接复制其源码会让本项目也被 GPL 覆盖。
+所以本项目**只参考设计思路，全部代码自行实现** —— 这也是仓库里
+不含任何第三方文件的原因。
+
+### 许可
+
+Apache-2.0（见 [LICENSE](LICENSE)）。
+
+---
+
+## 免责声明
+
+本项目仅供**个人学习与研究**使用。使用者需自行承担以下风险：
+
+- 用自动化方式驱动 AI 网页版**可能违反服务条款**，存在账号被限制的风险
+- 本项目通过**真实浏览器 + 真实用户操作**降低风险（不发伪造请求头、不做 PoW 计算、
+  串行发送、差分发送控制体量），但**无法保证不被风控识别**
+- 请勿用于商业用途、批量操作或任何违反服务条款的场景
+
+使用即表示你已知悉并接受上述风险。

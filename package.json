@@ -20,6 +20,14 @@
     "provider.example.json"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cv-superding/dsh-webin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cv-superding/dsh-webin/issues"
+  },
+  "homepage": "https://github.com/cv-superding/dsh-webin#readme",
   "keywords": [
     "dsh",
     "deepseek-harness",

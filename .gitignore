@@ -1,4 +1,11 @@
 node_modules/
-lib/
 *.log
 .probe/
+_backup/
+
+# 源码映射（235KB，对使用者无用；构建时可再生成）
+lib/*.map
+
+# 注意：lib/ 里的 .js **要**提交 —— package.json 的 files 含 lib、
+# main 指向 ./lib/index.js，装了插件才能跑。
+# 改了 src 记得 `npm run build` 后把 lib/*.js 一起提交。
