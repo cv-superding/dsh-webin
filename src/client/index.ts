@@ -18,7 +18,7 @@ import {
   loadSnapshot,
   saveSnapshot,
 } from './hook'
-import { buildDiagnoseScript, buildSendScript, buildStopScript, pickSendDelay } from './chat'
+import { buildDiagnoseScript, buildSendScript, buildStopScript, buildThinkingScript, pickSendDelay } from './chat'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
 import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
 
@@ -1163,6 +1163,44 @@ export function LdwHost(): unknown {
         if (breakMs > 0) {
           console.log(`[dsh-webin] 长休 ${Math.round(breakMs / 1000)}s（每 ${cfgNow.longBreakAfter} 次请求休息一次）`)
           await new Promise((r) => setTimeout(r, breakMs))
+        }
+
+        /**
+         * ## 先把页面的思考模式切到期望状态
+         *
+         * 「点的思考模式那个模型，发现没有思考啊」—— 根因是 host 把
+         * `job.thinking` 传过来了，但这里**从来没用它做任何事**。
+         *
+         * ⚠️ 必须在**发送之前**做：思考模式是请求体的一部分，
+         * 发出去之后再切就晚了（这一轮已经按旧模式跑了）。
+         *
+         * 切不动时**不阻断发送** —— 思考与否是增强，不是必需。
+         * 但要明确告诉用户（否则又是一次「点了没反应」的静默失败）。
+         */
+        try {
+          const thinkRaw = await el.executeJavaScript(buildThinkingScript(data.job.thinking === true))
+          const think = JSON.parse(String(thinkRaw)) as {
+            ok: boolean
+            changed?: boolean
+            before?: boolean
+            after?: boolean
+            reason?: string
+            text?: string
+          }
+          if (think.ok === true) {
+            if (think.changed === true) {
+              console.log(`[dsh-webin] 思考模式已切换 ${think.before} → ${think.after}`, { 开关: think.text })
+            }
+          } else {
+            console.warn('[dsh-webin] 思考模式未能切换', think)
+            setLastSend({
+              at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+              how: `思考模式未切换（${think.reason ?? '未知'}）`,
+              chars: 0,
+            })
+          }
+        } catch (error) {
+          console.warn('[dsh-webin] 思考模式脚本失败', error)
         }
 
         const raw = await el.executeJavaScript(
