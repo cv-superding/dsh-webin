@@ -75,16 +75,19 @@ function formatArguments(raw: string): string {
 /**
  * 把一条 DSH 消息序列化成文本。
  *
+ * @param msg - DSH 消息
+ * @param toolResultLimit - 工具结果截断上限（用户可在设置页调）
  * @returns 要发出去的文本；空串表示这条不发。
  */
-export function serializeMessage(msg: DshMessage): string {
+export function serializeMessage(msg: DshMessage, toolResultLimit = TOOL_RESULT_LIMIT): string {
   // ---- role: 'tool' ⇒ 工具结果 ----
   if (msg.role === 'tool') {
     const body = contentToText(msg.content).trim()
     if (body === '') return ''
+    const limit = Math.max(200, Math.round(toolResultLimit))
     const clipped =
-      body.length > TOOL_RESULT_LIMIT
-        ? `${body.slice(0, TOOL_RESULT_LIMIT)}\n…（结果过长已截断，共 ${body.length} 字符）`
+      body.length > limit
+        ? `${body.slice(0, limit)}\n…（结果过长已截断，共 ${body.length} 字符）`
         : body
     const mark = msg.isError === true ? '（失败）' : ''
     return `【工具结果${mark}】\n${clipped}`
@@ -129,10 +132,9 @@ export function serializeMessage(msg: DshMessage): string {
  *
  * @param messages - DSH 的 messages（已按调用方要求切片）
  */
-export function serializeMessages(messages: readonly DshMessage[]): string {
-  const out: string[] = []
+export function serializeMessages(messages: readonly DshMessage[], toolResultLimit?: number): string {  const out: string[] = []
   for (const m of messages) {
-    const s = serializeMessage(m)
+    const s = serializeMessage(m, toolResultLimit)
     if (s !== '') out.push(s)
   }
   return out.join('\n\n')

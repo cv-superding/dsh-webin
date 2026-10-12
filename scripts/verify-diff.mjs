@@ -91,6 +91,13 @@ const src = [
   extract(bundle, /function diffPrompt\(/, 'diffPrompt'),
   // 产物里 class 被转成 `var SessionCursors = class {`
   extract(bundle, /(?:var|class)\s+SessionCursors\s*=\s*class\s*\{/, 'SessionCursors'),
+  /**
+   * `serializeMessage` 的默认参数引用了模块级常量 `TOOL_RESULT_LIMIT`。
+   * 缺了它 ⇒ `ReferenceError: TOOL_RESULT_LIMIT is not defined`（踩过）。
+   *
+   * ⚠️ 产物里这行有前导 tab，所以 `^const` 匹配不到 —— 要允许空白。
+   */
+  extract(bundle, /^[ \t]*const TOOL_RESULT_LIMIT = /m, 'TOOL_RESULT_LIMIT'),
 ].join('\n')
 
 // eslint-disable-next-line no-new-func

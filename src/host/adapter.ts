@@ -30,6 +30,7 @@ import type { Provider } from '../shared/providers'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
 import { buildToolSection, parseToolCalls, type ToolSchema } from './tool-protocol'
 import { serializeMessages, type DshMessage } from './serialize'
+import { DEFAULT_CONFIG, type WebinConfig } from '../shared/config'
 
 /** 路由名前缀：最终路由名 = `${ROUTE_PREFIX}-${provider.id}`。 */
 export const ROUTE_PREFIX = 'webin'
@@ -347,6 +348,8 @@ function diffPrompt(options: {
   cursors: SessionCursors
   /** 工具段（协议 + 目录）；**只在首轮**带，见下方说明。 */
   toolSection?: string
+  /** 工具结果截断上限（用户可在设置页调）。 */
+  toolResultLimit?: number
 }): {
   text: string
   note: string
@@ -395,7 +398,7 @@ function diffPrompt(options: {
   const withTools = isFirst && typeof options.toolSection === 'string' && options.toolSection !== ''
   if (withTools) parts.push(options.toolSection!)
 
-  const body = serializeMessages(messages.slice(start))
+  const body = serializeMessages(messages.slice(start), options.toolResultLimit)
   if (body !== '') parts.push(body)
 
   return {
@@ -439,6 +442,13 @@ export interface AdapterDeps {
    * （用户实测踩过），且差分游标丢失导致重发全部历史。
    */
   cursorStore?: CursorStore
+  /**
+   * 读当前配置（用户可在设置页改）。
+   *
+   * **每次用时读一次**（而不是构造时读一次）—— 设置页改完要立刻生效，
+   * 不能等重启。host 侧传进来的是 `() => readConfig().config`。
+   */
+  getConfig?: () => WebinConfig
 }
 /** 构造 adapter（鸭子类型对象；不继承 LlmAdapter 基类，所以方法要齐）。 */
 export function createAdapter(deps: AdapterDeps) {
@@ -448,6 +458,11 @@ export function createAdapter(deps: AdapterDeps) {
   const pollMs = deps.pollMs ?? 250
   /** 每会话的发送进度（差分发送的核心状态）。 */
   const cursors = new SessionCursors(32, deps.cursorStore)
+
+  /**
+   * 取当前配置。没有注入时用默认值 —— 测试与降级路径都靠这个。
+   */
+  const config = (): WebinConfig => deps.getConfig?.() ?? DEFAULT_CONFIG
 
   /**
    * 模型 id 的全局唯一化。
@@ -531,7 +546,8 @@ export function createAdapter(deps: AdapterDeps) {
     job: Job,
     signal?: AbortSignal,
   ): Promise<{ text: string; think: string; status: string; chatUrl?: string }> {
-    const deadline = Date.now() + timeoutMs
+    /** 配置里的超时优先（用户可在设置页调），其次 deps，最后默认 10 分钟。 */
+    const deadline = Date.now() + (deps.timeoutMs ?? config().replyTimeoutMs)
     /**
      * 「没人领活」的宽限窗口。
      *
@@ -543,7 +559,7 @@ export function createAdapter(deps: AdapterDeps) {
      * 判定：超过宽限期仍未被任何 client 领走 ⇒ 判定面板不在线，立即报错。
      * 宽限期给得比 client 的轮询间隔（1.5s）宽裕得多，不会误杀正在启动的面板。
      */
-    const claimGraceMs = deps.claimGraceMs ?? 20_000
+    const claimGraceMs = deps.claimGraceMs ?? config().claimGraceMs
     let claimedOnce = false
 
     for (;;) {
@@ -672,10 +688,22 @@ export function createAdapter(deps: AdapterDeps) {
      * 工具段（协议 + 目录）—— 只在首轮带，见 `diffPrompt` 的说明。
      *
      * 体量：60 个工具 × 约 80 字符 ≈ 5,000 字符
-     * （cuckoo 的格式是「`name(签名)` — 首句」，对所有工具一视同仁）。
+     * （目录格式是「`name(签名)` — 首句」，对所有工具一视同仁）。
+     *
+     * ⚠️ 用户可在设置页关掉（`enableTools: false`）—— 关掉后模型收不到
+     * 工具目录，自然也不会输出工具代码块。给「只想聊天、不想让它动我机器」
+     * 的场景一个开关。
      */
-    const toolSection = buildToolSection([...(options.tools ?? [])])
-    const diff = diffPrompt({ ...options, platform: provider.id, sessionKey, cursors, toolSection })
+    const cfg = config()
+    const toolSection = cfg.enableTools ? buildToolSection([...(options.tools ?? [])]) : ''
+    const diff = diffPrompt({
+      ...options,
+      platform: provider.id,
+      sessionKey,
+      cursors,
+      toolSection,
+      toolResultLimit: cfg.toolResultLimit,
+    })
     const prompt = diff.text
 
     if (prompt.trim() === '') {

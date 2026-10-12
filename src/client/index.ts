@@ -20,6 +20,7 @@ import {
 } from './hook'
 import { buildDiagnoseScript, buildSendScript, buildStopScript, pickSendDelay } from './chat'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
+import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
 
 /**
  * 平台注册表（模块级单例）。
@@ -29,6 +30,83 @@ import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/
  * 反复挂载/卸载（切标签），注册表不该跟着重建。
  */
 const registryRef = { current: new ProviderRegistry() }
+
+/**
+ * 当前配置（模块级缓存）。
+ *
+ * ## 为什么放模块级 + 定期刷新
+ *
+ * 配置是用户在**设置页**改的，而设置页与对话区是两个独立挂载点。
+ * 发送循环在 `LdwHost` 里，改完配置它不会自动知道 —— 所以：
+ *   1. 启动时拉一次
+ *   2. 发送前用缓存值（不能每轮都 fetch，那会给 host 添无谓请求）
+ *   3. 设置页保存后**主动刷新**（`refreshConfig()`），不必等轮询
+ *
+ * 不放进 React state 是因为发送循环不在组件渲染路径上 —— 它是个
+ * `setInterval` 里的闭包，读 state 会拿到旧值（闭包捕获）。
+ */
+let configRef: WebinConfig = { ...DEFAULT_CONFIG }
+
+/** 拉一次配置（启动时 + 设置页保存后）。失败则保留旧值。 */
+export async function refreshConfig(): Promise<WebinConfig> {
+  try {
+    const res = await fetch('/dsh-webin/api/config')
+    const data = (await res.json()) as { config?: Partial<WebinConfig> }
+    if (data.config !== undefined) {
+      configRef = { ...DEFAULT_CONFIG, ...data.config }
+    }
+  } catch {
+    /* 拉不到就用现有值（默认值兜底），不影响功能 */
+  }
+  return configRef
+}
+
+/** 读当前配置（同步，给发送循环用）。 */
+export function currentConfig(): WebinConfig {
+  return configRef
+}
+
+/**
+ * 长休状态：连续请求计数。
+ *
+ * 参考实现有「长休阀门」，本插件默认关闭（`longBreakAfter: 0`），
+ * 但用户可以在设置页打开 —— 工具循环连跑十几轮时能压低请求密度。
+ */
+let requestStreak = 0
+
+/** 一次请求结束后调用；返回需要休息的毫秒数（0 = 不用休息）。 */
+export function noteRequestDone(): number {
+  const cfg = configRef
+  if (cfg.longBreakAfter <= 0) return 0
+  requestStreak += 1
+  if (requestStreak < cfg.longBreakAfter) return 0
+  requestStreak = 0
+  return pickSendDelay(cfg.longBreakMinMs, cfg.longBreakMaxMs)
+}
+
+/** 单轮请求计数（`maxRequestsPerTurn > 0` 时生效）。 */
+let turnRequests = 0
+let turnKey = ''
+
+/** 新的一轮开始（换 job 时调）。 */
+export function noteTurnStart(jobId: string): void {
+  if (turnKey !== jobId) {
+    turnKey = jobId
+    turnRequests = 0
+  }
+}
+
+/** 本轮还能不能再发请求。 */
+export function canSendThisTurn(): boolean {
+  const cfg = configRef
+  if (cfg.maxRequestsPerTurn <= 0) return true
+  return turnRequests < cfg.maxRequestsPerTurn
+}
+
+/** 记一次本轮请求。 */
+export function noteTurnRequest(): void {
+  turnRequests += 1
+}
 
 /** 由 apply() 在启动时调用：装入 host 侧读到的自定义 provider。 */
 export function applyCustomProviders(items: unknown[]): { accepted: string[]; rejected: number } {
@@ -168,6 +246,24 @@ const CSS = `
 .ldw-set-err{padding:8px 10px;border-radius:var(--dsw-radius-sm,6px);
   font:var(--dsw-font-xxs-12);color:var(--dsw-alias-state-error-primary);
   background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)}
+
+/* ---- 配置表单 ---- */
+.ldw-set-details{border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md,8px);
+  padding:8px 12px;background:var(--dsw-alias-bg-layer-1)}
+.ldw-set-details>summary{cursor:pointer;margin:0;list-style:none}
+.ldw-set-details>summary::-webkit-details-marker{display:none}
+.ldw-set-details>summary::before{content:"▸ ";color:var(--dsw-alias-label-quaternary)}
+.ldw-set-details[open]>summary::before{content:"▾ "}
+.ldw-set-config{display:flex;flex-direction:column;gap:12px;margin-top:8px}
+.ldw-set-group{display:flex;flex-direction:column;gap:6px}
+.ldw-set-group-title{margin:0;font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-primary)}
+.ldw-set-field{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:var(--dsw-font-xs-12)}
+.ldw-set-field-label{flex:none;min-width:150px;color:var(--dsw-alias-label-secondary)}
+.ldw-set-num{width:88px;padding:3px 6px;border-radius:var(--dsw-radius-sm,6px);
+  border:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-2);
+  color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12)}
+.ldw-set-unit{flex:none;color:var(--dsw-alias-label-quaternary);min-width:24px}
+.ldw-set-hint{color:var(--dsw-alias-label-quaternary);font:var(--dsw-font-xxxs-11);line-height:1.5}
 `
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1134,40 @@ export function LdwHost(): unknown {
         sentAtRef.current = Date.now()
         console.log('[dsh-webin] 领到任务', { id, chars: prompt.length })
 
-        const raw = await el.executeJavaScript(buildSendScript(prompt, pickSendDelay(), sendHintsFor(provider)))
+        /**
+         * ## 应用用户配置
+         *
+         * 1. **单轮请求上限** —— 工具循环可能连发很多轮，用户可以设个上限
+         *    防止意外烧配额（到顶就交个错误让 DSH 停在这一轮）。
+         * 2. **发送间隔** —— 从配置读，而不是硬编码 2000~4000ms。
+         * 3. **长休** —— 连续 N 次请求后强制休息（默认关）。
+         */
+        noteTurnStart(id)
+        if (!canSendThisTurn()) {
+          console.warn('[dsh-webin] 本轮请求数已达上限，停止发送', { limit: currentConfig().maxRequestsPerTurn })
+          pendingJobRef.current = undefined
+          pendingSinceRef.current = 0
+          await fetch(`/dsh-webin/api/job/${id}/result`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              error: `本轮请求数已达上限（${currentConfig().maxRequestsPerTurn}），可在设置页调整`,
+            }),
+          }).catch(() => undefined)
+          return
+        }
+        noteTurnRequest()
+
+        const cfgNow = currentConfig()
+        const breakMs = noteRequestDone()
+        if (breakMs > 0) {
+          console.log(`[dsh-webin] 长休 ${Math.round(breakMs / 1000)}s（每 ${cfgNow.longBreakAfter} 次请求休息一次）`)
+          await new Promise((r) => setTimeout(r, breakMs))
+        }
+
+        const raw = await el.executeJavaScript(
+          buildSendScript(prompt, pickSendDelay(cfgNow.sendDelayMinMs, cfgNow.sendDelayMaxMs), sendHintsFor(provider)),
+        )
         const outcome = JSON.parse(String(raw)) as {
           ok: boolean
           stage: string
@@ -1138,7 +1267,8 @@ export function LdwHost(): unknown {
         .catch(() => undefined)
     }
     save()
-    const timer = window.setInterval(save, 30_000)
+    /** 快照间隔从配置读（设置页可调），默认 30s。 */
+    const timer = window.setInterval(save, Math.max(5_000, currentConfig().snapshotIntervalMs))
     return () => {
       stopped = true
       window.clearInterval(timer)
@@ -1344,12 +1474,88 @@ interface SettingsState {
   clients: { clientId: string; platform: string; loggedIn: boolean; replyCount: number; at: number }[]
 }
 
+/** 配置表单的字段描述（决定分组与渲染方式）。 */
+interface FieldSpec {
+  key: keyof WebinConfig
+  label: string
+  /** 单位（ms 会自动显示成秒，便于阅读）。 */
+  unit?: string
+  hint?: string
+  /** 布尔字段渲染成开关。 */
+  bool?: boolean
+  /** 数值字段的显示换算（存 ms，显示秒）。 */
+  scale?: number
+}
+
+/**
+ * 配置分组。
+ *
+ * 分组不是装饰 —— 用户面对 11 个数字会懵。按**意图**分成三组：
+ *   - 防封号：担心账号安全时来这调
+ *   - 行为：遇到超时/截断时来这调
+ *   - 诊断：出问题时来这看
+ */
+const FIELD_GROUPS: { title: string; note: string; fields: FieldSpec[] }[] = [
+  {
+    title: '防封号',
+    note: '网页版对请求密度敏感。调更保守 = 更慢但更安全。',
+    fields: [
+      { key: 'sendDelayMinMs', label: '发送间隔下限', unit: 'ms', scale: 1000 },
+      { key: 'sendDelayMaxMs', label: '发送间隔上限', unit: 'ms', scale: 1000 },
+      {
+        key: 'longBreakAfter',
+        label: '每 N 次请求后长休',
+        unit: '次',
+        hint: '0 = 关闭。工具循环连跑十几轮时能压低密度。',
+      },
+      { key: 'longBreakMinMs', label: '长休时长下限', unit: 'ms', scale: 1000 },
+      { key: 'longBreakMaxMs', label: '长休时长上限', unit: 'ms', scale: 1000 },
+      {
+        key: 'maxRequestsPerTurn',
+        label: '单轮请求上限',
+        unit: '次',
+        hint: '0 = 不限。防止工具循环意外烧配额。',
+      },
+    ],
+  },
+  {
+    title: '行为',
+    note: '遇到超时、结果被截断时来这调。',
+    fields: [
+      { key: 'replyTimeoutMs', label: '等网页回复超时', unit: 'ms', scale: 1000 },
+      { key: 'claimGraceMs', label: '浏览器未打开时的快速失败', unit: 'ms', scale: 1000 },
+      {
+        key: 'toolResultLimit',
+        label: '工具结果截断',
+        unit: '字符',
+        hint: '太大可能把输入框顶爆；太小模型看不到关键内容。',
+      },
+      {
+        key: 'enableTools',
+        label: '允许调用工具',
+        bool: true,
+        hint: '关掉后模型收不到工具目录，只能纯聊天。',
+      },
+      { key: 'snapshotIntervalMs', label: '登录态快照间隔', unit: 'ms', scale: 1000 },
+    ],
+  },
+  {
+    title: '诊断',
+    note: '出问题时打开，看浏览器控制台。',
+    fields: [{ key: 'verboseLog', label: '详细日志', bool: true }],
+  },
+]
+
 /** 设置页面板。 */
 export function LdwSettings(): unknown {
   const [state, setState] = useState<SettingsState | null>(null)
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState('')
   const [draft, setDraft] = useState('')
+  /** 配置表单的本地编辑态（保存前不生效）。 */
+  const [form, setForm] = useState<WebinConfig | null>(null)
+  const [problems, setProblems] = useState<{ field: string; reason: string }[]>([])
+  const [showAdd, setShowAdd] = useState(false)
 
   const refresh = useMemo(
     () => async () => {
@@ -1376,6 +1582,90 @@ export function LdwSettings(): unknown {
     const timer = window.setInterval(() => void refresh(), 5000)
     return () => window.clearInterval(timer)
   }, [refresh])
+
+  /** 拉配置（进设置页时一次 + 保存后一次）。 */
+  const loadConfig = useMemo(
+    () => async () => {
+      try {
+        const res = await fetch(`${LDW_API}/config`)
+        const data = (await res.json()) as {
+          config?: WebinConfig
+          problems?: { field: string; reason: string }[]
+        }
+        if (data.config !== undefined) setForm({ ...DEFAULT_CONFIG, ...data.config })
+        setProblems(Array.isArray(data.problems) ? data.problems : [])
+      } catch (error) {
+        setNote(`配置读取失败：${(error as Error)?.message ?? String(error)}`)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    void loadConfig()
+  }, [loadConfig])
+
+  /** 改一个字段（只改本地表单）。 */
+  const setField = (key: keyof WebinConfig, value: unknown) => {
+    setForm((prev) => (prev === null ? prev : { ...prev, [key]: value }))
+  }
+
+  /** 保存配置 → host 校验 → 立刻刷新 client 的模块级缓存。 */
+  const saveConfig = async () => {
+    if (form === null) return
+    setBusy(true)
+    setNote('')
+    try {
+      const res = await fetch(`${LDW_API}/config`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(form),
+      })
+      const data = (await res.json()) as {
+        ok?: boolean
+        reason?: string
+        config?: WebinConfig
+        problems?: { field: string; reason: string }[]
+      }
+      if (data.ok !== true) {
+        setNote(`保存失败：${data.reason ?? '未知原因'}`)
+        return
+      }
+      if (data.config !== undefined) setForm({ ...DEFAULT_CONFIG, ...data.config })
+      setProblems(Array.isArray(data.problems) ? data.problems : [])
+      /** ⭐ 关键：让发送循环立刻用上新配置（否则要等下次启动）。 */
+      await refreshConfig()
+      setNote(
+        (data.problems ?? []).length > 0
+          ? `已保存（${(data.problems ?? []).length} 项被修正）`
+          : '已保存，立刻生效',
+      )
+    } catch (error) {
+      setNote(`保存失败：${(error as Error)?.message ?? String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 恢复默认配置。 */
+  const resetConfig = async () => {
+    setBusy(true)
+    setNote('')
+    try {
+      const res = await fetch(`${LDW_API}/config`, { method: 'DELETE' })
+      const data = (await res.json()) as { ok?: boolean; config?: WebinConfig }
+      if (data.ok === true && data.config !== undefined) {
+        setForm({ ...DEFAULT_CONFIG, ...data.config })
+        setProblems([])
+        await refreshConfig()
+        setNote('已恢复默认')
+      }
+    } catch (error) {
+      setNote(`恢复失败：${(error as Error)?.message ?? String(error)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   /** 提交一个自定义 provider（JSON 文本）。 */
   const submit = async () => {
@@ -1472,6 +1762,103 @@ export function LdwSettings(): unknown {
     )
   })
 
+  /** 渲染一个配置字段。 */
+  const renderField = (spec: FieldSpec): unknown => {
+    if (form === null) return null
+    const value = form[spec.key]
+    const limit = LIMITS[spec.key as string]
+    const scale = spec.scale ?? 1
+    const unit = scale === 1000 ? '秒' : (spec.unit ?? '')
+
+    if (spec.bool === true) {
+      return createElement(
+        'label',
+        { key: spec.key as string, className: 'ldw-set-field' },
+        createElement('input', {
+          type: 'checkbox',
+          checked: value === true,
+          onChange: (e: { target: { checked: boolean } }) => setField(spec.key, e.target.checked),
+        }),
+        createElement('span', { className: 'ldw-set-field-label' }, spec.label),
+        spec.hint !== undefined ? createElement('span', { className: 'ldw-set-hint' }, spec.hint) : null,
+      )
+    }
+
+    return createElement(
+      'label',
+      { key: spec.key as string, className: 'ldw-set-field' },
+      createElement('span', { className: 'ldw-set-field-label' }, spec.label),
+      createElement('input', {
+        type: 'number',
+        className: 'ldw-set-num',
+        value: scale === 1000 ? Math.round(Number(value) / scale) : Number(value),
+        min: limit === undefined ? undefined : Math.round(limit.min / scale),
+        max: limit === undefined ? undefined : Math.round(limit.max / scale),
+        step: 1,
+        onChange: (e: { target: { value: string } }) => {
+          const n = Number(e.target.value)
+          if (!Number.isFinite(n)) return
+          setField(spec.key, Math.round(n * scale))
+        },
+      }),
+      createElement('span', { className: 'ldw-set-unit' }, unit),
+      limit !== undefined
+        ? createElement(
+            'span',
+            { className: 'ldw-set-hint' },
+            `${Math.round(limit.min / scale)}~${Math.round(limit.max / scale)}${unit}${spec.hint !== undefined ? ` · ${spec.hint}` : ''}`,
+          )
+        : spec.hint !== undefined
+          ? createElement('span', { className: 'ldw-set-hint' }, spec.hint)
+          : null,
+    )
+  }
+
+  /** 配置表单（三个分组）。 */
+  const configForm =
+    form === null
+      ? createElement('p', { className: 'ldw-set-note' }, '正在读取配置…')
+      : createElement(
+          'div',
+          { className: 'ldw-set-config' },
+          ...FIELD_GROUPS.map((group) =>
+            createElement(
+              'div',
+              { key: group.title, className: 'ldw-set-group' },
+              createElement('h4', { className: 'ldw-set-group-title' }, group.title),
+              createElement('p', { className: 'ldw-set-hint' }, group.note),
+              ...group.fields.map(renderField),
+            ),
+          ),
+          createElement(
+            'div',
+            { className: 'ldw-set-actions' },
+            createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'ldw-set-btn ldw-set-btn-primary',
+                disabled: busy,
+                onClick: () => void saveConfig(),
+              },
+              busy ? '处理中…' : '保存配置',
+            ),
+            createElement(
+              'button',
+              { type: 'button', className: 'ldw-set-btn', disabled: busy, onClick: () => void resetConfig() },
+              '恢复默认',
+            ),
+          ),
+          problems.length > 0
+            ? createElement(
+                'div',
+                { className: 'ldw-set-err' },
+                createElement('strong', null, `${problems.length} 项被修正`),
+                ...problems.map((p, i) => createElement('div', { key: i }, `${p.field}：${p.reason}`)),
+              )
+            : null,
+        )
+
   return createElement(
     'div',
     { className: 'ldw-set' },
@@ -1494,38 +1881,61 @@ export function LdwSettings(): unknown {
         )
       : null,
 
-    createElement('h3', { className: 'ldw-set-sub' }, '添加自定义平台'),
+    /**
+     * ---- 配置 ----
+     *
+     * 折叠起来：默认不展开，避免设置页一上来就是十几个数字吓人。
+     */
     createElement(
-      'p',
-      { className: 'ldw-set-note' },
-      '粘贴一个 Provider JSON（字段见 README）。同 id 会覆盖内置项，删掉即可回退。',
+      'details',
+      { className: 'ldw-set-details' },
+      createElement('summary', { className: 'ldw-set-sub' }, '插件配置'),
+      configForm,
     ),
-    createElement('textarea', {
-      className: 'ldw-set-input',
-      rows: 8,
-      placeholder: '{\n  "id": "my-platform",\n  "name": "我的平台",\n  "homeUrl": "https://example.com/",\n  ...\n}',
-      value: draft,
-      onChange: (e: { target: { value: string } }) => setDraft(e.target.value),
-    }),
+
+    /** ---- 添加自定义平台（默认折叠）---- */
     createElement(
-      'div',
-      { className: 'ldw-set-actions' },
+      'details',
+      { className: 'ldw-set-details', open: showAdd },
       createElement(
-        'button',
-        {
-          type: 'button',
-          className: 'ldw-set-btn ldw-set-btn-primary',
-          disabled: busy || draft.trim() === '',
-          onClick: () => void submit(),
-        },
-        busy ? '处理中…' : '保存',
+        'summary',
+        { className: 'ldw-set-sub', onClick: () => setShowAdd((v) => !v) },
+        '添加自定义平台',
       ),
       createElement(
-        'button',
-        { type: 'button', className: 'ldw-set-btn', disabled: busy, onClick: () => void refresh() },
-        '刷新',
+        'p',
+        { className: 'ldw-set-note' },
+        '粘贴一个 Provider JSON（字段见 README）。同 id 会覆盖内置项，删掉即可回退。',
+      ),
+      createElement('textarea', {
+        className: 'ldw-set-input',
+        rows: 8,
+        placeholder:
+          '{\n  "id": "my-platform",\n  "name": "我的平台",\n  "homeUrl": "https://example.com/",\n  ...\n}',
+        value: draft,
+        onChange: (e: { target: { value: string } }) => setDraft(e.target.value),
+      }),
+      createElement(
+        'div',
+        { className: 'ldw-set-actions' },
+        createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'ldw-set-btn ldw-set-btn-primary',
+            disabled: busy || draft.trim() === '',
+            onClick: () => void submit(),
+          },
+          busy ? '处理中…' : '保存',
+        ),
+        createElement(
+          'button',
+          { type: 'button', className: 'ldw-set-btn', disabled: busy, onClick: () => void refresh() },
+          '刷新',
+        ),
       ),
     ),
+
     note !== '' ? createElement('p', { className: 'ldw-set-note' }, note) : null,
   )
 }
@@ -1594,6 +2004,18 @@ export function apply(ctx: {
     register(options: Record<string, unknown>, component: unknown): unknown
   }
 }): void {
+  /**
+   * 启动时拉一次配置。
+   *
+   * 发送循环（`LdwHost` 里的 `setInterval`）读的是模块级 `configRef`，
+   * 所以必须在它跑起来之前填好 —— 否则第一轮会用默认值。
+   */
+  ctx.effect(() => {
+    void refreshConfig().then((cfg) => {
+      console.log('[dsh-webin] 配置已加载', describeConfig(cfg))
+    })
+  }, 'dsh-webin: config')
+
   // 样式表随插件生命周期注入 / 卸载
   ctx.effect(() => {
     const style = document.createElement('style')

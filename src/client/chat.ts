@@ -579,9 +579,20 @@ export function buildDiagnoseScript(hints?: SendHints): string {
 })();`
 }
 
-/** 发送前随机延迟（消除固定间隔的"定时器特征"）。 */
-export function pickSendDelay(): number {
-  return Math.floor(Math.random() * (SEND_DELAY_MAX_MS - SEND_DELAY_MIN_MS)) + SEND_DELAY_MIN_MS
+/**
+ * 发送前随机延迟（消除固定间隔的"定时器特征"）。
+ *
+ * 区间由**用户配置**决定（设置页可调），省略时用默认 2000~4000ms。
+ * 参考实现实测：固定间隔本身就是可识别的定时器签名。
+ *
+ * @param min - 下限（毫秒）
+ * @param max - 上限（毫秒）
+ */
+export function pickSendDelay(min = SEND_DELAY_MIN_MS, max = SEND_DELAY_MAX_MS): number {
+  const lo = Math.max(0, Math.min(min, max))
+  const hi = Math.max(0, Math.max(min, max))
+  if (hi <= lo) return lo
+  return Math.floor(Math.random() * (hi - lo + 1)) + lo
 }
 
 /**

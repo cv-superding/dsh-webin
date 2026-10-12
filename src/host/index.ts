@@ -38,6 +38,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
 import type { CursorStore, SessionCursor } from './adapter'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
+import {
+  checkConfig,
+  DEFAULT_CONFIG,
+  describeConfig,
+  LIMITS,
+  type ConfigCheck,
+  type WebinConfig,
+} from '../shared/config'
 
 export const name = 'dsh-webin'
 
@@ -138,6 +146,44 @@ function sessionsDir(): string {
 function sessionsPath(platform: string): string {
   const safe = /^[A-Za-z0-9_-]{1,64}$/.test(platform) ? platform : 'unknown'
   return join(sessionsDir(), `${safe}.json`)
+}
+
+/** 配置文件路径：`~/.dsh/webin/config.json`。 */
+function configPath(): string {
+  return join(stateRoot(), 'config.json')
+}
+
+/**
+ * 读配置。**坏文件不能让插件挂掉** —— 回退默认值并报告原因。
+ *
+ * 不做缓存：配置是用户在设置页改的，改完要**立刻生效**。
+ * 每轮对话只读几次小 JSON，成本可忽略。
+ */
+function readConfig(): { config: WebinConfig; problems: ConfigCheck['problems']; raw: string } {
+  const path = configPath()
+  if (!existsSync(path)) return { config: { ...DEFAULT_CONFIG }, problems: [], raw: '' }
+  try {
+    const raw = readFileSync(path, 'utf8')
+    const checked = checkConfig(JSON.parse(raw))
+    return { config: checked.config, problems: checked.problems, raw }
+  } catch (error) {
+    return {
+      config: { ...DEFAULT_CONFIG },
+      problems: [
+        { field: '(file)', reason: `读取失败：${(error as Error)?.message ?? String(error)}`, fellBackTo: '默认值' },
+      ],
+      raw: '',
+    }
+  }
+}
+
+/** 写配置（原子写：先写临时文件再改名，避免留下半截文件）。 */
+async function writeConfigFile(config: WebinConfig): Promise<void> {
+  await mkdir(stateRoot(), { recursive: true })
+  const path = configPath()
+  const tmp = `${path}.tmp`
+  await writeFile(tmp, JSON.stringify(config, null, 2), 'utf8')
+  await rename(tmp, path)
 }
 
 /** 读请求体（有上限）。 */
@@ -308,6 +354,8 @@ export async function apply(ctx: {
     queue,
     logger: log,
     registry,
+    /** 每轮读一次配置 —— 设置页改完立刻生效，不用重启。 */
+    getConfig: () => readConfig().config,
     cursorStore: {
       load: (platform) => {
         const path = sessionsPath(platform)
@@ -543,6 +591,80 @@ export async function apply(ctx: {
           replyCount: typeof payload.replyCount === 'number' ? payload.replyCount : 0,
         })
         sendJson(res, 200, { ok: true, clients: liveClients().length })
+        return
+      }
+
+      /**
+       * ---- GET /config —— 读配置 ----
+       *
+       * 返回「当前生效的配置」+「默认值」+「边界」+「校验问题」。
+       * 设置页需要这四样才能画出正确的表单：
+       *   - 当前值：显示
+       *   - 默认值：给「恢复默认」按钮用
+       *   - 边界：给输入框的 min/max，避免用户填了才被拒
+       *   - 问题：文件坏了 / 值超界时明确告诉用户
+       */
+      if (method === 'GET' && pathname === `${API_PREFIX}/config`) {
+        const { config, problems } = readConfig()
+        sendJson(res, 200, {
+          ok: true,
+          config,
+          defaults: DEFAULT_CONFIG,
+          limits: LIMITS,
+          problems,
+          summary: describeConfig(config),
+          path: configPath(),
+        })
+        return
+      }
+
+      /**
+       * ---- PUT /config —— 写配置 ----
+       *
+       * 校验在 host 做，**不信客户端传什么就存什么**。
+       * 非法字段回退默认并逐条报告（不静默吞掉）—— 否则用户改了没生效会困惑。
+       */
+      if (method === 'PUT' && pathname === `${API_PREFIX}/config`) {
+        const body = await readBody(req)
+        let payload: unknown
+        try {
+          payload = JSON.parse(body)
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const checked = checkConfig(payload)
+        try {
+          await writeConfigFile(checked.config)
+        } catch (error) {
+          sendJson(res, 500, { ok: false, reason: `写入失败：${(error as Error)?.message ?? String(error)}` })
+          return
+        }
+        log.info?.(`配置已更新：${describeConfig(checked.config)}`)
+        sendJson(res, 200, {
+          ok: true,
+          config: checked.config,
+          problems: checked.problems,
+          summary: describeConfig(checked.config),
+        })
+        return
+      }
+
+      /**
+       * ---- DELETE /config —— 恢复默认 ----
+       *
+       * 直接写一份默认值（而不是删文件）—— 删了之后 `GET` 也能返回默认，
+       * 但写出来用户能看见「确实是默认值」，比空文件直观。
+       */
+      if (method === 'DELETE' && pathname === `${API_PREFIX}/config`) {
+        try {
+          await writeConfigFile({ ...DEFAULT_CONFIG })
+        } catch (error) {
+          sendJson(res, 500, { ok: false, reason: `写入失败：${(error as Error)?.message ?? String(error)}` })
+          return
+        }
+        log.info?.('配置已恢复默认')
+        sendJson(res, 200, { ok: true, config: { ...DEFAULT_CONFIG }, problems: [], summary: describeConfig(DEFAULT_CONFIG) })
         return
       }
 
