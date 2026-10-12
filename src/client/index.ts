@@ -452,6 +452,17 @@ const CSS = `
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;
   color:var(--dsw-alias-label-secondary);overflow-x:auto;white-space:pre}
 
+/* ══ 登录行（设置页「登录」区）══════════════════════════════════════ */
+.ldw-loginrow{display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+  padding:9px 11px;border-radius:11px;
+  border:1px solid var(--dsw-alias-border-l1);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 52%,transparent);
+  transition:border-color .18s ease,background .18s ease}
+.ldw-loginrow:hover{border-color:var(--dsw-alias-border-l2);
+  background:color-mix(in srgb,var(--dsw-alias-bg-layer-3) 74%,transparent)}
+.ldw-loginrow-name{font-size:12.5px;font-weight:600;
+  color:var(--dsw-alias-label-primary);white-space:nowrap}
+
 /* ══════════════════════════════════════════════════════════════════════
    输入框左侧的 LDW 入口（conversation.input.left）
    ──────────────────────────────────────────────────────────────────────
@@ -1693,6 +1704,13 @@ interface SettingsState {
   defaultProviderId: string
   errors: { file: string; reason: string }[]
   clients: { clientId: string; platform: string; loggedIn: boolean; replyCount: number; at: number }[]
+  /**
+   * 登录过的平台（判据是**持久化快照**，不是「浏览器此刻在线」）。
+   *
+   * 未登录的平台不会列出模型，所以这个字段决定设置页显示
+   * 「已登录」还是「去登录」。
+   */
+  loggedInPlatforms: string[]
 }
 
 /** 配置表单的字段描述（决定分组与渲染方式）。 */
@@ -1836,6 +1854,7 @@ export function LdwSettings(): unknown {
           defaultProviderId: String(data.defaultProviderId ?? ''),
           errors: Array.isArray(data.errors) ? data.errors : [],
           clients: Array.isArray(data.clients) ? data.clients : [],
+          loggedInPlatforms: Array.isArray(data.loggedInPlatforms) ? data.loggedInPlatforms : [],
         })
       } catch (error) {
         setNote(`读取失败：${(error as Error)?.message ?? String(error)}`)
@@ -2346,6 +2365,67 @@ export function LdwSettings(): unknown {
         : null,
     ),
 
+    /* ── 登录（用户要求的「设置页面加个登录按钮」）─────────────────── */
+    createElement(
+      'section',
+      { className: 'ldw-sec' },
+      createElement(
+        'div',
+        { className: 'ldw-sechead' },
+        createElement('span', { className: 'ldw-sec-title' }, '登录'),
+        createElement('span', { className: 'ldw-sec-hint' }, '未登录的平台不会出现在模型选择器里'),
+      ),
+      createElement(
+        'div',
+        { className: 'ldw-panel' },
+        /**
+         * 每个平台一行：状态 + 「去登录」。
+         *
+         * 「去登录」= 切到 LDW 标签（浏览器在那里）。那是**唯一**能真正
+         * 完成登录的地方 —— 登录要在真实页面上输账号密码。
+         */
+        ...state.providers.map((p) => {
+          const isLogged = state.loggedInPlatforms.includes(p.id)
+          const online = state.clients.some((c) => c.platform === p.id)
+          return createElement(
+            'div',
+            { key: p.id, className: 'ldw-loginrow' },
+            createElement('span', { className: `ldw-dot ${isLogged ? 'ok' : online ? 'warn' : ''}`.trim() }),
+            createElement('span', { className: 'ldw-loginrow-name' }, p.name),
+            createElement(
+              'span',
+              { className: 'ldw-note' },
+              isLogged
+                ? online
+                  ? '已登录，浏览器在线'
+                  : '已登录（浏览器未打开）'
+                : online
+                  ? '未登录 —— 浏览器已打开，去页面里登录'
+                  : '未登录',
+            ),
+            createElement(
+              'span',
+              { className: 'ldw-actions', style: { marginLeft: 'auto' } },
+              createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: isLogged ? 'ldw-btn' : 'ldw-btn primary',
+                  onClick: () => goToPlatform(p.id),
+                },
+                isLogged ? '打开浏览器' : '去登录',
+              ),
+            ),
+          )
+        }),
+        createElement(
+          'p',
+          { className: 'ldw-note' },
+          '点了「去登录」会切到本插件的浏览器视图 —— 在那里完成网页版登录。登录态会自动保存，重启 DSH 后仍有效。',
+        ),
+      ),
+    ),
+
     /* ── 插件配置（默认折叠，避免一屏全是数字）───────────────────── */
     createElement(
       'details',
@@ -2428,38 +2508,216 @@ function row(label: string, value: string): unknown {
 }
 
 /**
- * ## 输入框左侧的 LDW 按钮（`conversation.input.left`）
+ * 切到本插件的浏览器视图（`conversation.view` id=`ldw`）。
+ *
+ * ## 为什么靠「点标签按钮」而不是调 API
+ *
+ * 切视图的 `selectView` 是 **session header** 的注入属性，既不在
+ * `conversation.input.left` 也不在 `settings.section` 的 standardProps 里
+ * （实测查过两个 slot 的契约）。硬拿不到的东西就别硬拿 —— 直接点 DSH
+ * 自己渲染的那个标签按钮，与我们操作网页版的思路一致（不设计协议，
+ * 操作界面）。
+ *
+ * ## 三条路依次尝试（从最精确到最宽泛）
+ *
+ *   1. `[data-conversation-tabs]` 里文本含 `LDW` 的 `button[role=tab]`
+ *   2. 全文档里文本含 `LDW` 的 `[role=tab]`（标签栏容器换了也能找到）
+ *   3. 侧栏/视图列表里文本含 `LDW` 的可点元素
+ *
+ * **都必须命中一个真实存在的元素**；找不到就返回原因，
+ * 让调用方显示出来 —— 不静默失败、不假装成功。
+ *
+ * @returns 空串表示成功；否则是**具体**的失败原因
+ */
+function switchToLdwView(): string {
+  try {
+    /** 候选：先精确（标签栏内），再宽泛（全文档 role=tab），最后兜底。 */
+    const scopes: { root: ParentNode; selector: string }[] = [
+      { root: document, selector: '[data-conversation-tabs] button[role="tab"]' },
+      { root: document, selector: '[role="tab"]' },
+      { root: document, selector: 'button, a' },
+    ]
+    for (const { root, selector } of scopes) {
+      const candidates = root.querySelectorAll(selector)
+      for (let i = 0; i < candidates.length; i += 1) {
+        const el = candidates[i] as HTMLElement
+        const text = String(el.textContent ?? '').trim().toUpperCase()
+        if (!text.includes('LDW')) continue
+        /** 排除我们自己的按钮（`ldw-entry`）—— 否则点自己会无限套娃。 */
+        if (el.classList.contains('ldw-entry')) continue
+        el.click()
+        return ''
+      }
+    }
+    return '页面上没有 LDW 标签 —— 先发一条消息让会话建立，标签栏才会出现'
+  } catch (error) {
+    return `切换失败：${(error as Error)?.message ?? String(error)}`
+  }
+}
+
+/** 设置页里「去登录」用的跳转（带反馈）。 */
+function goToPlatform(platform: string): void {
+  const err = switchToLdwView()
+  if (err !== '') {
+    /** 没标签栏时至少把浏览器视图指出来，不让用户干等。 */
+    console.warn(`[dsh-webin] 切到 ${platform} 的浏览器视图失败：${err}`)
+  }
+}
+
+/** 文本归一化 —— 去空白 + 小写，用于按文字找按钮。 */
+function normText(s: string | null | undefined): string {
+  return String(s ?? '').replace(/\s+/g, '').toLowerCase()
+}
+
+/** 在候选里找文本匹配的可点元素。 */
+function findClickable(root: ParentNode, match: (text: string) => boolean): HTMLElement | null {
+  const els = root.querySelectorAll('button, [role="button"], a')
+  for (let i = 0; i < els.length; i += 1) {
+    const el = els[i] as HTMLElement
+    if (match(normText(el.textContent))) return el
+  }
+  return null
+}
+
+/** 设置模态框元素（DSH 的设置页是 portal 到 body 的 dialog）。 */
+function settingsDialog(): HTMLElement | null {
+  return document.querySelector('[data-shortcut-modal="settings"]')
+}
+
+/**
+ * ## 打开设置页并切到 LDW 分区
+ *
+ * 设置页是 DSH 的**模态对话框** —— `[data-shortcut-modal="settings"]`
+ * （`role=dialog` + `aria-modal`，portal 到 `document.body`；实测查过
+ * `dsh-client-ui-settings-general` 的 `SettingsRoot`）。
+ *
+ * 打开它两条路，依次尝试：
+ *   1. 点侧栏那个**真实的**设置按钮（按文字找「设置」）
+ *   2. 派发 DSH 注册的 `settings.open` 快捷键（Ctrl+, / Ctrl+Alt+,）
+ *
+ * 打开后点导航里文本含 `LDW` 的那一行 —— 那是我们注册的
+ * `settings.section`（id=`ldw`，label=`LDW 网页版`）。
+ *
+ * 全程走真实 DOM，不设计新协议。**每一步失败都返回具体原因** ——
+ * 「找不到对话标签栏」这种笼统提示让人不知道下一步做什么。
+ *
+ * @returns 空串表示成功；否则是**具体**的失败原因
+ */
+function openSettingsAtLdwSection(): string {
+  try {
+    if (settingsDialog() === null) {
+      /** 路子 1：点侧栏真实的设置按钮。 */
+      const trigger =
+        findClickable(document, (t) => t === '设置' || t === 'settings') ??
+        findClickable(document, (t) => t.includes('设置') || t.includes('settings'))
+      if (trigger !== null) trigger.click()
+
+      /**
+       * 路子 2：派发快捷键。
+       *
+       * DSH 注册的默认键：桌面 `primary+Comma`、web `primary+alt+Comma`。
+       * 都试一遍 —— 派发合成事件走的是 DSH 自己的快捷键系统，
+       * 不绕过任何逻辑。
+       */
+      if (settingsDialog() === null) {
+        for (const ev of [
+          { key: ',', code: 'Comma', ctrlKey: true, altKey: true },
+          { key: ',', code: 'Comma', ctrlKey: true, altKey: false },
+          { key: ',', code: 'Comma', metaKey: true, altKey: false },
+        ]) {
+          for (const target of [document, document.body, window]) {
+            target.dispatchEvent(new KeyboardEvent('keydown', { ...ev, bubbles: true, cancelable: true }))
+          }
+          if (settingsDialog() !== null) break
+        }
+      }
+
+      if (settingsDialog() === null) {
+        return trigger === null
+          ? '没找到设置按钮，也没唤出设置页 —— 请手动打开 设置 → LDW 网页版'
+          : '点了设置按钮但设置页没打开 —— 请手动打开 设置 → LDW 网页版'
+      }
+    }
+
+    const dialog = settingsDialog()
+    if (dialog === null) return '设置页没打开'
+    const row = findClickable(dialog, (t) => t.includes('ldw'))
+    if (row === null) return '设置页里没有 LDW 分区 —— 插件可能没启用（试试重启 DSH）'
+    row.click()
+    return ''
+  } catch (error) {
+    return `打开设置失败：${(error as Error)?.message ?? String(error)}`
+  }
+}
+
+
+/**
+ * ## 输入框左侧的 LDW 入口（`conversation.input.left`）
  *
  * 用户要求：「每次新建会话的时候，应该在这里加个 LDW，让登录一下」。
+ * 后续修正：「图2这个页面不用加LDW登录」+「点击那个LDW都不行哎」
  *
- * ## 为什么需要它
+ * ## 为什么之前点了没反应
  *
- * 之前登录的唯一入口是「切到 LDW 标签」—— 而**新建会话时那个标签不在视野里**，
- * 用户不知道要去哪登录。模型选择器里 LDW 模型又不出现（未登录不列出），
- * 于是整个插件看起来像坏的。
+ * 之前点击是「切到 LDW 标签」—— 找 `[data-conversation-tabs]` 里文本含 LDW
+ * 的按钮。但在**新建会话的空页面**上那个标签栏根本不存在：
  *
- * 这个按钮解决「第一次怎么开始」：新建会话就能看到，点一下直达浏览器。
+ *     showTabs = !hideChrome && tabs.length > 1
  *
- * ## 状态与动作
+ * 标签栏只在「有会话」且「有多个视图」时渲染。所以空会话页面上点击
+ * 必然报「找不到对话标签栏」—— 那不是 bug，是那个动作在这一页做不到。
  *
- * | 状态 | 显示 | 点击 |
- * |---|---|---|
- * | 未登录 | 「LDW 登录」+ 警示点 | 切到 LDW 标签（浏览器在那里，用户去登录） |
- * | 已登录 | 「LDW 已登录」+ 绿点 | 切到 LDW 标签（看浏览器 / 换账号） |
- * | 无面板 | 「LDW 未就绪」+ 灰点 | 切到 LDW 标签（把浏览器起来） |
+ * ## 现在的行为
  *
- * ## 为什么用「点标签按钮」而不是调 API
+ * | 页面 | 行为 |
+ * |---|---|
+ * | **没有会话/标签栏**（新建会话页） | 显示按钮；点击**打开设置页的 LDW 区** |
+ * | **有标签栏** | **不渲染**（用户明确说「图2不用加」） |
  *
- * 切视图的 `selectView` 是 **session header** 的注入属性，不在
- * `conversation.input.left` 的 standardProps 里（实测查过）。
- * 硬拿不到的东西就**别硬拿** —— 直接点那个真实存在的标签按钮，
- * 与我们操作网页版的思路一致（不设计协议，操作界面）。
+ * 登录本身在设置页里做（那里有平台卡、登录态、去登录入口），
+ * 所以按钮的职责就是**把用户送到设置页**。
  *
- * 找不到标签按钮时**明确说明**，不静默失败。
+ * ## 怎么打开设置页
+ *
+ * 设置页是 DSH 的**模态对话框**：`[data-shortcut-modal="settings"]`
+ * （`role=dialog` + `aria-modal`，portal 到 `document.body`）。
+ *
+ * 打开它有两个途径，这里**依次尝试**：
+ *   1. 点侧栏那个真实的设置按钮（找文本含「设置 / Settings」的按钮）
+ *   2. 派发 DSH 注册的 `settings.open` 快捷键（Ctrl+, / Ctrl+Alt+,）
+ *
+ * 打开之后再点导航里文本含 `LDW` 的那一行 —— 那是我们自己注册的
+ * `settings.section`（id=`ldw`, label=`LDW 网页版`）。
+ *
+ * 全程走真实 DOM，不设计新协议 —— 与我们操作网页版的思路一致。
+ * 每一步失败都**明确说明卡在哪**，不静默。
  */
 export function LdwLoginButton(): unknown {
   const [status, setStatus] = useState<{ loggedIn: boolean; online: boolean } | null>(null)
   const [note, setNote] = useState('')
+
+  /**
+   * 这一页有没有会话标签栏？
+   *
+   * 有 ⇒ 用户能自己点「LDW」标签，这个按钮是冗余的 ⇒ 不渲染（用户要求）。
+   * 用 `MutationObserver` 盯着，因为标签栏是**异步**出现的（会话建立后才渲染）。
+   */
+  const [hasTabs, setHasTabs] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    const probe = () => {
+      if (!alive) return
+      setHasTabs(document.querySelector('[data-conversation-tabs]') !== null)
+    }
+    probe()
+    const observer = new MutationObserver(probe)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      alive = false
+      observer.disconnect()
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -2471,15 +2729,16 @@ export function LdwLoginButton(): unknown {
           clients?: { online?: number }
         }
         if (!alive) return
-        const logged = (data.loggedInPlatforms ?? []).length > 0
-        const online = Number(data.clients?.online ?? 0) > 0
-        setStatus({ loggedIn: logged, online })
+        setStatus({
+          loggedIn: (data.loggedInPlatforms ?? []).length > 0,
+          online: Number(data.clients?.online ?? 0) > 0,
+        })
       } catch {
         if (alive) setStatus({ loggedIn: false, online: false })
       }
     }
     void load()
-    /** 登录发生在另一个标签页，所以定期回读状态（登录后这里要变绿）。 */
+    /** 登录发生在别处，所以定期回读状态（登录后这里要变绿）。 */
     const timer = window.setInterval(() => void load(), 5_000)
     return () => {
       alive = false
@@ -2488,32 +2747,29 @@ export function LdwLoginButton(): unknown {
   }, [])
 
   /**
-   * 切到 LDW 标签。
+   * 打开设置页并切到 LDW 分区。
    *
-   * 找 `[data-conversation-tabs]` 里文本含 `LDW` 的按钮并点它 ——
-   * 那是 DSH 自己渲染的标签，点它就是用户点它。
+   * 逻辑抽在 `openSettingsAtLdwSection()` 里（与设置页共用一套 DOM 探测），
+   * 这里只负责把失败原因显示出来 —— 不静默失败。
    */
-  const goToLdw = () => {
-    try {
-      const tablist = document.querySelector('[data-conversation-tabs]')
-      if (tablist === null) {
-        setNote('找不到对话标签栏 —— 请手动切到「LDW」标签')
-        return
-      }
-      const tabs = tablist.querySelectorAll('button[role="tab"]')
-      for (let i = 0; i < tabs.length; i += 1) {
-        const el = tabs[i] as HTMLElement
-        if (String(el.textContent ?? '').trim().toUpperCase().includes('LDW')) {
-          el.click()
-          setNote('')
-          return
-        }
-      }
-      setNote('标签栏里没有 LDW —— 插件可能没启用')
-    } catch (error) {
-      setNote(`切换失败：${(error as Error)?.message ?? String(error)}`)
+  const openSettingsAtLdw = () => {
+    const first = openSettingsAtLdwSection()
+    if (first === '') {
+      setNote('')
+      return
     }
+    /**
+     * 设置页是**异步挂载**的：点了设置按钮之后 React 才渲染导航行。
+     * 所以等一帧再试一次 —— 用 `requestAnimationFrame` 而不是定时器，
+     * React 提交后 rAF 一定已经能看到 DOM。
+     */
+    requestAnimationFrame(() => {
+      const second = openSettingsAtLdwSection()
+      setNote(second === '' ? '' : second)
+    })
   }
+
+  if (hasTabs) return null
 
   if (status === null) return null
 
@@ -2525,8 +2781,13 @@ export function LdwLoginButton(): unknown {
     {
       type: 'button',
       className: 'ldw-entry',
-      onClick: goToLdw,
-      title: note !== '' ? note : loggedIn ? '打开 LDW 浏览器（已登录）' : '打开 LDW 浏览器并登录',
+      onClick: openSettingsAtLdw,
+      title:
+        note !== ''
+          ? note
+          : loggedIn
+            ? '打开设置页的 LDW 分区（已登录）'
+            : '打开设置页登录 LDW',
     },
     createElement('span', { className: `ldw-dot ${dot}`.trim() }),
     createElement('span', null, loggedIn ? 'LDW 已登录' : online ? 'LDW 登录' : 'LDW 未就绪'),

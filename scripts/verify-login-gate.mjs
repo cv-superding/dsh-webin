@@ -273,13 +273,65 @@ console.log('\n[10] ⭐ client 侧：输入框左侧注册了 LDW 入口')
    */
   check('⭐ 显示「LDW 登录」（未登录时催一下）', /"LDW 登录"/.test(client), true)
   check('⭐ 显示「LDW 未就绪」（面板没起）', client.includes('LDW 未就绪'), true)
-  /** 切标签靠点真实标签按钮。 */
-  check('⭐ 通过点标签按钮切换', client.includes('data-conversation-tabs'), true)
-  check('⭐ 找不到标签时明确说明（不静默）', /找不到对话标签栏/.test(client), true)
+  /**
+   * ⭐ **有标签栏时不渲染**（用户明确要求「图2这个页面不用加LDW登录」）。
+   *
+   * 判据是 `hasTabs` 驱动 `return null` —— 标签栏存在说明用户能自己
+   * 点「LDW」标签，这个按钮就是冗余的。
+   */
+  check('⭐ 有标签栏时隐藏按钮', /if \(hasTabs\) return null/.test(client), true)
+  check('⭐ 用 MutationObserver 盯标签栏出现', /new MutationObserver/.test(client), true)
+  /**
+   * ⭐ **点击打开设置页**（用户要求：「设置页面加个登录按钮，然后点击按钮
+   * 之后自动打开设置界面」）。
+   *
+   * 之前点击是「切到 LDW 标签」，在新会话空页面上必然失败 ——
+   * 因为标签栏是 `tabs.length > 1` 才渲染的。
+   */
+  check('⭐ 点击打开设置页', /openSettingsAtLdwSection/.test(client), true)
+  check('⭐ 找设置模态框（data-shortcut-modal）', client.includes('data-shortcut-modal'), true)
+  check('⭐ 按文字找设置按钮', /t === "设置"/.test(client) || /t === '设置'/.test(client), true)
+  check('⭐ 有快捷键兜底（Ctrl+,）', /code: "Comma"|code: 'Comma'/.test(client), true)
+  check('⭐ 切到 LDW 分区', /t\.includes\("ldw"\)|t\.includes\('ldw'\)/.test(client), true)
+  /** 失败要给**具体**原因，不是笼统一句。 */
+  check('⭐ 找不到设置按钮时给具体原因', /没找到设置按钮，也没唤出设置页/.test(client), true)
+  check('⭐ 没有 LDW 分区时给具体原因', /设置页里没有 LDW 分区/.test(client), true)
+  check('⭐ 用 rAF 等 React 提交（不是定时器轮询）', /requestAnimationFrame/.test(client), true)
   check('⭐ 定期刷新登录态', /setInterval/.test(client), true)
   /** 样式。 */
   check('样式含 .ldw-entry', client.includes('.ldw-entry'), true)
   check('⭐ 未登录时用警示色', /\.ldw-entry:has\(\.ldw-dot\.warn\)/.test(client), true)
+}
+
+console.log('\n[10b] ⭐ 设置页有登录按钮（用户要求的入口在这）')
+{
+  const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  /** 设置页从 /providers 读登录态。 */
+  check('⭐ 读 loggedInPlatforms', client.includes('loggedInPlatforms'), true)
+  /** 登录区：一行一个平台，带「去登录」。 */
+  check('⭐ 有「登录」分区标题', /"登录"/.test(client), true)
+  check('⭐ 有「去登录」按钮', client.includes('去登录'), true)
+  check('⭐ 已登录时按钮变「打开浏览器」', client.includes('打开浏览器'), true)
+  check('样式含 .ldw-loginrow', client.includes('.ldw-loginrow'), true)
+  check('样式含 .ldw-loginrow-name', client.includes('.ldw-loginrow-name'), true)
+  /** 说明登录态会持久化（用户最关心重启后还要不要重登）。 */
+  check('⭐ 说明登录态会保存', /重启 DSH 后仍有效/.test(client), true)
+  /**
+   * ⭐ 「去登录」= 切到本插件的浏览器视图。
+   * 那是**唯一**能真正输账号密码的地方。
+   */
+  check('⭐ 去登录会切视图', /switchToLdwView/.test(client), true)
+  /** 切视图三条路依次试（精确 → 宽泛 → 兜底）。 */
+  check('⭐ 先找标签栏内的 tab', client.includes('data-conversation-tabs'), true)
+  /**
+   * ⚠️ 产物里选择器是 `"[role=\"tab\"]"` —— 引号被转义了，
+   * 所以判据不能写裸的 `[role="tab"]`（踩过）。用 `role=` + `tab` 两段找。
+   */
+  check('⭐ 兜底找 role=tab', /\[role=\\"tab\\"\]/.test(client), true)
+  /** ⚠️ 不能点到自己 —— 否则无限套娃。 */
+  check('⭐ 排除自己的按钮（防套娃）', /classList\.contains\("ldw-entry"\)/.test(client), true)
+  /** 找不到时说明下一步做什么。 */
+  check('⭐ 找不到标签时给下一步', /先发一条消息让会话建立/.test(client), true)
 }
 
 console.log('\n[11] client 与 host 用同一套登录判断（不能各写一份）')
