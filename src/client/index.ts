@@ -1407,10 +1407,12 @@ export function LdwHost(): unknown {
               const scraped = JSON.parse(String(scrapedRaw)) as {
                 ok?: boolean
                 last?: string
+                think?: string
                 count?: number
                 selector?: string
               }
               const last = typeof scraped.last === 'string' ? scraped.last : ''
+              const think = typeof scraped.think === 'string' ? scraped.think : ''
               const count = typeof scraped.count === 'number' ? scraped.count : 0
 
               /**
@@ -1447,7 +1449,7 @@ export function LdwHost(): unknown {
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({
                     text: last,
-                    think: '',
+                    think,
                     status: 'finished',
                     via: 'dom',
                     ...(chatUrl === '' ? {} : { chatUrl }),

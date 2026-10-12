@@ -1,0 +1,387 @@
+#!/usr/bin/env node
+/**
+ * **DOM 读回复脚本**测试 —— 用真实 DOM 树桩跑生成脚本。
+ *
+ * ## 为什么这个测试最重要
+ *
+ * 用户的要求：「把网页版的内容，回显到 dsh 的对话窗口中」。
+ *
+ * 整个设计现在**全押在 DOM 抓取上**（不再依赖 hook 抓 SSE ——
+ * 那条路因 DSH 门禁删掉 `preload` 而时序上走不通，见 hook.ts 的说明）。
+ *
+ * 所以这段脚本一旦有 bug，用户看到的就是**空白回复**。
+ * 必须用真实 DOM 结构验证，不能只看源码里有没有关键字。
+ *
+ * ## 桩的要求
+ *
+ * 要能表达真实页面的关键结构：
+ *   - 嵌套元素（div > p / ul > li / pre > code）
+ *   - 文本节点（nodeType 3）
+ *   - class（`language-js` 这类要能被读到）
+ *   - 可见性（offsetWidth/Height）
+ *   - 界面元素（button/svg）要被剔除
+ */
+import { readFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+
+let pass = 0
+let fail = 0
+const check = function (name, actual, expected) {
+  if (arguments.length < 3) expected = true
+  const a = JSON.stringify(actual)
+  const e = JSON.stringify(expected)
+  if (a === e) {
+    pass += 1
+    console.log(`  OK   ${name}`)
+  } else {
+    fail += 1
+    console.log(`  FAIL ${name}\n       期望 ${e}\n       实际 ${a}`)
+  }
+}
+
+const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+
+/** 从产物里抠出 buildScrapeScript 并生成脚本。 */
+function scrapeScript() {
+  const m = bundle.match(/function buildScrapeScript\(\)/)
+  if (m === null) throw new Error('产物里找不到 buildScrapeScript —— 先跑 npm run build')
+  const open = bundle.indexOf('{', m.index)
+  let depth = 0
+  for (let i = open; i < bundle.length; i += 1) {
+    if (bundle[i] === '{') depth += 1
+    else if (bundle[i] === '}') {
+      depth -= 1
+      if (depth === 0) {
+        const fn = new Function(`${bundle.slice(m.index, i + 1)}; return buildScrapeScript;`)()
+        return fn()
+      }
+    }
+  }
+  throw new Error('buildScrapeScript 括号不配对')
+}
+
+// ---------------------------------------------------------------------------
+// 极简 DOM 实现（够表达真实页面结构）
+// ---------------------------------------------------------------------------
+
+/** 文本节点。 */
+const text = (value) => ({ nodeType: 3, nodeValue: value })
+
+/** 元素节点。 */
+function el(tag, opts = {}, ...children) {
+  const node = {
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    className: opts.cls ?? '',
+    attrs: opts.attrs ?? {},
+    /** 默认可见；`hidden: true` 表示不可见。 */
+    offsetWidth: opts.hidden === true ? 0 : 100,
+    offsetHeight: opts.hidden === true ? 0 : 20,
+    childNodes: children.flat().filter((c) => c !== null && c !== undefined && c !== ''),
+    getAttribute(k) {
+      return k in this.attrs ? this.attrs[k] : null
+    },
+    /** 深度优先取全部文本（真实 textContent 的语义）。 */
+    get textContent() {
+      let out = ''
+      const walk = (n) => {
+        if (n.nodeType === 3) {
+          out += n.nodeValue
+          return
+        }
+        for (const c of n.childNodes ?? []) walk(c)
+      }
+      walk(this)
+      return out
+    },
+    /** querySelectorAll：支持 tag 与 `.class` / `[attr="v"]` 的简单形式。 */
+    querySelectorAll(sel) {
+      const out = []
+      const match = (n) => {
+        if (n.nodeType !== 1) return false
+        const s = sel.trim()
+        if (s.startsWith('.')) return String(n.className).split(/\s+/).includes(s.slice(1))
+        if (s.startsWith('[')) {
+          const mm = /^\[([\w-]+)(?:=["']?([^\]"']*)["']?)?\]$/.exec(s)
+          if (mm === null) return false
+          const v = n.getAttribute(mm[1])
+          return mm[2] === undefined ? v !== null : v === mm[2]
+        }
+        return n.tagName === s.toUpperCase()
+      }
+      const walk = (n) => {
+        for (const c of n.childNodes ?? []) {
+          if (match(c)) out.push(c)
+          walk(c)
+        }
+      }
+      walk(this)
+      return out
+    },
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] ?? null
+    },
+  }
+  return node
+}
+
+/** 跑脚本，注入桩 document / getComputedStyle / location。 */
+function run(script, roots) {
+  const g = globalThis
+  const saved = { document: g.document, getComputedStyle: g.getComputedStyle, location: g.location }
+  /** 支持 `[class*="markdown"]` 这种子串匹配（脚本里用到了）。 */
+  const containsMatch = (n, sel) => {
+    const m = /^\[class\*=["']([^"']+)["']\]$/.exec(sel)
+    if (m === null) return null
+    return String(n.className).includes(m[1])
+  }
+  g.document = {
+    querySelectorAll(sel) {
+      const out = []
+      for (const root of roots) {
+        const direct = root.querySelectorAll(sel)
+        for (const d of direct) out.push(d)
+        /** 处理 `[class*=...]`（桩的 querySelectorAll 不支持子串）。 */
+        const cm = containsMatch(root, sel)
+        if (cm === true) out.push(root)
+        const all = collectAll(root)
+        for (const n of all) if (containsMatch(n, sel) === true) out.push(n)
+      }
+      /** 去重。 */
+      return [...new Set(out)]
+    },
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] ?? null
+    },
+  }
+  g.getComputedStyle = () => ({ visibility: 'visible', display: 'block', opacity: '1' })
+  g.location = { href: 'https://chat.deepseek.com/a/chat/s/test' }
+  try {
+    return JSON.parse(eval(script))
+  } finally {
+    g.document = saved.document
+    g.getComputedStyle = saved.getComputedStyle
+    g.location = saved.location
+  }
+}
+
+/** 收集子树里所有元素节点。 */
+function collectAll(n, out = []) {
+  for (const c of n.childNodes ?? []) {
+    if (c.nodeType === 1) out.push(c)
+    collectAll(c, out)
+  }
+  return out
+}
+
+console.log('=== DOM 读回复脚本测试（真实 DOM 树桩）===\n')
+
+const script = scrapeScript()
+
+console.log('[1] 基本：一条纯文本回复')
+{
+  const reply = el('div', { cls: 'ds-markdown' }, el('p', {}, text('你好，我是 DeepSeek。')))
+  const r = run(script, [reply])
+  check('ok=true', r.ok, true)
+  check('读到内容', r.last.includes('你好'), true)
+  check('count=1', r.count, 1)
+}
+
+console.log('\n[2] ⭐⭐ 代码块围栏必须还原（工具调用靠它）')
+{
+  /**
+   * 这是**最关键**的一条。用户报过「工具调用泄漏成正文」：
+   * 围栏开头的三反引号丢了，于是 DSH 认不出工具调用。
+   *
+   * 所以 DOM 抓取必须把 `<pre><code>` 还原成围栏代码块。
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('p', {}, text('我来执行一下：')),
+    el('pre', {}, el('code', { cls: 'language-js' }, text('const r = await pwsh({command:"ls"});\nlog(r);'))),
+    el('p', {}, text('执行完毕。')),
+  )
+  const r = run(script, [reply])
+
+  const F = '```'
+  check('⭐ 含开头围栏', r.last.includes(`${F}js`), true)
+  check('⭐ 含结尾围栏', (r.last.match(/```/g) ?? []).length >= 2, true)
+  check('⭐ 代码内容在内', r.last.includes('await pwsh'), true)
+  check('⭐ 语言标记被读到', r.last.includes('js'), true)
+  /** 围栏必须包住代码（不是散落在旁边）。 */
+  check('⭐ 围栏结构完整', /```js\n[\s\S]*?await pwsh[\s\S]*?\n```/.test(r.last), true)
+  /** 前后的正文也不能丢。 */
+  check('正文（前）保留', r.last.includes('我来执行一下'), true)
+  check('正文（后）保留', r.last.includes('执行完毕'), true)
+}
+
+console.log('\n[3] ⭐ 无语言标记的代码块也要有围栏')
+{
+  const reply = el('div', { cls: 'ds-markdown' }, el('pre', {}, el('code', {}, text('plain code here'))))
+  const r = run(script, [reply])
+  check('⭐ 有围栏', (r.last.match(/```/g) ?? []).length >= 2, true)
+  check('围栏后直接换行（无语言）', /```\nplain code/.test(r.last), true)
+}
+
+console.log('\n[4] ⭐ 界面元素必须剔除（不是回复内容）')
+{
+  /**
+   * 回复下方有「复制 / 下载 / 点赞」这些按钮，还有输入框。
+   * 它们不能被当成回复内容 —— 否则 DSH 里会出现一堆界面文字。
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('p', {}, text('这是真正的回复内容。')),
+    el('button', {}, text('复制')),
+    el('button', {}, text('下载')),
+    el('div', { attrs: { role: 'button' } }, text('点赞')),
+    el('textarea', {}, text('给 DeepSeek 发送消息')),
+    el('div', { cls: 'toolbar', attrs: { 'aria-hidden': 'true' } }, text('隐藏文字')),
+  )
+  const r = run(script, [reply])
+  check('正文在', r.last.includes('这是真正的回复内容'), true)
+  check('⭐ 剔除「复制」', r.last.includes('复制'), false)
+  check('⭐ 剔除「下载」', r.last.includes('下载'), false)
+  check('⭐ 剔除「点赞」', r.last.includes('点赞'), false)
+  check('⭐ 剔除输入框占位', r.last.includes('给 DeepSeek 发送消息'), false)
+  check('⭐ 剔除 aria-hidden', r.last.includes('隐藏文字'), false)
+}
+
+console.log('\n[5] ⭐ 只取回复容器（不把整个页面当一个回复）')
+{
+  const reply1 = el('div', { cls: 'ds-markdown' }, el('p', {}, text('第一条回复的内容在这里')))
+  const reply2 = el('div', { cls: 'ds-markdown' }, el('p', {}, text('第二条回复的内容在这里')))
+  /** 外面套一层「会话容器」，里面有侧栏等杂物。 */
+  const page = el('div', { cls: 'page' }, el('nav', {}, text('侧栏导航')), reply1, reply2)
+  const r = run(script, [page])
+  check('count=2', r.count, 2)
+  check('⭐ last 是最后一条', r.last.includes('第二条回复的内容在这里'), true)
+  check('⭐ last 不含侧栏', r.last.includes('侧栏导航'), false)
+  /** all 按文档顺序排列。 */
+  check('⭐ all[0] 是第一条', r.all[0].includes('第一条回复的内容在这里'), true)
+}
+
+console.log('\n[6] ⭐ 列表 / 标题 / 行内代码的结构保留')
+{
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('h2', {}, text('标题')),
+    el('ul', {}, el('li', {}, text('第一项')), el('li', {}, text('第二项'))),
+    el('p', {}, text('行内 '), el('code', {}, text('npm run build')), text(' 命令')),
+  )
+  const r = run(script, [reply])
+  check('标题在', r.last.includes('标题'), true)
+  check('⭐ 列表项有前缀', /- 第一项/.test(r.last), true)
+  check('两项都在', r.last.includes('第二项'), true)
+  check('⭐ 行内代码用单反引号', r.last.includes('`npm run build`'), true)
+}
+
+console.log('\n[7] 不可见的回复要被跳过')
+{
+  const hiddenReply = el('div', { cls: 'ds-markdown', hidden: true }, el('p', {}, text('这条回复是隐藏的不可见')))
+  const visibleReply = el('div', { cls: 'ds-markdown' }, el('p', {}, text('这条回复是可见的内容')))
+  const r = run(script, [hiddenReply, visibleReply])
+  check('⭐ 只读可见的', r.count, 1)
+  check('读到可见那条', r.last.includes('这条回复是可见的内容'), true)
+}
+
+console.log('\n[8] 太短的内容不算回复（避免把占位当回复）')
+{
+  const tiny = el('div', { cls: 'ds-markdown' }, el('p', {}, text('嗯')))
+  const r = run(script, [tiny])
+  check('⭐ 太短不采信', r.ok, false)
+}
+
+console.log('\n[9] 空 DOM 不抛错（返回结构化失败）')
+{
+  const r = run(script, [el('div', { cls: 'page' })])
+  check('ok=false', r.ok, false)
+  check('last 是空串', r.last, '')
+  check('⭐ 不抛错（有 all 字段）', Array.isArray(r.all), true)
+}
+
+console.log('\n[10] ⭐ 多轮对话：条数增长 = 本轮回复到位')
+{
+  /**
+   * 客户端靠 `count > 基线` 判断「本轮回复来了」。
+   * 这里验证 count 真的会随回复条数增长。
+   */
+  const reply1 = el('div', { cls: 'ds-markdown' }, el('p', {}, text('第一轮回复的内容')))
+  const before = run(script, [el('div', { cls: 'page' }, reply1)])
+  check('基线 count=1', before.count, 1)
+
+  const reply2 = el('div', { cls: 'ds-markdown' }, el('p', {}, text('第二轮回复的内容')))
+  const after = run(script, [el('div', { cls: 'page' }, reply1, reply2)])
+  check('⭐ 新增后 count=2', after.count, 2)
+  check('⭐ 能判断出增长了', after.count > before.count, true)
+  check('last 是新的那条', after.last.includes('第二轮回复的内容'), true)
+}
+
+console.log('\n[11] 兜底：没有 markdown 类名时也能读到')
+{
+  /**
+   * 页面改版换掉 class 名时，靠「最长的可见 div」兜底。
+   * 这让脚本**不依赖具体类名**（DeepSeek 的 class 是构建期哈希）。
+   */
+  const reply = el(
+    'div',
+    { cls: 'x1y2z3' },
+    el('p', {}, text('这是一段足够长的回复内容，用来触发最长 div 兜底逻辑。')),
+  )
+  const r = run(script, [el('div', { cls: 'wrapper' }, reply)])
+  check('⭐ 兜底能读到', r.ok, true)
+  check('内容正确', r.last.includes('足够长的回复内容'), true)
+}
+
+console.log('\n[12] ⭐ 思考过程要读出来（用户明确要求过）')
+{
+  /**
+   * 网页版的「已思考（用时 N 秒）」是折叠区，但 DOM 里内容在
+   * —— 所以收起状态下也能读到。这正是 DOM 抓取比 SSE 省事的地方。
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('div', { cls: 'thinking-block' }, el('p', {}, text('用户问的是文件策略，需要先确认工作区。'))),
+    el('p', {}, text('已经确认完成，这是最终回复内容。')),
+  )
+  const r = run(script, [reply])
+  check('⭐ 读到思考', r.think.includes('需要先确认工作区'), true)
+  check('回复正文不受影响', r.last.includes('最终回复内容'), true)
+}
+
+console.log('\n[13] 没有思考时不报错（think 为空串）')
+{
+  const reply = el('div', { cls: 'ds-markdown' }, el('p', {}, text('这条回复没有思考过程，只有正文。')))
+  const r = run(script, [reply])
+  check('think 是空串', r.think, '')
+  check('⭐ 回复仍然正常', r.ok, true)
+}
+
+console.log('\n[14] 「已思考（用时 N 秒）」标题要从思考里剥掉')
+{
+  /** 那行是界面文字，不是思考内容本身。 */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el(
+      'div',
+      { cls: 'reasoning' },
+      el('p', {}, text('已思考（用时 3 秒）')),
+      el('p', {}, text('真正的思考内容在这里。')),
+    ),
+    el('p', {}, text('这是回复正文的内容部分。')),
+  )
+  const r = run(script, [reply])
+  check('⭐ 剥掉标题行', /已思考/.test(r.think), false)
+  check('⭐ 保留思考正文', r.think.includes('真正的思考内容'), true)
+}
+
+console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
+process.exitCode = fail === 0 ? 0 : 1
