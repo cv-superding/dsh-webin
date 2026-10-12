@@ -120,6 +120,43 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
   }
 
   /**
+   * 记下**所有** POST 请求的路径（最近 20 条）。
+   *
+   * ## 为什么需要这个（用户实测踩过的坑）
+   *
+   * 用户症状：状态栏「已发送 · 收到 0 条」，网页版那边回复明明完成了，
+   * DSH 一直等到超时 —— 最难查的一类故障。
+   *
+   * 排查时最想知道的是：**页面到底往哪个路径发的请求？**
+   * 如果 DeepSeek 改了端点（比如加版本前缀），「samePath」 的**精确比较**
+   * 会静默失配 —— 既不报错也抓不到回复。
+   *
+   * 所以把所有 POST 路径记下来，诊断面板直接展示：
+   * 下次端点变了，一眼就能看出「真实路径 vs 我们期望的路径」。
+   */
+  function notePostPath(url) {
+    try {
+      var p;
+      try { p = new URL(String(url), location.href).pathname; }
+      catch (e) { p = String(url); }
+      var list = window.${MARKER}_postPaths;
+      if (!Array.isArray(list)) { list = []; window.${MARKER}_postPaths = list; }
+      var matched = samePath(url, COMPLETION);
+      /** 去重：同一路径只留一条，但保留「曾匹配过」与调用次数。 */
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].path === p) {
+          list[i].at = Date.now();
+          list[i].count = (list[i].count || 1) + 1;
+          if (matched) list[i].matched = true;
+          return;
+        }
+      }
+      list.push({ path: p, at: Date.now(), matched: matched, count: 1 });
+      if (list.length > 20) list.splice(0, list.length - 20);
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
    * 记一次「页面自己发出了 completion 请求」。
    *
    * 这是发送脚本判断发送成功的最强信号（见 chat.ts 的 verify()）。
@@ -184,13 +221,13 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
      * response/fragments/0/content  ⇒ 0
      * response/fragments/-1/content ⇒ 最后一个（= fragmentTypes.length - 1）
      *
-     * ## ⚠️ `-1` 的语义（这里是第一个坑）
+     * ## ⚠️ 「-1」 的语义（这里是第一个坑）
      *
-     * `-1` 意思是「最后一个 fragment」。但**首帧就是 `-1`** 时，
+     * 「-1」 意思是「最后一个 fragment」。但**首帧就是 「-1」** 时，
      * 类型表还是空的 —— 早期实现返回 null，于是类型表**从未登记**，
      * 后续裸增量全部走错分支（这正是思考只有 2 个字的根因）。
      *
-     * 正确做法：`-1` 且表为空 ⇒ **分配下标 0**（第一个 fragment）。
+     * 正确做法：「-1」 且表为空 ⇒ **分配下标 0**（第一个 fragment）。
      *
      * @returns 下标；不是 fragment 路径时返回 null。
      */
@@ -494,6 +531,10 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       var p = origFetch.apply(this, arguments);
 
       try {
+        if (String(method).toUpperCase() === 'POST') {
+          /** 记下路径（诊断用，见 notePostPath）。 */
+          notePostPath(url);
+        }
         if (String(method).toUpperCase() === 'POST' && samePath(url, COMPLETION)) {
           noteCompletionRequest();
           p.then(function (res) {
@@ -532,7 +573,10 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
 
     OrigXHR.prototype.send = function () {
       var meta = info.get(this);
-      var isTarget = meta && String(meta.method).toUpperCase() === 'POST' && samePath(meta.url, COMPLETION);
+      var isPost = meta && String(meta.method).toUpperCase() === 'POST';
+      /** 记下路径（诊断用）。 */
+      if (isPost) notePostPath(meta.url);
+      var isTarget = isPost && samePath(meta.url, COMPLETION);
       if (isTarget) {
         noteCompletionRequest();
         var ex = createExtractor();

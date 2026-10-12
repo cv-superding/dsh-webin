@@ -121,10 +121,13 @@ function sendHintsFor(p: Provider): {
   sendSelectors: string[]
   signatures?: Array<[string, number]>
   vetoes?: string[]
+  completionPath?: string
 } {
   return {
     inputSelectors: p.input.selectors ?? [],
     sendSelectors: p.send.selectors ?? [],
+    /** 只用于诊断展示（端点改版时对比「期望 vs 实际」）。 */
+    completionPath: p.completionPath,
     ...(p.send.signatures === undefined ? {} : { signatures: p.send.signatures }),
     ...(p.send.vetoes === undefined ? {} : { vetoes: p.send.vetoes }),
   }
@@ -1414,7 +1417,39 @@ export function LdwHost(): unknown {
         })
         // 成功则不交结果 —— 等 hook 的 done 事件
       } catch (error) {
+        /**
+         * ## ⚠️ 异常**必须交回 host**，否则 DSH 永远等
+         *
+         * 用户实测：网页版那边回复已经完成了，但 DSH 一直转圈等到超时。
+         *
+         * 根因就在这里 —— 早期实现只打一行日志：
+         *
+         *     } catch (error) {
+         *       console.warn('[dsh-webin] 任务处理失败', error)   // ← pendingJobRef 已置位
+         *     }
+         *
+         * 此时 `pendingJobRef` 已经有值（领到任务时就置了），而结果**永不交回**
+         * ⇒ host 侧一直等 ⇒ DSH 一直等。任何异常都会触发：
+         * `executeJavaScript` 超时、页面在发送途中导航、`JSON.parse` 失败…
+         *
+         * 而且下一轮 `tick` 因为 `hasPending` 为真**再也不领新活**，
+         * 整个链路就此僵死。
+         *
+         * 所以：异常也要把任务了结掉（交个错误），并**清掉待办**。
+         */
         console.warn('[dsh-webin] 任务处理失败', error)
+        const stuck = pendingJobRef.current
+        pendingJobRef.current = undefined
+        pendingSinceRef.current = 0
+        if (stuck !== undefined) {
+          void fetch(`/dsh-webin/api/job/${stuck}/result`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              error: `客户端处理异常：${(error as Error)?.message ?? String(error)}`,
+            }),
+          }).catch(() => undefined)
+        }
       } finally {
         busy = false
       }

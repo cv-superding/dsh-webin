@@ -47,6 +47,13 @@ export interface SendHints {
   sendSelectors: string[]
   signatures?: Array<[string, number]>
   vetoes?: string[]
+  /**
+   * 该平台期望的 completion 路径（来自 Provider）。
+   *
+   * 只用于**诊断展示** —— 把「我们期望的路径」和「页面实际发的路径」
+   * 并排给用户看，端点改版时一眼定位（见 buildDiagnoseScript）。
+   */
+  completionPath?: string
 }
 
 export function buildSendScript(text: string, delayMs: number, hints?: SendHints): string {
@@ -444,20 +451,36 @@ export function buildSendScript(text: string, delayMs: number, hints?: SendHints
     signals.grew = nowLen > before.bodyLen + 20;
 
     /**
-     * 判据优先级（实测校准）：
+     * 判据优先级（**实测校准过两次**）：
      *
      *   1. **requestSent** —— 页面真的发出了 completion 请求。**唯一铁证**。
-     *   2. stopControl —— 出现了停止生成控件（生成中）。可靠，但 DeepSeek 上是纯图标，测不到。
-     *   3. cleared —— 输入框被清空。**单独不可信**：dry-run 实测发现，
-     *      点击被拦截、消息根本没发出去时输入框也可能是空的。
-     *   4. grew —— 页面正文变长。**最弱**：dry-run 实测它会在没发送时误报为 true
-     *      （页面本身有动画/懒加载在改文本）。**只能作为辅助，不能单独判定成功**。
+     *   2. stopControl —— 出现停止生成控件（生成中）。可靠，但 DeepSeek 上是纯图标，测不到。
+     *   3. cleared —— 输入框被清空。**单独不可信**。
+     *   4. grew —— 页面正文变长。**最弱**，从不单独采信。
      *
-     * 所以：铁证优先；cleared 单独成立也算（有些站点确实清空即发送）；
-     * 但 **grew 单独成立不算** —— 否则会把"没发出去"误判成成功，
-     * 然后一直等一个永远不会来的回复。
+     * ## ⚠️ 为什么 「cleared」 单独成立**不算成功**（用户实测推翻了我原来的判断）
+     *
+     * 用户症状：状态栏显示「已发送 · 收到 0 条」，网页版那边**根本没有新消息**，
+     * DSH 一直等到超时。
+     *
+     * 原来我写的是 「requestSent || stopControl || cleared」，注释里还自我安慰
+     * 「有些站点确实清空即发送」。但那是个**陷阱**：
+     *
+     *   - 页面把输入框清空了（React 受控状态被重置、或清空逻辑跑了）
+     *   - 但 「requestSent」 是 false —— 说明 **hook 没看到请求**
+     *
+     * 而 hook 没看到请求只有两种可能：
+     *   a) 请求真的没发（发送被拦）
+     *   b) 请求发了，但**路径没匹配上**（「samePath」 是精确比较）
+     *
+     * 两种情况**都不该报成功** —— (a) 是失败，(b) 意味着 hook 抓不到回复，
+     * 报成功只会让 DSH 白等到超时。所以：**cleared 只能作为辅助信号**，
+     * 必须配合 requestSent 或 stopControl 才认。
+     *
+     * 宁可**明确报失败**（用户立刻看到「发送未确认」，可以重试），
+     * 也不要报一个假成功让链路僵死 10 分钟。
      */
-    signals.ok = signals.requestSent || signals.stopControl || signals.cleared;
+    signals.ok = signals.requestSent || signals.stopControl;
     return signals;
   }
 
@@ -646,6 +669,18 @@ export function buildDiagnoseScript(hints?: SendHints): string {
     return o;
   }
   var out = { url: location.href, inputs: [], buttons: [], svgHosts: [] };
+  /**
+   * 页面实际发过哪些 POST（hook 记录的）。
+   *
+   * ⚠️ **端点改版时这是最有价值的一栏**：如果 DeepSeek 换了 completion 路径，
+   * 我们的精确比较会静默失配（既不报错也抓不到回复），
+   * 而这里能直接看出「真实路径 vs 期望路径」。
+   */
+  try {
+    out.postPaths = window.__dshWebinHookInstalled___postPaths || [];
+    out.expectedCompletion = ${JSON.stringify(hints?.completionPath ?? '/api/v0/chat/completion')};
+    out.completionRequests = window.__dshWebinHookInstalled___requests || 0;
+  } catch (e) { /* ignore */ }
   try {
     var tas = document.querySelectorAll('textarea');
     for (var i = 0; i < tas.length; i++) {
