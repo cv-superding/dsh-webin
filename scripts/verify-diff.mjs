@@ -81,8 +81,13 @@ function extract(bundle, pattern, name) {
 }
 
 const src = [
+  // diffPrompt 现在走 serializeMessages 做消息序列化（支持 tool-call / tool 消息），
+  // 所以要把它的传递闭包一起带上 —— 否则 `serializeMessages is not defined`。
   extract(bundle, /function fingerprint\(/, 'fingerprint'),
-  extract(bundle, /function messageText\(/, 'messageText'),
+  extract(bundle, /function serializeMessage\(/, 'serializeMessage'),
+  extract(bundle, /function serializeMessages\(/, 'serializeMessages'),
+  extract(bundle, /function contentToText\(/, 'contentToText'),
+  extract(bundle, /function formatArguments\(/, 'formatArguments'),
   extract(bundle, /function diffPrompt\(/, 'diffPrompt'),
   // 产物里 class 被转成 `var SessionCursors = class {`
   extract(bundle, /(?:var|class)\s+SessionCursors\s*=\s*class\s*\{/, 'SessionCursors'),

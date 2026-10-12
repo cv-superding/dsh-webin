@@ -28,6 +28,8 @@
  */
 import type { Provider } from '../shared/providers'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
+import { buildToolSection, parseToolCalls, type ToolSchema } from './tool-protocol'
+import { serializeMessages, type DshMessage } from './serialize'
 
 /** 路由名前缀：最终路由名 = `${ROUTE_PREFIX}-${provider.id}`。 */
 export const ROUTE_PREFIX = 'webin'
@@ -236,22 +238,6 @@ function fingerprint(text: string): string {
   return `${text.length}:${text.slice(0, 48)}:${text.slice(-48)}`
 }
 
-/** 把一条消息的 content 转成纯文本。 */
-function messageText(content: unknown): string {
-  if (typeof content === 'string') return content
-  if (!Array.isArray(content)) return ''
-  return content
-    .map((b) => {
-      if (b === null || typeof b !== 'object') return ''
-      const block = b as { type?: string; text?: string }
-      if (block.type === 'text' && typeof block.text === 'string') return block.text
-      if (block.type === 'reasoning' && typeof block.text === 'string') return `[thinking] ${block.text}`
-      return ''
-    })
-    .filter((s) => s !== '')
-    .join('\n')
-}
-
 /**
  * 算出本轮要发的内容（增量）。
  *
@@ -274,9 +260,11 @@ function messageText(content: unknown): string {
  */
 function diffPrompt(options: {
   system?: string
-  messages: ReadonlyArray<{ role: string; content?: unknown }>
+  messages: ReadonlyArray<DshMessage>
   sessionKey: string
   cursors: SessionCursors
+  /** 工具段（协议 + 目录）；**只在首轮**带，见下方说明。 */
+  toolSection?: string
 }): {
   text: string
   note: string
@@ -315,13 +303,18 @@ function diffPrompt(options: {
   const parts: string[] = []
   if (needSystem && system !== '') parts.push(system)
 
-  for (let i = start; i < messages.length; i += 1) {
-    const msg = messages[i]!
-    const role = msg.role === 'assistant' ? 'Assistant' : msg.role === 'user' ? 'User' : msg.role
-    const text = messageText(msg.content).trim()
-    if (text === '') continue
-    parts.push(`## ${role}\n${text}`)
-  }
+  /**
+   * **工具段只在首轮带。**
+   *
+   * 与差分发送一致：后续轮只发增量。若每轮都带工具目录，
+   * 单次请求体量会平白多几千字符 —— 而参考实现实测记录过
+   * 「体量是账号被限制的主要嫌疑」。
+   */
+  const withTools = isFirst && typeof options.toolSection === 'string' && options.toolSection !== ''
+  if (withTools) parts.push(options.toolSection!)
+
+  const body = serializeMessages(messages.slice(start))
+  if (body !== '') parts.push(body)
 
   return {
     text: parts.join('\n\n'),
@@ -336,11 +329,13 @@ function diffPrompt(options: {
         ...(prev?.chatUrl === undefined ? {} : { chatUrl: prev.chatUrl }),
       })
     },
-    note: isFirst
-      ? `首轮（系统提示词 ${system.length} 字符 + ${messages.length} 条消息）`
-      : `增量（第 ${start + 1}..${messages.length} 条` +
-        (skippedOwnReply > 0 ? `，跳过页面自己的 ${skippedOwnReply} 条回复` : '') +
-        `）`,
+    note:
+      (isFirst
+        ? `首轮（系统提示词 ${system.length} 字符 + ${messages.length} 条消息`
+        : `增量（第 ${start + 1}..${messages.length} 条`) +
+      (skippedOwnReply > 0 ? `，跳过页面自己的 ${skippedOwnReply} 条回复` : '') +
+      (withTools ? `，带工具目录 ${options.toolSection!.length} 字符` : '') +
+      '）',
   }
 }
 
@@ -515,12 +510,20 @@ export function createAdapter(deps: AdapterDeps) {
     provider: string
     model: string
     system?: string
-    messages: ReadonlyArray<{ role: string; content?: unknown }>
+    messages: ReadonlyArray<DshMessage>
     signal?: AbortSignal
     /** dsh-llm 的调用用途；压缩摘要会带 `'compaction'`。 */
     purpose?: string
     /** DSH 给的会话标识 —— 差分发送的键。 */
     sessionId?: string
+    /**
+     * DSH 下发的工具清单。
+     *
+     * 网页版没有原生 function calling，所以走「JS 代码块协议」（抄 cuckoo）：
+     * 首轮把工具目录打进 prompt，模型输出 ```cuckoo 块，
+     * 本 adapter 解析成 `tool-call` chunk 交回 DSH。
+     */
+    tools?: readonly ToolSchema[]
   }): AsyncIterable<unknown> {
     /**
      * **压缩摘要不能走真实浏览器。**
@@ -575,7 +578,15 @@ export function createAdapter(deps: AdapterDeps) {
       options.sessionId !== undefined && options.sessionId !== ''
         ? String(options.sessionId)
         : `${provider.id}#${fingerprint(options.system ?? '')}`
-    const diff = diffPrompt({ ...options, sessionKey, cursors })
+
+    /**
+     * 工具段（协议 + 目录）—— 只在首轮带，见 `diffPrompt` 的说明。
+     *
+     * 体量：60 个工具 × 约 80 字符 ≈ 5,000 字符
+     * （cuckoo 的格式是「`name(签名)` — 首句」，对所有工具一视同仁）。
+     */
+    const toolSection = buildToolSection([...(options.tools ?? [])])
+    const diff = diffPrompt({ ...options, sessionKey, cursors, toolSection })
     const prompt = diff.text
 
     if (prompt.trim() === '') {
@@ -647,20 +658,64 @@ export function createAdapter(deps: AdapterDeps) {
       deps.logger?.debug?.(`${sessionKey} 绑定对话 ${result.chatUrl}`)
     }
 
-    // 思考内容作为 reasoning 块
-    if (result.think.trim() !== '') {
-      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
-      yield { type: 'reasoning-delta', index: 0, text: result.think }
-      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: result.think } }
+    /**
+     * ## 解析工具调用（抄 cuckoo 的 JS 代码块协议）
+     *
+     * 网页模型没有原生 function calling，所以让它把调用写成 ```cuckoo 代码块
+     * （cuckoo 的模板明确要求「多行文本用反引号模板字符串，不做任何转义」
+     * —— 比 web-login 的 JSON 协议少一整类失败模式）。
+     *
+     * 这里把代码块**抠出来**转成 DSH 的 `tool-call` chunk：
+     *   - 块外文字照常作为正文流给 DSH
+     *   - 块本身**绝不进正文**（否则会显示在网页记录里，看起来不像人）
+     *
+     * ⚠️ 解析失败时不静默丢弃：把原文当正文透出（用户至少能看到模型写了什么），
+     * 并记一条日志。宁可多显示一点，也不能让消息凭空消失。
+     */
+    const parsed = parseToolCalls(result.text, [...(options.tools ?? [])])
+    if (parsed.failed.length > 0) {
+      deps.logger?.warn?.(`工具调用解析失败 ${parsed.failed.length} 处：${parsed.failed[0]}`)
     }
 
-    // 正文
-    const textIndex = result.think.trim() === '' ? 0 : 1
-    yield { type: 'block-start', index: textIndex, blockType: 'text' }
-    yield { type: 'text-delta', index: textIndex, text: result.text }
-    yield { type: 'block-end', index: textIndex, block: { type: 'text', text: result.text } }
+    let index = 0
 
-    yield { type: 'finish', reason: { kind: 'stop' } }
+    // 思考内容作为 reasoning 块（只给 DSH 展示，不回灌网页 —— 见 serialize.ts 说明）
+    if (result.think.trim() !== '') {
+      yield { type: 'block-start', index, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index, text: result.think }
+      yield { type: 'block-end', index, block: { type: 'reasoning', text: result.think } }
+      index += 1
+    }
+
+    // 正文（已剥掉工具代码块）
+    if (parsed.text.trim() !== '') {
+      yield { type: 'block-start', index, blockType: 'text' }
+      yield { type: 'text-delta', index, text: parsed.text }
+      yield { type: 'block-end', index, block: { type: 'text', text: parsed.text } }
+      index += 1
+    }
+
+    // 工具调用：每个调用一个独立的 tool-call 块
+    for (const call of parsed.calls) {
+      const id = `call_${Date.now().toString(36)}_${index}_${Math.random().toString(36).slice(2, 8)}`
+      yield { type: 'block-start', index, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
+      yield { type: 'block-end', index, block: { type: 'tool-call', id, name: call.name, arguments: call.arguments } }
+      index += 1
+    }
+
+    if (parsed.calls.length > 0) {
+      deps.logger?.debug?.(`解析出 ${parsed.calls.length} 个工具调用：${parsed.calls.map((c) => c.name).join(', ')}`)
+    }
+
+    /**
+     * 结束原因：有工具调用时必须是 `tool-calls`
+     * （DSH 据此决定「执行工具后继续」而不是「本轮结束」）。
+     */
+    yield {
+      type: 'finish',
+      reason: parsed.calls.length > 0 ? { kind: 'tool-calls' } : { kind: 'stop' },
+    }
   }
 
   return {
