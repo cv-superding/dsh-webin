@@ -45,7 +45,26 @@ export interface WebinConfig {
   claimGraceMs: number
   /** 工具结果送进 prompt 时的截断上限（字符）。 */
   toolResultLimit: number
-  /** 是否把工具目录下发给模型（关掉 = 模型不会调用工具）。 */
+  /**
+   * 是否把工具目录下发给模型。
+   *
+   * ## ⚠️⚠️ 默认 **false** —— 实测证实下发有害无益（用户实测鹈鹕任务）
+   *
+   * 1. 协议（~4KB）作为 prompt 发给网页版 ⇒ **被渲染进网页会话**
+   *    （页面上能看到「# 工具调用协议…」原文，污染页面）
+   * 2. 网页版 DeepSeek **有自己的工具系统**（实测：让它写鹈鹕骑自行车，
+   *    它自己写文件说 "Writing the HTML file"）⇒ **不会**输出 ldw 协议
+   *    ⇒ DSH 侧收不到任何工具调用
+   * 3. 结果：协议白白发（浪费 token、污染页面、可能触发风控），
+   *    DSH 的工具一样没通
+   *
+   * ## LDW 架构的固有限制（不是 bug）
+   *
+   * DSH 的工具回路是「模型输出协议文本 → DSH 解析执行 → 结果回灌」；
+   * 网页版模型走 DeepSeek 自己的回路 —— 两条工具链互不相通。
+   *
+   * 设置页保留开关：想试的用户可自己打开，但默认必须关。
+   */
   enableTools: boolean
   /** 登录态快照保存间隔（毫秒）。 */
   snapshotIntervalMs: number
@@ -90,7 +109,11 @@ export const DEFAULT_CONFIG: WebinConfig = {
   replyTimeoutMs: 600_000,
   claimGraceMs: 20_000,
   toolResultLimit: 4_000,
-  enableTools: true,
+  /**
+   * 默认关 —— 实测下发有害无益（协议污染页面 + 网页版有自己的工具
+   * 系统不会输出 ldw 协议）。见 WebinConfig.enableTools 的完整证据链。
+   */
+  enableTools: false,
   snapshotIntervalMs: 30_000,
 
   verboseLog: false,

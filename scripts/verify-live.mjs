@@ -583,6 +583,25 @@ console.log('\n[15] ⭐⭐⭐ 交付判据不许有长度门槛（第二处残�
   check('⭐ 事故记录在注释里', /第二处残留/.test(clientSrc), true)
 }
 
+
+console.log('\n[16] ⭐⭐⭐ 工具协议默认不下发（实测：污染页面 + 网页版自有工具截胡）')
+{
+  /**
+   * ## 用户实测（鹈鹕任务）的完整证据链
+   *
+   * 1. 工具协议（~4KB）作为 prompt 发给网页版 ⇒ **被渲染进网页会话**
+   *    （页面上能看到「# 工具调用协议…」原文，38KB 页面文本大部分是它）
+   * 2. 网页版 DeepSeek **有自己的工具系统**（它自己写文件，
+   *    说 "Writing the HTML file"）⇒ **不会**输出 ldw 协议
+   *    ⇒ DSH 侧收不到任何工具调用
+   * 3. 结果：协议白白发，DSH 的工具一样没通
+   */
+  const cfgSrc = readFileSync(join(ROOT, 'src', 'shared', 'config.ts'), 'utf8')
+  check('⭐⭐⭐ 默认 enableTools: false', /enableTools: false,/.test(cfgSrc), true)
+  /** 注释里要有证据链（防止以后被无意改回）。 */
+  check('⭐⭐ 证据链注释在', /网页版 DeepSeek.*有自己的工具系统|有自己的工具系统/.test(cfgSrc), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
