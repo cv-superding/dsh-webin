@@ -350,5 +350,33 @@ console.log('\n[9] ⭐⭐⭐ 面板能自己发现「代码更新了」并重载
   check('⭐⭐ 产物 client 有自动重载', /自动重载页面/.test(cb), true)
 }
 
+
+console.log('\n[10] ⭐⭐ 页面结构报告要能列出「有内容的容器」')
+{
+  /**
+   * ## 上一份报告的结论（推动这次增强）
+   *
+   *     needle 命中数: 0        ← 那段文字不在页面上
+   *     .ds-markdown        → 0
+   *     [class*="markdown"] → 0
+   *     [class*="content"]  → 5     ← 只有这个有
+   *     [class*="ds-"]      → 589   ← ds- 类名体系存在
+   *     main / [role=main]  → 0
+   *
+   * 类名体系是 ds-*，但**回复容器的类名不在我猜的那批里**。
+   * 继续猜没意义 —— 直接问页面「哪些元素有较长的文本」。
+   */
+  const domSrc = readFileSync(join(ROOT, 'src', 'client', 'dom-report.ts'), 'utf8')
+  check('⭐⭐ 导出 rich（有文本的元素）', /rich: rich\.slice\(0, 12\)/.test(domSrc), true)
+  check('⭐ 按文本长度排序', /rich\.sort\(function \(a, b\) \{ return b\.len - a\.len/.test(domSrc), true)
+  /** 只取「叶子级」的，否则全是 body（没信息量）。 */
+  check('⭐⭐ 过滤掉「子元素更长」的容器', /hasRicher/.test(domSrc), true)
+  check('⭐ 导出页面文本总量', /bodyTextLen: bodyText\.length/.test(domSrc), true)
+
+  const cb = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  check('⭐⭐ 产物里有 rich', /rich: rich\.slice/.test(cb), true)
+  check('⭐⭐ 产物里有 bodyTextLen', /bodyTextLen/.test(cb), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

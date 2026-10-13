@@ -11,7 +11,7 @@
  *     root: "body"                          ← 没有 main
  *     fallback: divs=865 bestLen=1234       ← 兜底抓了侧边栏
  *
- * `[class*="markdown"]` 命中 **0** 说明：**页面上根本没有带
+ * 「[class*="markdown"]」 命中 **0** 说明：**页面上根本没有带
  * "markdown" 的类名** —— 我的候选表整个是错的（那些类名来自
  * 用户历史会话记录，当前页面结构已经变了）。
  *
@@ -19,7 +19,7 @@
  *
  * ## 独立文件的原因
  *
- * `hook.ts` 有 1392 行、大量模板字符串。之前用脚本往里插入代码时
+ * 「hook.ts」 有 1392 行、大量模板字符串。之前用脚本往里插入代码时
  * **两次改坏文件**（一次删了 1019 行）。新功能放独立文件，
  * 主文件不动 —— 风险低得多。
  *
@@ -126,6 +126,40 @@ export function buildDomReportScript(needle: string): string {
       catch (e) { cands[CAND[q]] = -1; }
     }
 
+    /**
+     * ⭐ 把「有内容的容器」列出来 —— 按文本长度排序。
+     *
+     * ## 为什么需要（上一份报告的结论）
+     *
+     * 上一份报告显示 needle 命中 0、所有常见类名命中 0，但
+     * 「[class*="ds-"]」 有 589 个。说明类名体系是 ds-*，但
+     * **回复内容的容器类名不在我猜的那批里**。
+     *
+     * 所以直接问页面：**哪些元素有较长的文本？** 那些就是候选容器。
+     * 比猜类名可靠得多。
+     */
+    var rich = [];
+    for (var z = 0; z < all.length; z++) {
+      var tx = '';
+      try { tx = String(all[z].textContent || ''); } catch (e) { tx = ''; }
+      if (tx.length < 20) continue;
+      /** 只要「叶子级」的（子元素里没有更长的文本），避免全是 body。 */
+      var kk = all[z].children || [];
+      var hasRicher = false;
+      for (var y = 0; y < kk.length; y++) {
+        var kx = '';
+        try { kx = String(kk[y].textContent || ''); } catch (e) { kx = ''; }
+        if (kx.length >= tx.length * 0.9) { hasRicher = true; break; }
+      }
+      if (hasRicher) continue;
+      rich.push({ el: describe(all[z]), len: tx.length, head: tx.slice(0, 50) });
+    }
+    rich.sort(function (a, b) { return b.len - a.len; });
+
+    /** 页面上的文本总量 —— 判断「内容到底渲染了没」。 */
+    var bodyText = '';
+    try { bodyText = String(document.body ? document.body.innerText || document.body.textContent || '' : ''); } catch (e) { bodyText = ''; }
+
     return JSON.stringify({
       ok: true,
       url: location.href,
@@ -136,6 +170,11 @@ export function buildDomReportScript(needle: string): string {
       chain: chain,
       layout: layout,
       cands: cands,
+      /** ⭐ 有较长文本的元素（按长度降序）—— 回复容器必在其中。 */
+      rich: rich.slice(0, 12),
+      /** 页面文本总量 —— 判断内容渲染了没。 */
+      bodyTextLen: bodyText.length,
+      bodyTextHead: bodyText.slice(0, 300),
       topClasses: top.slice(0, 45)
     });
   } catch (e) {
