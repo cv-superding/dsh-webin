@@ -1004,44 +1004,46 @@ export function buildScrapeScript(): string {
        * ⚠️ 找不到时返回空串 —— 宁可没有语言标记，也不要猜错：
        * 猜错会让正文里的普通代码块被误认成工具调用。
        */
-      function findCodeLang(pre) {
-        try {
-          var isLang = function (s) {
-            if (!s) return false;
-            var v = String(s).replace(/^[\\s\\n]+|[\\s\\n]+$/g, '');
-            if (v.length === 0 || v.length > 20) return false;
-            if (/[\\s\\n]/.test(v)) return false;
-            return /^[A-Za-z][A-Za-z0-9+#.-]*$/.test(v);
-          };
-          var clean = function (s) {
-            return String(s || '').replace(/^[\\s\\n]+|[\\s\\n]+$/g, '');
-          };
-          /** 1) 前置兄弟（头部条通常紧邻 pre）。 */
-          var prev = pre.previousElementSibling;
-          for (var g = 0; g < 3 && prev; g++) {
-            var pt = clean(prev.textContent);
-            if (isLang(pt)) return pt.toLowerCase();
-            /** 头部条可能还套了一层，往里找。 */
-            var inner = prev.querySelector ? prev.querySelector('span, div, code') : null;
-            if (inner) {
-              var it = clean(inner.textContent);
-              if (isLang(it)) return it.toLowerCase();
+              function findCodeLang(pre) {
+          try {
+            /** 语言名：短、无空白、字母开头（ldw / js / python / c++ …）。 */
+            var isLang = function (s) {
+              if (!s) return false;
+              var v = String(s).replace(/^[\\s\\n]+|[\\s\\n]+$/g, "");
+              if (v.length === 0 || v.length > 20) return false;
+              if (/[\\s\\n]/.test(v)) return false;
+              return /^[A-Za-z][A-Za-z0-9+#.-]*$/.test(v);
+            };
+            var clean = function (s) {
+              return String(s || "").replace(/^[\\s\\n]+|[\\s\\n]+$/g, "");
+            };
+            /**
+             * ⭐ 向上遍历祖先链（最多 4 层）—— 这是关键。
+             *
+             * 真实结构里语言标签是 pre 的**祖先**的兄弟（标签和 pre 不在
+             * 同一层）：「标签 div」与「包着 pre 的 body div」才是兄弟。
+             * 只查 pre 的直接兄弟会拿不到 ⇒ 输出裸围栏（真实事故）。
+             */
+            var node = pre;
+            for (var lv = 0; lv < 4 && node; lv++) {
+              /** 同一层里，往前找最多 4 个兄弟。 */
+              var sib = node.previousElementSibling;
+              for (var g = 0; g < 4 && sib; g++) {
+                var st = clean(sib.textContent);
+                if (isLang(st)) return st.toLowerCase();
+                /** 兄弟里可能还套了一层（span / code）。 */
+                var inner = sib.querySelector ? sib.querySelector("span, code, i") : null;
+                if (inner) {
+                  var it = clean(inner.textContent);
+                  if (isLang(it)) return it.toLowerCase();
+                }
+                sib = sib.previousElementSibling;
+              }
+              node = node.parentElement;
             }
-            prev = prev.previousElementSibling;
-          }
-          /** 2) 父容器里 pre 之前的短文本（头部条与 pre 同 wrapper）。 */
-          var par = pre.parentElement;
-          if (par) {
-            var kids = par.childNodes || [];
-            for (var i = 0; i < kids.length; i++) {
-              if (kids[i] === pre) break;
-              var kt = clean(kids[i].textContent);
-              if (isLang(kt)) return kt.toLowerCase();
-            }
-          }
-        } catch (e) {}
-        return '';
-      }
+          } catch (e) {}
+          return "";
+        }
 
     /** 递归渲染成 markdown，重点是**保留代码块围栏**（工具调用靠它）。 */
     function render(node, forThink) {
@@ -1086,8 +1088,19 @@ export function buildScrapeScript(): string {
          * 不排除的话它会作为**独立段落**输出 ⇒ 抓到的内容变成
          * 「ldw + 换行 + 围栏」，语言名重复一次并污染回复的开头。
          */
-        var nxt = node.nextElementSibling || null;
-        if (nxt && String(nxt.tagName || '').toLowerCase() === 'pre') {
+                var nxt = node.nextElementSibling || null;
+        /**
+         * ⭐ 判据放宽：下一个兄弟是 pre **或含 pre**（真实结构是嵌套的 ——
+         * 标签与「包着 pre 的容器」才是兄弟，不直接相邻于 pre）。
+         */
+        var nxtHasPre = false;
+        try {
+          nxtHasPre = nxt !== null && (
+            String(nxt.tagName || '').toLowerCase() === 'pre' ||
+            (nxt.querySelector ? nxt.querySelector('pre') !== null : false)
+          );
+        } catch (e) {}
+        if (nxtHasPre) {
           var ntx = String(node.textContent || '').replace(/^[\\s\\n]+|[\\s\\n]+$/g, '');
           if (
             ntx.length > 0 &&

@@ -193,13 +193,25 @@ function scrape(body) {
 const NL = String.fromCharCode(10)
 const FENCE = String.fromCharCode(96, 96, 96)
 
-/** DeepSeek 风格代码块：语言标签在 pre 外面（真实结构）。 */
+/**
+ * DeepSeek 风格代码块 —— **嵌套结构**（页面 tree 诊断确认的真实形态）：
+ *
+ *     <div class="codeblock">
+ *       <div class="header">ldw</div>     ← 标签在这里
+ *       <div class="body">
+ *         <pre><code>...</code></pre>     ← pre 的直接兄弟里没有标签
+ *       </div>
+ *     </div>
+ *
+ * ⚠️ 早期测试用的是**扁平**结构（标签与 pre 直接相邻），所以测试全绿而
+ * 真实页面仍然抓到裸围栏 —— 「桩比真实简单」导致的假绿（踩过）。
+ */
 function dsCodeBlock(lang, code) {
   return el(
     'div',
     { cls: '_codeblock' },
     el('div', { cls: '_codeheader' }, text(lang)),
-    el('pre', {}, el('code', {}, text(code))),
+    el('div', { cls: '_codebody' }, el('pre', {}, el('code', {}, text(code)))),
   )
 }
 const dsReply = (...children) => el('div', { cls: 'ds-markdown' }, ...children)

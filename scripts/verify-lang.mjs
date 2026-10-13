@@ -237,5 +237,52 @@ console.log('\n[4] 没有语言标签时不猜（避免误判成工具调用）'
   check('⭐⭐ 绝不臆造 ldw', String(r.last).includes(FENCE + 'ldw'), false)
 }
 
+
+console.log('\n[5] ⭐⭐⭐ 嵌套结构：语言标签与「包着 pre 的容器」是兄弟（真实结构）')
+{
+  /**
+   * ## 真实事故（用户实测：「你到底能不能修好」）
+   *
+   * 页面 tree 诊断确认的真实结构：
+   *
+   *     <div class="codeblock">
+   *       <div class="header">ldw</div>     ← 标签在这里
+   *       <div class="body">
+   *         <pre><code>...</code></pre>     ← pre 的直接兄弟里没有标签！
+   *       </div>
+   *     </div>
+   *
+   * 只查 pre 的**直接**兄弟会拿不到标签 ⇒ 输出裸围栏 ⇒ 工具调用退化成纯文本。
+   * 必须**向上遍历祖先链**。
+   */
+  const nested = el('div', { cls: 'ds-markdown' },
+    el('div', { cls: '_codeblock' },
+      el('div', { cls: '_codeheader' }, text('ldw')),
+      el('div', { cls: '_codebody' },
+        el('pre', {}, el('code', {}, text('const r = await write({"path": "a.txt"});'))),
+      ),
+    ),
+  )
+  setup(el('body', {}, nested))
+  const r = JSON.parse(String(eval(script)))
+  console.log('  抓到的 last: ' + JSON.stringify(String(r.last)))
+  check('⭐⭐⭐ 嵌套结构也认语言标记', String(r.last).includes(FENCE + 'ldw'), true)
+  check('⭐⭐ 语言名不泄漏为独立段落', String(r.last).startsWith('ldw'), false)
+  check('⭐ 以围栏开头', String(r.last).startsWith(FENCE + 'ldw'), true)
+}
+
+console.log('\n[6] ⭐⭐ 标签被包在 span 里（另一种真实变体）')
+{
+  const nested = el('div', { cls: 'ds-markdown' },
+    el('div', { cls: '_codeblock' },
+      el('div', { cls: '_codeheader' }, el('span', {}, text('ldw'))),
+      el('div', { cls: '_codebody' }, el('pre', {}, el('code', {}, text('await pwsh({});')))),
+    ),
+  )
+  setup(el('body', {}, nested))
+  const r = JSON.parse(String(eval(script)))
+  check('⭐⭐ span 里的标签也认', String(r.last).includes(FENCE + 'ldw'), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exit(fail === 0 ? 0 : 1)
