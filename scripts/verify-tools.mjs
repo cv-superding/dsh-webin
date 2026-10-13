@@ -293,7 +293,11 @@ console.log('\n[4] 序列化：tool-call 块 → 文本（用实测形状）')
     ],
   }
   const s = serializeMessage(msg)
-  check('含角色标签', s.startsWith('## Assistant'), true)
+  /**
+   * ⚠️ 断言改过：user/assistant **不加角色标记**（实测 `## User` 泄漏进
+   * 网页会话被用户看到 —— 照抄 cuckoo：网页对话本身区分角色，无需标记）。
+   */
+  check('⭐ 不带角色标记（泄漏事故）', s.startsWith('## '), false)
   check('含正文', s.includes('让我看看。'), true)
   check('含 cuckoo 代码块（还原当时形态）', s.includes('```ldw'), true)
   check('含 await 调用', s.includes('await read_image('), true)
@@ -396,8 +400,11 @@ console.log('\n[13] 序列化往返：工具调用历史 → 文本 → 模型�
     { role: 'tool', toolCallId: 'call_1', content: [{ type: 'text', text: '文件内容在这里' }], isError: false },
   ]
   const s = serializeMessages(msgs)
-  check('含用户消息', s.includes('## User') && s.includes('读一下 a.ts'), true)
+  /** ⚠️ user/assistant 不带角色标记（泄漏事故，照抄 cuckoo）。 */
+  check('含用户消息', s.includes('读一下 a.ts'), true)
+  check('⭐ 用户消息不带 ## 标记', s.includes('## User'), false)
   check('含调用还原', s.includes('```ldw') && s.includes('await read('), true)
+  check('⭐ 工具结果带【工具结果】标记', s.includes('【工具结果'), true)
   check('含工具结果', s.includes('【工具结果】') && s.includes('文件内容在这里'), true)
 }
 

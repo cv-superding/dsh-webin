@@ -187,7 +187,9 @@ console.log('\n[3] ⭐ 非法值必须被拒绝并报告（不是静默吞掉）
   check('⭐ 负数回退默认', res.json?.config?.sendDelayMinMs, 2000)
   check('⭐ 超上界回退默认', res.json?.config?.replyTimeoutMs, 600_000)
   check('⭐ 非数字回退默认', res.json?.config?.toolResultLimit, 4000)
-  check('⭐ 非布尔回退默认', res.json?.config?.enableTools, false)
+  /** ⚠️ 默认 true（v3 定论）：模型实测会按协议准备输出工具调用，
+   * 服务端中断才是失败原因 —— 见 config.ts 的 enableTools 注释。 */
+  check('⭐ 非布尔回退默认', res.json?.config?.enableTools, true)
 
   const fields = (res.json?.problems ?? []).map((p) => p.field)
   check('问题里点名字段', fields.includes('sendDelayMinMs'), true)

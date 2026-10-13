@@ -154,8 +154,28 @@ export function serializeMessage(msg: DshMessage, toolResultLimit = TOOL_RESULT_
   if (text !== '') parts.push(text)
   if (parts.length === 0) return ''
 
-  const roleLabel = msg.role === 'assistant' ? 'Assistant' : msg.role === 'user' ? 'User' : msg.role
-  return `## ${roleLabel}\n${parts.join('\n\n')}`
+  /**
+   * ## ⚠️⚠️ 不加 `## User` / `## Assistant` 角色标记（实测泄漏进页面）
+   *
+   * 真实事故（用户截图）：网页会话里出现「## User
+   * 你能调用写工具吗？」—— 角色标记被当成**消息正文**渲染出来，
+   * 用户在页面上看得清清楚楚。
+   *
+   * ## cuckoo 怎么做（照抄）
+   *
+   * cuckoo 的 `serializeMessages` **不加任何角色标记** —— 网页版的
+   * 对话本身已经区分了角色（用户消息在输入框那侧、模型回复在页面流里），
+   * 模型看得到完整上下文，不需要文本标记。加了反而：
+   *   1. 泄漏进页面（用户看到的每条历史都带 ## 前缀）
+   *   2. 浪费 token
+   *   3. 模型可能模仿输出 `## Assistant` 开头
+   *
+   * tool 消息仍保留标记（工具结果需要标识来源），user/assistant 不加。
+   */
+  if (msg.role === 'tool') {
+    return `## Tool\n${parts.join('\n\n')}`
+  }
+  return parts.join('\n\n')
 }
 
 /**

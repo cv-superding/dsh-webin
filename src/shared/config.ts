@@ -110,10 +110,20 @@ export const DEFAULT_CONFIG: WebinConfig = {
   claimGraceMs: 20_000,
   toolResultLimit: 4_000,
   /**
-   * 默认关 —— 实测下发有害无益（协议污染页面 + 网页版有自己的工具
-   * 系统不会输出 ldw 协议）。见 WebinConfig.enableTools 的完整证据链。
+   * ⚠️ 默认**开**（v3 定论）—— 一度错误地默认关，用户的实测推翻了它：
+   *
+   * 用户让模型「调用写工具写文件」，模型**明确按协议准备输出工具调用**
+   * （"produce the tool call. Final content — here goes."）——
+   * 是服务端把生成停了，**不是模型不支持**。
+   *
+   * 之前「网页版自有工具截胡」的结论也错了：模型说 "Let me write the
+   * file with the write tool" 是在**描述 DSH 的工具**（write 是 DSH 的
+   * 工具名），它确实打算输出协议 —— 循环能否跑通取决于协议有没有下发。
+   *
+   * 协议进页面会「可见」是真的，但那是模型输入的一部分（与 cuckoo 一致
+   * —— cuckoo 也把工具目录发进网页），不是缺陷。
    */
-  enableTools: false,
+  enableTools: true,
   snapshotIntervalMs: 30_000,
 
   verboseLog: false,

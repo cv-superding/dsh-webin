@@ -597,7 +597,12 @@ console.log('\n[16] ⭐⭐⭐ 工具协议默认不下发（实测：污染页�
    * 3. 结果：协议白白发，DSH 的工具一样没通
    */
   const cfgSrc = readFileSync(join(ROOT, 'src', 'shared', 'config.ts'), 'utf8')
-  check('⭐⭐⭐ 默认 enableTools: false', /enableTools: false,/.test(cfgSrc), true)
+  /**
+   * ⚠️ 断言改过（v3 定论）：一度默认 false，但用户实测模型**会**按协议
+   * 准备输出工具调用（"produce the tool call"），服务端中断才是失败原因。
+   * 默认 true；「网页版自有工具截胡」的旧结论已撤销。
+   */
+  check('⭐⭐⭐ 默认 enableTools: true', /enableTools: true,/.test(cfgSrc), true)
   /** 注释里要有证据链（防止以后被无意改回）。 */
   check('⭐⭐ 证据链注释在', /网页版 DeepSeek.*有自己的工具系统|有自己的工具系统/.test(cfgSrc), true)
 }
