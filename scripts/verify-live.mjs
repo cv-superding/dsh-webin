@@ -602,6 +602,36 @@ console.log('\n[16] ⭐⭐⭐ 工具协议默认不下发（实测：污染页�
   check('⭐⭐ 证据链注释在', /网页版 DeepSeek.*有自己的工具系统|有自己的工具系统/.test(cfgSrc), true)
 }
 
+
+console.log('\n[17] ⭐⭐⭐ 生成结束闸门：停止按钮在 ⇒ 不交付（42KB 思考事故）')
+{
+  /**
+   * ## 真实事故（用户实测鹈鹕任务）
+   *
+   * 流式生成的消息出现顺序：#1 用户消息 → #2 思考块 → #3 正文。
+   * 交付判据「条数增长 + 3 秒静默」在 #2 刚出现、模型还在思考时
+   * 就会满足（思考写完到正文开始之间很容易超 3 秒）
+   * ⇒ **把 42KB 思考当回复交付**。
+   *
+   * ## 完成信号
+   *
+   * 网页版生成中输入框的发送键（↑）会变成**停止按钮**（方块 ■）；
+   * 结束后变回发送。抓取脚本返回 generating 字段；
+   * 交付判据：generating === true ⇒ 一律不交付。
+   */
+  const hookSrc = readFileSync(join(ROOT, 'src', 'client', 'hook.ts'), 'utf8')
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+
+  check('⭐⭐ 抓取返回 generating', /generating: isGenerating\(\)/.test(hookSrc), true)
+  check('⭐ 停止按钮特征（aria-label 停止/stop）', /aria-label\*="停止"/.test(hookSrc), true)
+  check('⭐⭐ 交付闸门：generating===true 不交付', /\(scraped as \{ generating\?: boolean \}\)\.generating === true/.test(clientSrc), true)
+  /** 字段缺失（旧脚本）时不阻止 —— 宁早勿卡。 */
+  check('⭐⭐ 字段缺失不阻止交付', /generating === true\) \{[\s\S]{0,200}?return/.test(clientSrc), true)
+
+  const cb = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  check('⭐⭐ 产物有 generating', cb.includes('generating') ? true : false, true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

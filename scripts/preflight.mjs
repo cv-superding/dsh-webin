@@ -146,6 +146,29 @@ if (existsSync(libClient)) {
   check('带 ModuleLoader banner', src.includes('window.__ModuleLoader__.load'))
   check('注册 shell.overlay（常驻宿主）', src.includes('shell.overlay'))
   check('注册 conversation.view（占位符）', src.includes('conversation.view'))
+
+  /**
+   * ## ⭐⭐⭐ 产物语法完整性 —— 半截产物会让 DSH 崩溃（实测踩过）
+   *
+   * 一次**被中断的构建**留下半截 lib/client.js（语法坏），
+   * DSH 加载 ⇒ "dsh-webin: import failed" ⇒ **整个 DSH 弹崩溃框**。
+   *
+   * 构建被中断的来源：npm run check 跑到一半被打断（构建是第一环）。
+   * 所以这里用 node --check 逐个验证语法。
+   */
+  const { execSync } = await import('node:child_process')
+  for (const f of [libClient, join(ROOT, 'lib', 'index.js')]) {
+    let ok = false
+    let detail = ''
+    try {
+      execSync(`node --check "${f}"`, { stdio: 'pipe' })
+      ok = true
+    } catch (e) {
+      detail = String(e.stderr ?? e.message).slice(0, 120)
+    }
+    check(`语法完整 ${f.split(/[\\/]/).pop()}`, ok, true)
+    if (!ok) console.log(`       ${detail}`)
+  }
 }
 
 console.log(`\n=== 装配预检：${pass} 通过 / ${fail} 失败 ===`)

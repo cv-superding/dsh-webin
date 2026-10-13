@@ -2061,6 +2061,20 @@ export function LdwHost(): unknown {
                  *
                  * 代价是最快也要等 3 秒才交付 —— 相比「交半截回复」，
                  * 这个代价完全值得。
+                 *
+                 * ## ⭐⭐ 还要过「生成结束」闸门（真实事故：42KB 思考被当回复）
+                 *
+                 * 流式生成的消息出现顺序：#1 用户消息 → **#2 思考块** → #3 正文。
+                 * 「条数增长 + 3 秒静默」在 **#2 刚出现、模型还在思考** 时就会
+                 * 满足（思考是长文本，写完到开始正文之间很容易超 3 秒）
+                 * ⇒ **把思考当回复交付**（用户实测收到 42KB 思考）。
+                 *
+                 * 真正的完成信号：网页版生成中输入框的发送键（↑）会变成
+                 * **停止按钮**（方块 ■）；生成结束变回发送。抓取脚本返回
+                 * `generating` 字段 —— **仍在生成时一律不交付**。
+                 *
+                 * ⚠️ `generating === undefined`（旧抓取脚本/字段缺失）时不阻止 ——
+                 * 宁可早交付也不卡死（卡死是用户最难受的）。
                  */
                 const now = Date.now()
                 if (scrapedRef.current !== last) {
@@ -2071,6 +2085,14 @@ export function LdwHost(): unknown {
                 }
                 /** 内容没变 —— 还要确认已经静默够久。 */
                 if (now - scrapedChangedAtRef.current < STABLE_MS) {
+                  return
+                }
+                /**
+                 * ⭐⭐ 生成结束闸门：页面还在生成（停止按钮在）⇒ 不交付。
+                 */
+                if ((scraped as { generating?: boolean }).generating === true) {
+                  console.log('[dsh-webin] 内容静默但页面仍在生成（停止按钮在）—— 继续等')
+                  scrapedChangedAtRef.current = now
                   return
                 }
 

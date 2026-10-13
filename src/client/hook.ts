@@ -1162,6 +1162,25 @@ export function buildScrapeScript(): string {
       }
     } catch (e) { /* 滚动失败不影响抓取 */ }
 
+    /**
+     * ⭐ 页面是否**仍在生成**（停止按钮存在）。
+     *
+     * 生成中输入框的发送键会变成停止键（方块图标）。识别特征：
+     * aria-label/title 含「停止/stop」的可点击元素。
+     * 找不到任何特征时返回 false（不阻止交付 —— 宁早勿卡）。
+     */
+    const GENERATING_SIG = '[aria-label*="停止"], [aria-label*="stop" i], [title*="停止"], [title*="stop" i]';
+    function isGenerating() {
+      try {
+        var stops = document.querySelectorAll(GENERATING_SIG);
+        for (var gi = 0; gi < stops.length; gi++) {
+          var st = stops[gi];
+          if (st.offsetWidth > 0 && st.offsetHeight > 0) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
     var list = [];
     var usedSelector = '';
     var root = mainRoot();
@@ -1272,6 +1291,8 @@ export function buildScrapeScript(): string {
 
     return JSON.stringify({
       ok: list.length > 0,
+      /** ⭐⭐ 页面是否仍在生成（停止按钮存在）—— 交付判据用它防「思考被当回复」。 */
+      generating: isGenerating(),
       /** 全部候选；**最后一条**是最新一轮的回复。 */
       all: list,
       last: list.length > 0 ? list[list.length - 1] : '',
