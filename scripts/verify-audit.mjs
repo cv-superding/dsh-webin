@@ -367,7 +367,11 @@ console.log('\n[Q] ⭐⭐ 点火前必须复查（填完字到按发送之间隔
   check('清空支持 contenteditable', /execCommand\('selectAll'/.test(chatSrc), true)
   /** ⚠️ 复查必须在触发**之前**。 */
   const iProbe = clientSrc.indexOf('点火前发现任务已取消')
-  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider))')
+  /**
+   * ⚠️ 现在 trigger 调用是**多行**的（多了 expectText 参数）——
+   * 用只匹配函数名的前缀，别把参数写死（踩过：加了参数后匹配不到）。
+   */
+  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider)')
   check('⭐ 复查在触发之前', iProbe > 0 && iTrig > 0 && iProbe < iTrig, true)
 }
 

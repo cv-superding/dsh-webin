@@ -870,6 +870,33 @@ export function buildScrapeScript(): string {
       } catch (e) { return false; }
     }
 
+    /**
+     * 元素是否**存在且不是明确隐藏**（比 visible 宽）。
+     *
+     * ## ⚠️ 挑回复容器要用这个，不能用 visible
+     *
+     * 真实页面上「高度为 0 但内容在」的情况非常多：
+     *   - 代码块收起时 pre 的高度是 0（用户截图里那个展开按钮）
+     *   - 思考区收起时容器高度是 0
+     *   - **正在生成的回复骨架高度可能还是 0**（节点刚插入、还没撑开）
+     *
+     * 用 visible 过滤候选容器的话，最后一种会让「条数」永远不增长
+     * ⇒ 判定「本轮回复还没来」⇒ 卡住。
+     * 用户报的「网页版早就有答案了，DSH 还在等」很可能就是这个。
+     *
+     * 这里只排除**明确不在页面上**的：display:none / visibility:hidden /
+     * aria-hidden=true。高度为 0 一律算存在。
+     */
+    function present(el) {
+      if (!el) return false;
+      try {
+        var s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') return false;
+        if (el.getAttribute && el.getAttribute('aria-hidden') === 'true') return false;
+        return true;
+      } catch (e) { return true; }
+    }
+
     /** 该节点是「界面元素」而不是「回复内容」吗。 */
     function isChrome(el) {
       var tag = el.tagName;
@@ -1023,7 +1050,11 @@ export function buildScrapeScript(): string {
       try { found = document.querySelectorAll(CANDIDATES[c]); } catch (e) { continue; }
       var picked = [];
       for (var i = 0; i < found.length; i++) {
-        if (!visible(found[i])) continue;
+        /**
+         * 用 present 而不是 visible —— 正在生成的回复骨架高度可能是 0，
+         * 但它确实是本轮的新回复。见 present 的说明。
+         */
+        if (!present(found[i])) continue;
         var t = tidy(render(found[i]));
         /** 太短的多半是标题/占位。 */
         if (t.length >= 8) picked.push(t);
@@ -1031,12 +1062,12 @@ export function buildScrapeScript(): string {
       if (picked.length > 0) { list = picked; usedSelector = CANDIDATES[c]; break; }
     }
 
-    /** 最后手段：页面上最长的可见 div。 */
+    /** 最后手段：页面上最长的 div（同样用 present）。 */
     if (list.length === 0) {
       var all = document.querySelectorAll('div');
       var best = '';
       for (var k = 0; k < all.length; k++) {
-        if (!visible(all[k])) continue;
+        if (!present(all[k])) continue;
         var txt = tidy(render(all[k]));
         if (txt.length > best.length) best = txt;
       }

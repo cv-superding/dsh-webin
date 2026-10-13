@@ -1674,6 +1674,28 @@ export function LdwHost(): unknown {
          */
         const giveUpMs = Math.max(60_000, Math.round(currentConfig().replyTimeoutMs * 0.8))
 
+        /**
+         * ## ⭐⭐ 早期放弃：页面上一轮都没开始，就别等 8 分钟
+         *
+         * ## 为什么需要（用户报的核心问题）
+         *
+         * 用户的截图：**网页版里根本没有那条消息**，DSH 却一直「深度求索中」，
+         * 直到超时才报错。
+         *
+         * 根因是「发送其实没成功，但插件以为成功了」。现在 trigger 会确认
+         * （核对内容 + 探输入框清空），但**确认本身也可能被骗过**
+         * （比如页面清空了输入框却没真发出去）。
+         *
+         * 所以再加一道：**发出后 30 秒内页面上必须出现「正在生成」的迹象** ——
+         * 条数增长、或者内容变化、或者思考区出现。
+         * 一样都没有 ⇒ 大概率根本没发出去 ⇒ **立刻报错**，让用户重试。
+         *
+         * 为什么是 30 秒：DeepSeek 正常几百毫秒内就会插入用户消息并开始
+         * 渲染回复骨架。30 秒还没动静，基本可以断定没发出去。
+         * 而正常生成中的页面**每 1.5 秒就会被我们读到内容变化**，不会误伤。
+         */
+        const EARLY_GIVE_UP_MS = 30_000
+
         if (hasPending && waitedMs > 3_000) {
           const jobId = pendingJobRef.current!
           const scrapedRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
@@ -1758,6 +1780,44 @@ export function LdwHost(): unknown {
                     status: 'finished',
                     via: 'dom',
                     ...(chatUrl === '' ? {} : { chatUrl }),
+                  }),
+                })
+                return
+              }
+
+              /**
+               * ## ⭐⭐ 早期放弃：发出后 30 秒页面还没动静 ⇒ 根本没发出去
+               *
+               * 见 `EARLY_GIVE_UP_MS` 的说明。这里只判「**一点动静都没有**」：
+               *   - 条数没增长
+               *   - 内容没变化
+               *   - 连思考区都是空的
+               *
+               * 三者都不成立才继续等 —— 正常生成中一定会命中至少一个。
+               *
+               * ⚠️ 必须放在「交付判据」**之后**：先看有没有结果可交，
+               * 没有再判是不是压根没发出去。
+               */
+              if (
+                waitedMs > EARLY_GIVE_UP_MS &&
+                !countGrew &&
+                !contentChanged &&
+                think.trim() === ''
+              ) {
+                console.warn('[dsh-webin] 发出后 30 秒页面无动静，判定没发出去', {
+                  waitedMs,
+                  count,
+                  baseline: baselineRef.current,
+                  lastChars: last.length,
+                })
+                clearPending()
+                await fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
+                  method: 'PUT',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({
+                    error:
+                      '消息似乎没有发出去：发出后 30 秒内网页版没有任何反应' +
+                      '（既没有新消息，也没有开始生成）。请确认 LDW 页面正常后重试。',
                   }),
                 })
                 return
@@ -1972,6 +2032,30 @@ export function LdwHost(): unknown {
               baselineTextRef.current = ''
               scrapedChangedAtRef.current = Date.now()
             }
+          } else {
+            /**
+             * ## ⚠️ 基线读取**超时**时必须也重置（修掉的真实 bug）
+             *
+             * 早期这个分支**什么都不做** —— 于是 `baselineRef` 保留
+             * **上一轮**的值。而 `scrapedRef` 在上面已经清成 `undefined`。
+             *
+             * 后果很隐蔽：
+             *   - 上一轮结束时页面有 5 条回复 ⇒ `baselineRef = 5`
+             *   - 本轮页面也是 5 条（新回复还没渲染）⇒ `countGrew = false`
+             *   - `baselineTextRef` 还是上一轮的内容 ⇒ 若内容恰好相同，
+             *     `contentChanged = false`
+             *   - ⇒ **两个判据都不成立**，一路等到早放弃 / 超时
+             *
+             * 用户看到的就是「网页版早就有答案了，DSH 还在等」。
+             *
+             * 重置成 0 的代价：本轮可能把「页面上最长的那条内容」当成本轮结果。
+             * 但这有 `STABLE_MS` 静默判据兜底，而且**比卡死好** ——
+             * 卡死是用户明确报过的、最难受的现象。
+             */
+            console.warn('[dsh-webin] 基线读取超时，重置为 0（宁可放宽也不卡死）')
+            baselineRef.current = 0
+            baselineTextRef.current = ''
+            scrapedChangedAtRef.current = Date.now()
           }
         }
         // 记录派发时刻：只接受此刻之后产生的 done 事件
@@ -2219,7 +2303,19 @@ export function LdwHost(): unknown {
          *
          * 超时给 15 秒：脚本内部最多等 1.2 秒，剩下的是跨进程开销余量。
          */
-        const trigRaw = await execJs<string>(el, buildTriggerScript(sendHintsFor(provider)), 15_000)
+        const trigRaw = await execJs<string>(
+          el,
+          /**
+           * ⚠️ 把**要发的字**传进去（第三个参数）—— trigger 会先核对
+           * 输入框里确实是这段内容才点火。
+           *
+           * 原因：fill 和 trigger 之间隔 2–4 秒，页面可能重渲染换掉
+           * 输入框节点。不核对的话会发空消息或什么都不发生，而插件不知道，
+           * 继续等一个永远不会来的回复（用户报的「网页版里没那条消息」）。
+           */
+          buildTriggerScript(sendHintsFor(provider), prompt),
+          15_000,
+        )
         const trig =
           trigRaw === EXEC_TIMEOUT
             ? { ok: false, how: 'timeout', message: '触发发送超时（页面可能正在导航）' }
@@ -2238,13 +2334,17 @@ export function LdwHost(): unknown {
           clearPending()
           /**
            * 错误信息要**能照做** —— 用户看到「发送失败」时得知道下一步。
-           * `input-not-cleared` 是最常见的那种（点了没生效），
-           * 明确提示「重试」而不是让他去猜。
+           *
+           * 两种常见失败分开说：
+           *   - `input-lost`      字不见了（页面重渲染）⇒ 重试
+           *   - `input-not-cleared` 点了但没生效 ⇒ 重试
            */
           const detail =
-            trig.reason === 'input-not-cleared'
-              ? '消息没有真正发出去（输入框没被清空）。可能是页面还没就绪或按钮被遮挡，请重试。'
-              : (trig.message ?? '触发发送失败')
+            trig.reason === 'input-lost'
+              ? '输入框里的内容在发送前丢失了（页面重渲染）—— 消息没有发出去，请重试。'
+              : trig.reason === 'input-not-cleared'
+                ? '消息没有真正发出去（输入框没被清空）。可能是页面还没就绪或按钮被遮挡，请重试。'
+                : (trig.message ?? '触发发送失败')
           await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },

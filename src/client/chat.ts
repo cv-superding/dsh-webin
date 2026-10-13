@@ -238,7 +238,7 @@ export function buildFillScript(text: string, hints?: SendHints): string {
  *
  * @param hints - 平台声明（发送按钮选择器、加分/否决特征）
  */
-export function buildTriggerScript(hints?: SendHints): string {
+export function buildTriggerScript(hints?: SendHints, expectText?: string): string {
   const inputSelectors = hints?.inputSelectors ?? [
     'textarea[placeholder*="DeepSeek"]',
     'textarea',
@@ -258,6 +258,37 @@ export function buildTriggerScript(hints?: SendHints): string {
   var SEND_SELECTORS = ${JSON.stringify(sendSelectors)};
   var SIGNATURES = ${JSON.stringify(hints?.signatures ?? [])};
   var VETOES = ${JSON.stringify(hints?.vetoes ?? [])};
+  /**
+   * 期望输入框里有的内容（fill 阶段填进去的）。
+   *
+   * ## ⭐ 为什么要把「要发的字」传进来（本轮新修）
+   *
+   * fill 和 trigger 是**两次独立的 executeJavaScript**，中间隔 2–4 秒。
+   * 这期间页面可能重渲染（React 换掉了输入框节点），于是 trigger 找到的
+   * 输入框**可能不是 fill 填的那个** —— 那时点发送会：
+   *   - 发出一条**空消息**，或者
+   *   - 什么都没发生（新节点里没内容，发送键是禁用态）
+   *
+   * 而插件完全不知道，继续等一个永远不会来的回复。
+   *
+   * 现在把期望文本传进来，**点火前先核对**：输入框里确实有我们填的字
+   * 才按发送。对不上就明确报错（而不是赌一把）。
+   *
+   * 空串表示不做这个校验（调用方没传）。
+   */
+  var EXPECT = ${JSON.stringify(expectText ?? '')};
+
+  /**
+   * 归一化后比较（换行 / 首尾空白 / 中间的连续空白都不该导致误判）。
+   * 只比较**前 200 字符** —— 长 prompt 尾部可能被输入框截断显示，
+   * 而我们只需要确认「是同一段内容」。
+   */
+  function sameText(a, b) {
+    if (b === '') return true;
+    var na = String(a || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
+    var nb = String(b || '').replace(/\\s+/g, ' ').trim().slice(0, 200);
+    return na === nb;
+  }
 
   function visible(el) {
     if (!el) return false;
@@ -362,6 +393,49 @@ export function buildTriggerScript(hints?: SendHints): string {
   try {
     var input = findInput();
     if (!input) return JSON.stringify({ ok: false, message: '触发时找不到输入框', url: location.href });
+
+    /**
+     * ## ⭐ 点火前核对：输入框里确实是我们填的字吗
+     *
+     * 见 EXPECT 的说明 —— 两次调用之间页面可能重渲染，换掉了输入框节点。
+     * 那时按发送会发空消息或什么都不发生，而插件不知道。
+     *
+     * ⚠️ 核对失败**不直接放弃**，而是重新找一遍输入框：
+     * React 换节点是常见现象，新节点里内容通常还在（React 会保留 state）。
+     * 重找之后还没有，才报错。
+     */
+    if (!sameText(readInput(input), EXPECT)) {
+      /** 重新扫一遍所有候选，看是不是换了节点。 */
+      var again = null;
+      for (var q = 0; q < INPUT_SELECTORS.length && !again; q++) {
+        var ql;
+        try { ql = document.querySelectorAll(INPUT_SELECTORS[q]); } catch (e) { continue; }
+        for (var qj = 0; qj < ql.length; qj++) {
+          if (visible(ql[qj]) && !disabled(ql[qj]) && sameText(readInput(ql[qj]), EXPECT)) {
+            again = ql[qj];
+            break;
+          }
+        }
+      }
+      if (again) {
+        /** 找到带内容的那个节点 —— 用它继续。 */
+        input = again;
+      } else {
+        /**
+         * 全页都找不到我们填的字 ⇒ **明确失败**。
+         *
+         * 这是「网页版里没有那条消息」的典型现场：字丢了，
+         * 再点发送也没用。直接报错比干等好。
+         */
+        return JSON.stringify({
+          ok: false,
+          reason: 'input-lost',
+          message: '输入框里的内容不见了（页面可能重渲染过）—— 没有发送，请重试',
+          got: readInput(input).slice(0, 60),
+          url: location.href
+        });
+      }
+    }
 
     /**
      * 收集候选发送控件：平台声明的语义选择器优先，再用「输入框附近」

@@ -77,7 +77,8 @@ function el(tag, opts = {}, ...children) {
     tagName: tag.toUpperCase(),
     className: opts.cls ?? '',
     attrs: opts.attrs ?? {},
-    /** 默认可见；`hidden: true` 表示不可见。 */
+    /** 默认可见；`hidden: true` 表示不可见（见 getComputedStyle 的说明）。 */
+    __hidden: opts.hidden === true,
     offsetWidth: opts.hidden === true ? 0 : 100,
     offsetHeight: opts.hidden === true ? 0 : 20,
     childNodes: children.flat().filter((c) => c !== null && c !== undefined && c !== ''),
@@ -167,7 +168,28 @@ function run(script, roots) {
       return this.querySelectorAll(sel)[0] ?? null
     },
   }
-  g.getComputedStyle = () => ({ visibility: 'visible', display: 'block', opacity: '1' })
+  /**
+   * 桩的 getComputedStyle。
+   *
+   * ⚠️ 必须反映**真实的隐藏语义** —— 否则 `present()` 测不出来（踩过）：
+   *   - `hidden: true` 的 fixture → `display:none`
+   *   - 带 `hidden` 属性 / `aria-hidden="true"` → `display:none`
+   *
+   * 而**高度为 0 但没被隐藏**的元素（折叠的代码块、刚插入的回复骨架）
+   * 必须报成可见 —— 那正是 [19] 要测的场景。
+   */
+  g.getComputedStyle = (node) => {
+    const attrs = node?.attrs ?? {}
+    const isHidden =
+      node?.__hidden === true ||
+      attrs.hidden !== undefined ||
+      attrs['aria-hidden'] === 'true'
+    return {
+      visibility: isHidden ? 'hidden' : 'visible',
+      display: isHidden ? 'none' : 'block',
+      opacity: '1',
+    }
+  }
   g.location = { href: 'https://chat.deepseek.com/a/chat/s/test' }
   try {
     return JSON.parse(eval(script))
@@ -461,6 +483,61 @@ console.log('\n[17] ⭐⭐ 思考内容**不得混进正文**（嵌套结构下�
   check('⭐ 思考被单独读到', r.think.includes('不该出现在正文里'), true)
   check('⭐⭐ 正文含真正的回复', r.last.includes('这段才是真正的回复正文内容'), true)
   check('⭐⭐ 正文**不含**思考', r.last.includes('不该出现在正文里'), false)
+}
+
+console.log('\n[18] ⭐⭐⭐ 折叠元素的内容不能被丢掉（用户报的核心问题之一）')
+{
+  /**
+   * ## 真实场景（用户截图）
+   *
+   * 回复里有一段 ldw 代码块，它是**折叠状态**（有展开按钮）；
+   * 思考区「已思考（用时 N 秒）」也是折叠的。
+   *
+   * 折叠元素的 `offsetHeight` 是 **0**。而早期代码用 `visible()`（要求
+   * 高度 > 0）来过滤候选容器 —— 于是：
+   *   - 高度为 0 的回复骨架被跳过 ⇒ 条数不增长 ⇒ 判定「回复还没来」
+   *   - 折叠的代码块内容被丢掉 ⇒ 工具调用丢失
+   *
+   * 后果正是用户报的：**网页版早就有答案了，DSH 还在等**。
+   *
+   * 修法：
+   *   - 挑容器用 `present()`（只排除 display:none / visibility:hidden）
+   *   - `render()` 内部**不用任何可见性判据**过滤节点
+   */
+  check('⭐⭐ 有 present 判据', /function present\(el\)/.test(script), true)
+  check('⭐⭐ 候选容器用 present', /if \(!present\(found\[i\]\)\) continue/.test(script), true)
+  check('⭐⭐ 兜底也用 present', /if \(!present\(all\[k\]\)\) continue/.test(script), true)
+  check('⭐ present 排除 display:none', /s\.display === 'none'/.test(script), true)
+  check('⭐ present 排除 visibility:hidden', /s\.visibility === 'hidden'/.test(script), true)
+  check('visible 仍然存在', /function visible\(el\)/.test(script), true)
+
+  /** render 内部不能用可见性判据 —— 否则折叠的代码块会被丢掉。 */
+  const iRender = script.indexOf('function render(node, forThink)')
+  const iThink = script.indexOf('function readThink()')
+  check('找到 render', iRender > 0, true)
+  check('找到 readThink', iThink > iRender, true)
+  const renderBody = script.slice(iRender, iThink)
+  check('⭐⭐ render 内部不用 visible 过滤', /visible\(/.test(renderBody), false)
+  check('⭐ render 内部也不用 present 过滤（内容一律读）', /present\(/.test(renderBody), false)
+}
+
+console.log('\n[19] ⭐⭐ 高度为 0 的回复也要算「有一条回复」')
+{
+  /**
+   * 页面刚插入回复节点时高度可能还是 0（还没撑开）。
+   * 那时必须**算作已出现**，否则条数永远不增长。
+   *
+   * 桩里 getComputedStyle 返回 display:block（= 存在），
+   * 但 offsetHeight 为 0 —— 模拟「正在生成、还没撑开」。
+   */
+  const reply = el('div', { cls: 'ds-markdown' }, el('p', {}, text('这条回复的高度是 0，但内容在。')))
+  Object.defineProperty(reply, 'offsetHeight', { value: 0, configurable: true })
+  Object.defineProperty(reply, 'offsetWidth', { value: 0, configurable: true })
+
+  const r = run(script, [reply])
+  check('⭐⭐ 高度 0 也算一条回复', r.count, 1)
+  check('⭐⭐ 内容读得到', r.last.includes('高度是 0，但内容在'), true)
+  check('命中 ds-markdown', r.selector, '.ds-markdown')
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

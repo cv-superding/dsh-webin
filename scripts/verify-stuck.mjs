@@ -147,7 +147,11 @@ console.log('\n[2] ⭐ 发送拆成两个短调用（照 cuckoo 的架构）')
   check('用 pickSendDelay 取延迟', /pickSendDelay\(cfgNow\.sendDelayMinMs/.test(clientSrc), true)
   /** 填充与触发是两次独立调用。 */
   const iFill = clientSrc.indexOf('buildFillScript(prompt')
-  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider))')
+  /**
+   * ⚠️ 只匹配函数名前缀 —— 现在调用是多行的（多了 expectText 参数），
+   * 把参数写死会在加参数时误报失败（踩过）。
+   */
+  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider)')
   check('⭐ 两次独立调用（填充在前）', iFill > 0 && iTrig > iFill, true)
 }
 
@@ -329,7 +333,17 @@ console.log('\n[10] ⭐ executeJavaScript 全部有超时护栏（防静默死�
   check('⭐ 有 EXEC_TIMEOUT sentinel', /export const EXEC_TIMEOUT/.test(clientSrc), true)
   /** 三个短调用都走 execJs（各自独立超时）。 */
   check('⭐ 填充走 execJs', /execJs<string>\(\s*el,\s*buildFillScript\(/.test(clientSrc), true)
-  check('⭐ 触发走 execJs', /execJs<string>\(el, buildTriggerScript\(/.test(clientSrc), true)
+  /**
+   * ⚠️ 这个调用跨了多行，而且中间夹着 JSDoc 注释 ——
+   * 所以不能用「execJs 紧跟 buildTriggerScript」那种紧邻匹配。
+   * 改成：确认 buildTriggerScript 调用**出现在某个 execJs 调用内部**
+   * （用「往前找最近的 execJs」判断）。
+   */
+  {
+    const iTrigCall = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider)')
+    const before = clientSrc.slice(Math.max(0, iTrigCall - 400), iTrigCall)
+    check('⭐ 触发走 execJs', iTrigCall > 0 && /execJs<string>\(/.test(before), true)
+  }
   check('⭐ 抓 DOM 走 execJs', /execJs<string>\(el, buildScrapeScript\(\), 12_000\)/.test(clientSrc), true)
   check('⭐ drain 走 execJs', /execJs<string>\(el, buildDrainScript\(\), 10_000\)/.test(clientSrc), true)
   check('⭐ 思考脚本走 execJs', /execJs<string>\(el, buildThinkingScript/.test(clientSrc), true)
