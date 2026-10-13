@@ -1025,6 +1025,17 @@ export async function apply(ctx: {
           loggedIn?: boolean
           hasGuest?: boolean
           replyCount?: number
+          /** ⭐ 抓取诊断 —— 页面上到底抓到了什么。 */
+          scrape?: {
+            selector?: string
+            count?: number
+            root?: string
+            lastLen?: number
+            head?: string
+            at?: number
+            trace?: unknown[]
+            fallback?: string
+          }
         }
         try {
           payload = JSON.parse(body) as typeof payload
@@ -1042,6 +1053,17 @@ export async function apply(ctx: {
           loggedIn: payload.loggedIn === true,
           hasGuest: payload.hasGuest === true,
           replyCount: typeof payload.replyCount === 'number' ? payload.replyCount : 0,
+          /**
+           * ## ⚠️ 这里原来**漏存 scrape** —— 诊断数据到 host 就被丢了
+           *
+           * 症状：client 侧 payload 里明明有 `scrape`（产物核对过），
+           * 但 `/status` 永远看不到 —— 因为 handler 只挑几个字段
+           * 重新组装，没读 `payload.scrape`。
+           *
+           * 教训：**类型上加字段 ≠ 运行时会保留** ——
+           * 这种「手工挑字段」的写法每加一个字段都要记得同步。
+           */
+          ...(payload.scrape === undefined ? {} : { scrape: payload.scrape }),
         })
         sendJson(res, 200, { ok: true, clients: liveClients().length })
         return

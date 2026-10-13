@@ -268,5 +268,35 @@ console.log('\n[7] ⭐⭐⭐ 心跳不能因为主线程忙就被判掉线（实
   )
 }
 
+
+console.log('\n[8] ⭐⭐⭐ 心跳里的诊断字段不能被 handler 丢掉')
+{
+  /**
+   * ## 真实事故
+   *
+   * client 侧 payload 里明明有 `scrape`（产物核对过），但 /status
+   * 永远看不到 —— 因为 host 的 heartbeat handler 是**手工挑字段**
+   * 重新组装 beats 的，加类型时忘了同步 handler。
+   *
+   * 这类 bug 的特征：**类型上有字段 ≠ 运行时会保留**。
+   * 所以断言要直接查 handler 里有没有真的存进去。
+   */
+  const hostSrc = readFileSync(join(ROOT, 'src', 'host', 'index.ts'), 'utf8')
+
+  /** 找到 heartbeat handler 里 beats.set 的那段。 */
+  const i = hostSrc.indexOf('beats.set(clientId, {')
+  check('找到 heartbeat 的 beats.set', i > 0, true)
+  const seg = hostSrc.slice(i, i + 900)
+
+  check('⭐⭐ handler 里存了 scrape', /scrape: payload\.scrape/.test(seg), true)
+  /** /status 的 detail 也要暴露它。 */
+  check('⭐⭐ /status 暴露 scrape', /scrape: c\.scrape/.test(hostSrc), true)
+
+  /** 产物里也要在（源码对了但没构建 = 用户跑旧代码）。 */
+  const bundle = readFileSync(join(ROOT, 'lib', 'index.js'), 'utf8')
+  check('⭐⭐ 产物里 handler 存 scrape', /scrape: payload\.scrape/.test(bundle), true)
+  check('⭐⭐ 产物里 /status 暴露 scrape', /scrape: c\.scrape/.test(bundle), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
