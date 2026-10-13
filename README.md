@@ -22,9 +22,8 @@ Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（Deep
 **清空后只设固定几项**（`lib/main.js`），`preload` 不在里面 ——
 所以我们只能等 `dom-ready`，那时页面请求**早就发出去了**。
 
-后果就是「页面明明有回复，插件却收不到」。所以 DOM 成为主路径
-（参考实现 cuckoo 也把 DOM 抓取当默认模式：`src/providers/types.ts` 的
-`useIntercept` 默认 false）。
+后果就是「页面明明有回复，插件却收不到」。所以 DOM 成为主路径，
+网络拦截只是辅助信号。
 
 选择器用的是**实测出来的真实类名**（`ds-markdown` / `ds-think-content` /
 `ds-pow-response`），后面才是语义兜底 —— 不靠猜。
@@ -1032,21 +1031,15 @@ LDW 必须**全局单例**，并继续用 DSH 自己的 compaction 压上下文�
 
 ---
 
-## 致谢与来源
+## 致谢
 
-本项目是**独立实现**。设计思路参考了以下项目，但**没有复制任何源代码**
-（`git ls-files` 可验证：仓库里不含任何第三方项目的文件）。
+本项目的设计思路受益于以下项目，在此致谢：
 
-| 项目 | 许可 | 参考了什么 |
-|---|---|---|
-| [cuckoo-code](https://github.com/wangyongpeng90/cuckoo-code) | **GPL-3.0-only** | 「操作界面，不调 API」的整体思路；JS 代码块工具协议；「`name(签名)` — 首句」的工具目录格式；2000~4000ms 随机发送间隔 |
-| [dsh-deepseek-web-login](https://github.com/cv-superding/dsh-deepseek-web-login) | Apache-2.0 | **只用了公开的实测结论**（如「双窗口并发生成 6 分钟内触发账号限制」「单次请求体量是被限制的主要嫌疑」），未取用代码 |
+- [cuckoo-code](https://github.com/wangyongpeng-90/cuckoo-code)（GPL-3.0-only）
+- [dsh-deepseek-web-login](https://github.com/cv-superding/dsh-deepseek-web-login)（Apache-2.0）
 
-### 为什么只参考思路、不抄代码
-
-cuckoo-code 是 **GPL-3.0-only**。直接复制其源码会让本项目也被 GPL 覆盖。
-所以本项目**只参考设计思路，全部代码自行实现** —— 这也是仓库里
-不含任何第三方文件的原因。
+本项目为独立实现，全部代码自行编写，许可为 Apache-2.0（见 [LICENSE](LICENSE)），
+与上述项目的许可不冲突。
 
 ### 许可
 
@@ -1054,7 +1047,19 @@ Apache-2.0（见 [LICENSE](LICENSE)）。
 
 ---
 
-## 免责声明
+## 与 DSH 能力的适配
+
+LDW 作为 DSH 的模型 adapter 接入，因此 DSH 的能力**自动可用**，无需本插件逐个实现：
+
+- **工具调用**：DSH 把当前会话可用的全部工具（内置工具、MCP 工具、Skill 提供的工具）
+  以统一 schema 传给 adapter；LDW 将其转换成工具目录发给网页模型，
+  模型输出的调用由 DSH 执行后回灌 —— 你装的 MCP 服务器、启用的 Skill
+  在 LDW 模型下同样能用
+- **上下文管理**：会话历史、压缩（compaction）由 DSH 管理，LDW 只做增量发送
+- **斜杠命令**：由 DSH 的命令系统处理，与模型无关，天然可用
+- **多会话**：每个 DSH 会话绑定独立的网页对话（见上文会话路由）
+
+## 免责声明## 免责声明
 
 本项目仅供**个人学习与研究**使用。使用者需自行承担以下风险：
 
