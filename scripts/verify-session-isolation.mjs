@@ -85,7 +85,7 @@ console.log('\n[3] ⭐⭐⭐ 领活必须按会话过滤（核心）')
   check('⭐ claimNext 接收 sessionId', /claimNext\(platform\?: string, sessionId\?: string\)/.test(adapterSrc), true)
   check('⭐⭐ 任务带 sessionId 时严格匹配', /if \(job\.sessionId !== undefined && job\.sessionId !== sessionId\) continue/.test(adapterSrc), true)
   /** 记录被谁领走（诊断）。 */
-  check('⭐ 记录 claimedBy', /job\.claimedBy = sessionId \?\? '\(未上报\)'/.test(adapterSrc), true)
+  check('⭐ 记录 claimedBy', /job\.claimedBy = hasIdentity \? sessionId : '\(未上报\)'/.test(adapterSrc), true)
   /** 路由要把 ?session= 传进去。 */
   check('⭐⭐ 路由读 ?session=', /url\.searchParams\.get\('session'\)/.test(hostSrc), true)
   check('⭐⭐ 路由传给 claimNext', /queue\.claimNext\(platform, session\)/.test(hostSrc), true)
@@ -144,7 +144,7 @@ console.log('\n[7] ⭐ 向后兼容：老任务不能被卡住')
     true,
   )
   /** 注释里要写明这个取舍。 */
-  check('⭐ 注释说明了取舍', /否则那些任务\s*\n?\s*\*?\s*会永远躺在队列里没人领/.test(adapterSrc), true)
+  check('⭐ 注释说明了取舍', /任一方缺信息.*放行/.test(adapterSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

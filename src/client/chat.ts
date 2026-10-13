@@ -422,17 +422,40 @@ export function buildTriggerScript(hints?: SendHints, expectText?: string): stri
         input = again;
       } else {
         /**
-         * 全页都找不到我们填的字 ⇒ **明确失败**。
+         * ## ⚠️ 找不到「带我们那段字」的输入框时，**不能直接判失败**
          *
-         * 这是「网页版里没有那条消息」的典型现场：字丢了，
-         * 再点发送也没用。直接报错比干等好。
+         * 第一版直接报 「input-lost」。但有几种**正常**情况会走到这里：
+         *
+         *   1. **页面已经接受了这条消息**（用户手快点了发送、或按了快捷键），
+         *      输入框被清空 ⇒ 当然找不到我们的字
+         *   2. React 重渲染把内容换成等价的 DOM（空白/换行不同），
+         *      「sameText」 的归一化没覆盖到
+         *
+         * 这两种情况下判失败会让用户看到**假的** send-failed，
+         * 而消息其实已经发出去了。
+         *
+         * 所以分情况：
+         *   - 输入框**空着** ⇒ 内容已被搬走 ⇒ 视为已发送（交给后续 DOM 轮询确认）
+         *   - 输入框**有内容但不是我们的** ⇒ fill 被顶掉了 ⇒ 报错
+         *     （这时发出去会发错内容，必须拦）
          */
+        var current = readInput(input);
+        if (current.trim() === '') {
+          return JSON.stringify({
+            ok: true,
+            how: 'already-sent',
+            method: 'none',
+            confirmed: false,
+            note: 'input-empty-before-send',
+            url: location.href,
+          });
+        }
         return JSON.stringify({
           ok: false,
           reason: 'input-lost',
-          message: '输入框里的内容不见了（页面可能重渲染过）—— 没有发送，请重试',
-          got: readInput(input).slice(0, 60),
-          url: location.href
+          message: '输入框里的内容变了（不是刚填进去的那段）—— 没有发送，请重试',
+          got: current.slice(0, 60),
+          url: location.href,
         });
       }
     }
@@ -496,39 +519,66 @@ export function buildTriggerScript(hints?: SendHints, expectText?: string): stri
      *
      * 早期这里点完就返回 ok:true，**从不验证**。于是「点了但没生效」
      * （按钮被遮挡 / 是禁用态 / 点了别的元素）时，插件以为发出去了，
-     * 一路等一个**永远不会来的回复** —— 用户看到的正是：
-     *
-     *   网页版里根本没有那条消息，DSH 却一直「深度求索中」。
+     * 一路等一个**永远不会来的回复**。
      *
      * ## 判据：输入框被清空
      *
      * 页面接受发送时**一定会清空输入框**（把内容搬进消息列表）。
-     * 这个信号不依赖任何注入时机（hook 装不上也能用），
-     * 而且是**页面自己做的动作**，比「请求计数」可靠。
+     * 这个信号不依赖任何注入时机（hook 装不上也能用）。
      *
-     * ⚠️ 只等 **1.2 秒**（分几次探）：
-     *   - 真实发送时 React 几乎立刻清空（几十毫秒）
-     *   - 等太久会拖慢每一轮；而这一段的目的是「尽早发现失败」
-     * 1.2 秒内没清空 ⇒ 判定失败，**立刻交错误**，而不是等到超时。
+     * ## ⚠️⚠️ 但必须**每次重新找输入框**（我第一版漏了，造成误报）
      *
-     * ⚠️ 代价：极慢的页面（>1.2s 才清空）会被误判成失败。
-     * 但那种情况下我们本来也只能干等，早报错对用户更有利 ——
-     * 而且错误信息里写明了「可以重试」。
+     * 第一版在点击**之前**抓了一个 「input」 引用，之后一直读它。
+     * 问题是：React 发送后会**重渲染**，那个节点可能已经被**摘除**
+     * （detached）—— 读一个摘除节点的 「.value」 **永远是发送前的内容**，
+     * 于是判据恒为「没清空」⇒ **误报 send-failed**。
+     *
+     * 用户实测（截图）：「网页版 ldw 早就输出完了」，而 DSH 报
+     * 「send-failed: 消息没有真正发出去（输入框没被清空）」——
+     * 就是读了一个摘除的旧节点。
+     *
+     * 现在每一轮探测都**重新 「findInput()」**，并且：
+     *   - 找不到输入框 ⇒ 也算「页面接受了」（输入框可能被整体换掉）
+     *   - 找到但已清空 ⇒ 接受
+     *   - 找到且内容明显变短 ⇒ 接受
+     *
+     * ⚠️ 只等 **1.2 秒**（分几次探）：真实发送时 React 几乎立刻清空。
+     * 1.2 秒内没动静 ⇒ 判定失败并**立刻交错误**，不干等到超时。
      */
     return new Promise(function (resolve) {
       var before = readInput(input);
       var tries = 0;
       var MAX_TRIES = 6;      /* 6 × 200ms = 1.2s */
+      function ok(extra) {
+        var o = {
+          ok: true, how: how, method: method, confirmed: true,
+          candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
+          url: location.href
+        };
+        for (var k in extra) if (extra[k] !== undefined) o[k] = extra[k];
+        resolve(JSON.stringify(o));
+      }
       function probe() {
         tries++;
-        var now = readInput(input);
+        /**
+         * ⭐ **重新找输入框** —— 不能复用点击前抓的引用（它可能已被摘除）。
+         */
+        var fresh = findInput();
+        if (!fresh) {
+          /**
+           * 找不到输入框 ⇒ 页面多半正在切换/重渲染 ⇒ 算发送成功。
+           *
+           * 为什么不判失败：判失败会让用户看到一个**假的** send-failed
+           * （而消息其实发出去了）。宁可放过，交给后续的 DOM 轮询确认 ——
+           * 那里有 30 秒早期放弃兜底，不会真的干等。
+           */
+          ok({ note: 'input-gone' });
+          return;
+        }
+        var now = readInput(fresh);
         /** 输入框空了（或至少明显变短）⇒ 页面接受了。 */
         if (now.trim() === '' || (before !== '' && now.length < before.length * 0.5)) {
-          resolve(JSON.stringify({
-            ok: true, how: how, method: method, confirmed: true,
-            candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
-            url: location.href
-          }));
+          ok({});
           return;
         }
         if (tries >= MAX_TRIES) {
