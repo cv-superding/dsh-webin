@@ -1,6 +1,6 @@
 {
   "name": "dsh-webin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unofficial DSH plugin: drive chat.deepseek.com in a REAL browser (DSH's own Chromium webview guest) — real login, real typing, real send, reply captured by observing the page's own SSE. Structurally a port of cuckoo-code's approach.",
   "type": "module",
   "main": "./lib/index.js",

@@ -144,13 +144,14 @@ console.log('[1] ⭐ 版本号在构建期注入（host 侧，运行时读不到
   /**
    * 产物里应该是**字面量**，不是 `readFileSync('package.json')`。
    *
-   * ⚠️ 断言的是**版本号形态**而不是「等于 package.json 的 version」——
-   * 版本号现在是自动生成的 `<tag>+<距 tag 提交数>.<提交号>`，
-   * 不再是 `package.json` 里那个手写值（用户报过「版本怎么一直是
-   * 0.1.0？？？」：手动字段没人记得 bump）。
+   * ⚠️ 版本号方案几经变化（曾经自动带提交数，被用户否掉）——
+   * 现在回到「就是 `package.json` 里那个，手动 bump」。
+   * 所以断言「产物里的版本号 === package.json 的 version」，
+   * 这个判据在任何方案下都该成立（只是值的来源不同）。
    */
-  check('⭐ host 产物含版本字面量（形如 0.1.0+5.def5678）', /return "0\.\d+\.\d+\+\d+\.[0-9a-f]+"/.test(host), true)
-  check('⭐ 版本号以 package.json 的 version 打底', host.includes(`"${pkg.version}+`) || host.includes(`"${pkg.version}"`), true)
+  const injectedVersion = /if \(name === "version" && true\) return "([^"]+)"/.exec(host)?.[1]
+  check('⭐ host 产物含版本字面量', typeof injectedVersion, 'string')
+  check('⭐ 版本号与 package.json 一致', injectedVersion, pkg.version)
   check('host 没有运行时读 package.json', /readFileSync\([^)]*package\.json/.test(host), false)
   /** 构建时刻也要注入（让用户能看出「跑的是旧产物」）。 */
   check('⭐ 注入构建时刻', /return "20\d\d-\d\d-\d\dT/.test(host), true)

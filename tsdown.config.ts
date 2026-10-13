@@ -39,53 +39,26 @@ function readCommit(): string {
 }
 
 /**
- * ## ⭐ 版本号**自动**带上「距最近 tag 的提交数」
+ * 版本号 —— 就是 `package.json` 里那个，**手动 bump**。
  *
- * ## 为什么必须自动（用户报的「版本怎么一直是 0.1.0？？？」）
+ * ## 为什么不做「自动带提交数」
  *
- * 原来版本号就是 `package.json` 里那个**手动**字段。我整轮只在建 release
- * 时 bump 过一次（`0.0.1 → 0.1.0`），之后又推了 **5 个提交**都没动它 ——
- * 于是设置页一直显示 `0.1.0`。
+ * 我一度改成 `<tag>+<距 tag 提交数>.<提交号>`（想让它每次提交都变），
+ * 但用户一句话点醒了：**「直接更新到 0.2.0 不就行了！」**
  *
- * 用户看到版本号不变，**自然会以为「更新没生效」** —— 即使提交号确实变了。
- * 这是个真实体验缺陷，不是「用户没看懂」。
+ * 那个方案确实过度设计：
+ *   - `0.1.0+5.def5678` 对人没有意义 —— 用户想知道的是「这是第几版」，
+ *     不是「距上一个 tag 有几个提交」
+ *   - 它把「版本」和「构建元数据」混在一个字符串里，显示还得拆开
+ *   - 真正的「这份产物是什么时候构建的」由 `builtAt` 回答更直接
  *
- * ## 做法：`<tag 版本>+<距 tag 的提交数>.<提交号>`
+ * 所以回到最简单、最可预测的做法：**发版时手动改 `package.json`**。
+ * 提交号仍然单独注入（它回答的是「跑的哪份代码」）。
  *
- * 用 `git describe --tags --long` 拿「最近 tag + 距离」：
- *
- *     v0.1.0-0-g1d6e37d  →  0.1.0+0.1d6e37d   （正好在 tag 上）
- *     v0.1.0-5-gabc1234  →  0.1.0+5.abc1234   （tag 之后 5 个提交）
- *
- * 这样**每次提交后重新构建，版本号都会变**，不需要谁记得手动 bump。
- *
- * 格式用 `+`（semver 的 build metadata）而不是 `-`：
- *   - `+` 后面不参与优先级比较，不会让 npm 误判版本大小
- *   - 语义上它本来就是「构建元数据」，正合适
- *
- * ⚠️ 没有 tag 时（`git describe` 失败）退回 `<package.json 版本>+<提交总数>.<提交号>`，
- * 再不行就退回原值 —— **不能让构建失败**。
+ * ⚠️ 唯一的纪律：**有意义的改动要记得 bump**。
  */
 function readVersion(): string {
-  const base = pkg.version ?? '0.0.0'
-  const described = git('describe --tags --long')
-  if (described !== '') {
-    /** 形态：`v0.1.0-5-gabc1234`（也可能没有 `v` 前缀）。 */
-    const m = /^v?(.+?)-(\d+)-g([0-9a-f]+)$/.exec(described)
-    if (m !== null) {
-      const [, tag, distance, sha] = m
-      /**
-       * tag 上的版本号优先于 `package.json` ——
-       * 两者不一致时，tag 才是「用户实际拿到的那个版本」的权威来源。
-       */
-      return `${tag}+${distance}.${sha}`
-    }
-  }
-  /** 没 tag：用提交总数当单调递增的构建号。 */
-  const count = git('rev-list --count HEAD')
-  const sha = readCommit()
-  if (count !== '' && sha !== 'unknown') return `${base}+${count}.${sha}`
-  return base
+  return pkg.version ?? '0.0.0'
 }
 
 /** 从 `git+https://github.com/owner/repo.git` 里取出 `owner/repo`。 */

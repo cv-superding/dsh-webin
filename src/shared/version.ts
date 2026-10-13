@@ -40,20 +40,7 @@ function injected(name: string, fallback: string): string {
 
 /** 本插件的版本信息。 */
 export interface PluginVersion {
-  /**
-   * 完整版本号，形态 `<tag 版本>+<距 tag 的提交数>.<提交号>`。
-   *
-   * 例：`0.1.0+5.def5678` —— tag 之后第 5 个提交。
-   *
-   * ## 为什么带 `+` 后缀（用户报的「版本怎么一直是 0.1.0？？？」）
-   *
-   * 原来版本号就是 `package.json` 里那个**手动**字段，只在建 release 时
-   * bump 过一次 —— 之后推了 5 个提交都没动它 ⇒ 设置页一直显示 `0.1.0`。
-   * **用户看到版本号不变，自然会以为「更新没生效」**（即使提交号确实变了）。
-   *
-   * 现在由构建期从 `git describe --tags --long` 自动生成，
-   * **每次提交后重新构建都会变**，不需要谁记得手动 bump。
-   */
+  /** `package.json` 的 version（手动 bump）。 */
   version: string
   /** 构建时的提交号（短）。 */
   commit: string
@@ -61,20 +48,6 @@ export interface PluginVersion {
   repo: string
   /** 构建时刻（ISO）。让用户能确认「这份是什么时候构建的」。 */
   builtAt: string
-}
-
-/**
- * 把完整版本号拆成「给人看的主版本」和「构建后缀」。
- *
- * `0.1.0+5.def5678` → `{ base: '0.1.0', build: '5.def5678' }`
- *
- * 设置页把主版本显示得醒目、构建后缀显示成小号等宽字 ——
- * 这样用户一眼能看出**主版本没变但构建变了**，而不是以为「没更新」。
- */
-export function splitVersion(version: string): { base: string; build: string } {
-  const i = version.indexOf('+')
-  if (i < 0) return { base: version, build: '' }
-  return { base: version.slice(0, i), build: version.slice(i + 1) }
 }
 
 /** 当前跑的这份是哪个版本。 */
