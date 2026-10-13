@@ -348,7 +348,21 @@ console.log('\n[10] ⭐ executeJavaScript 全部有超时护栏（防静默死�
     const before = clientSrc.slice(Math.max(0, iTrigCall - 400), iTrigCall)
     check('⭐ 触发走 execJs', iTrigCall > 0 && /execJs<string>\(/.test(before), true)
   }
-  check('⭐ 抓 DOM 走 execJs', /execJs<string>\(el, buildScrapeScript\(\), 12_000\)/.test(clientSrc), true)
+  /**
+   * ⚠️ 断言改过：抓 DOM 现在走 `scrapeWithScroll`（先滚到底、等渲染、再抓）。
+   *
+   * 真实事故：虚拟列表只渲染视口内的消息，「滚完立刻抓」抓到的是滚动前的
+   * 内容 ⇒ 精确候选 found=0 ⇒ 掉到兜底 ⇒ **抓到侧边栏当回复交付**。
+   *
+   * 所以现在断言「抓取必须经过 scrapeWithScroll」而不是直接调 execJs。
+   */
+  check('⭐⭐ 抓 DOM 走 scrapeWithScroll（先滚后抓）', /await scrapeWithScroll\(el, 12_000\)/.test(clientSrc), true)
+  check(
+    '⭐⭐ scrapeWithScroll 内部先滚后抓',
+    /buildScrollScript\(\)[\s\S]{0,220}?setTimeout\(r, 400\)[\s\S]{0,120}?buildScrapeScript\(\)/.test(clientSrc),
+    true,
+  )
+  check('⭐ 不再有裸的直接抓取（12_000）', /execJs<string>\(el, buildScrapeScript\(\), 12_000\)/.test(clientSrc), false)
   check('⭐ drain 走 execJs', /execJs<string>\(el, buildDrainScript\(\), 10_000\)/.test(clientSrc), true)
   check('⭐ 思考脚本走 execJs', /execJs<string>\(el, buildThinkingScript/.test(clientSrc), true)
   /** 超时都有明确的错误交回。 */

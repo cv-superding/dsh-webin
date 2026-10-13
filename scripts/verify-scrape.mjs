@@ -762,6 +762,38 @@ console.log('\n[23] ⭐⭐⭐ 思考块不混入正文（折叠条判定，实�
   check('⭐ think 字段读到思考', String(r.think).includes('长篇思考内容'), true)
 }
 
+
+console.log('\n[24] ⭐⭐⭐ 侧边栏不能被当回复交付（兜底抓到会话列表 ⇒ 返回空）')
+{
+  /**
+   * ## 真实事故（用户：「绝望了，这又是什么bug」）
+   *
+   * 所有精确候选 found=0 ⇒ 掉到 longest-div 兜底 ⇒ 抓到**侧边栏**
+   * （1110 字符的会话列表：「开启新对话 / 置顶 / 今天 / 新对话…」）
+   * 当回复交付。网页版明明答对了（「写好了：小故事.txt」），
+   * DSH 收到的却是会话列表。
+   *
+   * ## 判据（特征组合，不是单一关键词）
+   *
+   * 含「开启新对话」或换行后的「新对话」+ 含日期分组（今天/昨天/7 天内）
+   * + 无代码围栏 + 长度 > 24。
+   */
+  const sidebarText =
+    '开启新对话\n\n置顶\n\n低光增强Prompt模块设计与实现\n\nREN模块去雨架构设计\n\n今天\n\n新对话\n\n在吗\n\n在\n\n21加22等于43'
+  const r = run(script, [el('div', { cls: '_77cdc67' }, text(sidebarText))])
+  check('⭐⭐⭐ 侧边栏被否决（ok=false）', r.ok, false)
+  check('⭐⭐ 交付内容为空', String(r.last), '')
+  check('⭐⭐ 兜底信息标了 REJECTED', String(r.fallback).includes('REJECTED=sidebar'), true)
+
+  /** ⚠️ 反向：真实回复不能被误杀（哪怕内容里提到「今天」）。 */
+  const fence = String.fromCharCode(96, 96, 96)
+  const goodReply = el('div', { cls: 'ds-markdown' },
+    text('写好了：' + fence + 'ldw\nawait write({path:"a.txt"});\n' + fence + '\n\n今天的故事写完了。'))
+  const r2 = run(script, [goodReply])
+  check('⭐⭐⭐ 真回复不被误杀', String(r2.last).includes('写好了'), true)
+  check('⭐⭐ 走动兜底也不误判', String(r2.fallback ?? '').includes('REJECTED'), false)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

@@ -831,6 +831,64 @@ export function buildDrainScript(): string {
  *
  * 这样 DSH 侧解析围栏的代码**不用改**，直接就能认出工具调用。
  */
+/**
+ * 构建「把消息列表滚到底」脚本 —— **必须与抓取分开调用**。
+ *
+ * ## 为什么必须拆开（真实事故：把侧边栏当回复交付）
+ *
+ * DeepSeek 的消息列表是**虚拟列表**（`ds-virtual-list`）—— 只把视口内的
+ * 消息插进 DOM。设置 `scrollTop` 只是**触发**滚动，页面要等下一帧才重渲染。
+ *
+ * 而抓取脚本是一次 eval 同步跑完的 ⇒ 「滚完立刻抓」抓到的还是滚动前的
+ * 内容 ⇒ 精确候选全部 found=0 ⇒ 掉到 longest-div 兜底 ⇒ **抓到侧边栏**
+ * （1110 字符的会话列表）当回复交付。
+ *
+ * 用户实测症状：DSH 里收到的「回复」是
+ * 「开启新对话 / 置顶 / 今天 / 新对话…」，而网页版明明答对了。
+ *
+ * ## client 侧正确用法
+ *
+ * ```ts
+ * await execJs(el, buildScrollScript(), 5_000)   // 滚
+ * await sleep(400)                               // 等渲染（2~3 帧）
+ * await execJs(el, buildScrapeScript(), 12_000)  // 抓
+ * ```
+ *
+ * @returns 在 guest 里求值的 JS 源码；求值结果是滚动过的容器数
+ */
+export function buildScrollScript(): string {
+  return `(() => {
+    try {
+      var n = 0;
+      /** 主路径：DeepSeek 的虚拟列表容器。 */
+      var scrollers = document.querySelectorAll('[class*="ds-virtual-list"]');
+      for (var i = 0; i < scrollers.length; i++) {
+        var svEl = scrollers[i];
+        var target = svEl.parentElement && String(svEl.parentElement.className || '').indexOf('ds-scroll-area') !== -1
+          ? svEl.parentElement
+          : svEl;
+        if (target.scrollHeight > target.clientHeight) {
+          target.scrollTop = target.scrollHeight;
+          n++;
+        }
+      }
+      /**
+       * 兜底：类名改版时上面的选择器会失效 —— 把所有「又高又可滚」的
+       * 容器也滚到底。限制尺寸，避免动到无关的小滚动区。
+       */
+      var all = document.querySelectorAll('div');
+      for (var j = 0; j < all.length && j < 400; j++) {
+        var d = all[j];
+        if (d.clientHeight > 200 && d.scrollHeight > d.clientHeight + 40) {
+          d.scrollTop = d.scrollHeight;
+          n++;
+        }
+      }
+      return String(n);
+    } catch (e) { return 'err'; }
+  })()`
+}
+
 export function buildScrapeScript(): string {
   return `(function () {
   try {
@@ -1212,19 +1270,25 @@ export function buildScrapeScript(): string {
      * 修法：抓取前把虚拟列表的滚动容器滚到底，强制渲染最新消息。
      * 改滚动位置**不改页面内容**，无副作用（用户看回复本来就在底部）。
      */
-    try {
-      var scrollers = document.querySelectorAll('[class*="ds-virtual-list"]');
-      for (var sv = 0; sv < scrollers.length; sv++) {
-        var svEl = scrollers[sv];
-        /** 滚动容器是它的父级（ds-scroll-area），或它自己。 */
-        var target = svEl.parentElement && String(svEl.parentElement.className || '').indexOf('ds-scroll-area') !== -1
-          ? svEl.parentElement
-          : svEl;
-        if (target.scrollHeight > target.clientHeight) {
-          target.scrollTop = target.scrollHeight;
-        }
-      }
-    } catch (e) { /* 滚动失败不影响抓取 */ }
+    /**
+     * ⚠️⚠️ 滚动已**移出**抓取脚本 —— 改由 client 分两步调用
+     * （见 {@link buildScrollScript}）。
+     *
+     * ## 为什么必须拆开（真实事故：交付了侧边栏）
+     *
+     * 原先在这里「同步滚到底 → 立刻抓」，但**虚拟列表的重渲染是异步的**：
+     * 设置 scrollTop 只是**触发**滚动，DeepSeek 要等下一帧才把
+     * 「视口内的消息」插进 DOM。
+     *
+     * 本脚本是一次 eval 同步跑完 ⇒ 新消息**还没进 DOM** ⇒ 精确候选
+     * 全部 found=0 ⇒ 掉到 longest-div 兜底 ⇒ 抓到**侧边栏**
+     * （1110 字符的会话列表）当回复交付。
+     *
+     * 用户实测症状：DSH 收到的回复是
+     * 「开启新对话 / 置顶 / 今天 / 新对话…」，而网页版明明答对了。
+     *
+     * ⇒ client 侧：buildScrollScript → 等 2~3 帧 → buildScrapeScript。
+     */
 
     /**
      * ⭐ 页面是否**仍在生成**（停止按钮存在）。
@@ -1339,8 +1403,39 @@ export function buildScrapeScript(): string {
      * 「开启新对话 / 置顶 / 昨天」的。现在**只在主内容区里扫**，
      * 并且仍然过一遍 inChrome。
      */
+    /**
+     * ⭐⭐⭐ 侧边栏否决器 —— 兜底抓到会话列表时**宁可返回空**。
+     *
+     * ## 真实事故（用户实测「绝望了」）
+     *
+     * 所有精确候选 found=0 ⇒ 掉到 longest-div 兜底 ⇒ 抓到**侧边栏**
+     * （1110 字符的会话列表：「开启新对话 / 置顶 / 今天 / 新对话…」）
+     * 当回复交付。网页版明明答对了（「写好了：小故事.txt」），
+     * DSH 收到的却是会话列表。
+     *
+     * ## 判据（特征组合，不是单一关键词）
+     *
+     *   - 含「开启新对话」或独立成行的「新对话」（新建按钮 / 列表项）
+     *   - 含日期分组标题（「今天」「昨天」「7 天内」）
+     *   - 且**不含**代码块围栏（回复几乎总带围栏或长段落）
+     *   - 且长度 > 60（太短不至于判错）
+     *
+     * ⚠️ 宁可返回空（⇒ client 继续等）也不交侧边栏 ——
+     * 交错比等待更糟（用户会以为模型答非所问）。
+     */
+    function looksLikeSidebar(txt) {
+      if (!txt) return false;
+      var s = String(txt);
+      /** 有代码围栏 ⇒ 是回复（围栏用字符码拼，避免模板字符串冲突）。 */
+      var fence = String.fromCharCode(96, 96, 96);
+      if (s.indexOf(fence) !== -1) return false;
+      var hasNewChat = s.indexOf('开启新对话') !== -1 || (s.indexOf(String.fromCharCode(10) + '新对话') !== -1);
+      var hasDateGroup = s.indexOf('今天') !== -1 || s.indexOf('昨天') !== -1 || s.indexOf('7 天内') !== -1;
+      return hasNewChat && hasDateGroup && s.length > 24;
+    }
+
     if (list.length === 0) {
-    var fallbackInfo = "";
+      var fallbackInfo = "";
       var all = root.querySelectorAll('div');
       var best = '';
       var excluded = [];
@@ -1363,8 +1458,16 @@ export function buildScrapeScript(): string {
         if (under) continue;
         if (txt.length > best.length) best = txt;
       }
+      /**
+       * ⭐ 侧边栏否决：兜底结果像会话列表 ⇒ **丢弃**（返回空让 client 继续等）。
+       */
+      if (looksLikeSidebar(best)) {
+        fallbackInfo = "divs=" + all.length + " bestLen=" + best.length + " REJECTED=sidebar";
+        best = '';
+      } else {
+        fallbackInfo = "divs=" + all.length + " bestLen=" + best.length;
+      }
       if (best.length >= 8) { list = [best]; usedSelector = 'longest-div'; }
-      fallbackInfo = "divs=" + all.length + " bestLen=" + best.length;
     }
 
     return JSON.stringify({

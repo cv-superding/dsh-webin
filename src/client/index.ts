@@ -10,6 +10,7 @@
  */
 import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
+  buildScrollScript,
   buildDeepSeekHook,
   buildDrainScript,
   buildProbeScript,
@@ -1828,7 +1829,47 @@ export function LdwHost(): unknown {
        * 所以收口成一个函数：**任何**结束任务的地方都调它，
        * 不再依赖「写代码的人记得清哪几个」。
        */
-      const clearPending = () => {
+      
+/**
+ * ## ⭐⭐⭐ 先滚到底、等渲染、再抓（拆开两步）
+ *
+ * ## 为什么不能一步做完（真实事故：交付了侧边栏）
+ *
+ * DeepSeek 的消息列表是**虚拟列表** —— 只把视口内的消息插进 DOM。
+ * 设置 `scrollTop` 只是**触发**滚动，页面要等下一帧才重渲染；
+ * 而抓取脚本是一次 eval 同步跑完的。
+ *
+ * 所以「滚完立刻抓」抓到的还是滚动前的内容 ⇒ 精确候选 found=0 ⇒
+ * 掉到 longest-div 兜底 ⇒ **抓到侧边栏**（1110 字符的会话列表）当回复交付。
+ *
+ * 用户实测症状：DSH 收到的「回复」是
+ * 「开启新对话 / 置顶 / 今天 / 新对话…」，而网页版明明答对了。
+ *
+ * ## 顺序
+ *
+ *   1. `buildScrollScript` —— 把消息列表滚到底
+ *   2. **等 400ms**（2~3 帧，让虚拟列表把新消息渲染进 DOM）
+ *   3. `buildScrapeScript` —— 此时才读得到最新回复
+ *
+ * 滚动本身**不改页面内容**，无副作用（用户看回复本来就在底部）。
+ *
+ * @param el - guest webview
+ * @param timeoutMs - 抓取超时
+ * @returns 抓取脚本的原始返回（可能是 {@link EXEC_TIMEOUT}）
+ */
+async function scrapeWithScroll(el: WebviewElement, timeoutMs: number): Promise<string> {
+  /** 滚 —— 失败不致命（页面结构可能变），继续抓。 */
+  try {
+    await execJs<string>(el, buildScrollScript(), 5_000)
+  } catch {
+    /* 滚动失败继续抓 */
+  }
+  /** ⭐ 关键：等虚拟列表重渲染（2~3 帧）。少了这步就会抓到旧内容/侧边栏。 */
+  await new Promise((r) => setTimeout(r, 400))
+  return execJs<string>(el, buildScrapeScript(), timeoutMs)
+}
+
+const clearPending = () => {
         pendingJobRef.current = undefined
         pendingSinceRef.current = 0
         scrapedRef.current = undefined
@@ -1932,7 +1973,7 @@ export function LdwHost(): unknown {
 
         if (hasPending && waitedMs > 3_000) {
           const jobId = pendingJobRef.current!
-          const scrapedRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
+          const scrapedRaw = await scrapeWithScroll(el, 12_000)
           if (scrapedRaw !== EXEC_TIMEOUT) {
             try {
               const scraped = JSON.parse(String(scrapedRaw)) as {
@@ -2458,7 +2499,12 @@ export function LdwHost(): unknown {
          * 此刻页面还没生成新内容。
          */
         {
-          const baseRaw = await execJs<string>(el, buildScrapeScript(), 8_000)
+          /**
+           * ⭐ 基线也用「先滚后抓」—— 否则基线读到的是滚动前的内容，
+           * 而交付时读到的是滚动后的 ⇒ 同一个页面两次读数不一致，
+           * 「内容变化」判据会误报（真实事故的相关因素）。
+           */
+          const baseRaw = await scrapeWithScroll(el, 8_000)
           if (baseRaw !== EXEC_TIMEOUT) {
             try {
               const base = JSON.parse(String(baseRaw)) as { count?: number; last?: string }
@@ -3076,7 +3122,8 @@ export function LdwHost(): unknown {
                 try {
                   const raw = await execJs<string>(el, buildDiagnoseScript(sendHintsFor(provider)), 15_000)
                   const base = raw === EXEC_TIMEOUT ? '{"error":"诊断脚本超时"}' : String(raw)
-                  const scrapeRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
+                  /** ⭐ 诊断也走「先滚后抓」—— 否则诊断看到的是滚动前的页面（旧内容）。 */
+                  const scrapeRaw = await scrapeWithScroll(el, 12_000)
                   /**
                    * ## ⭐ 导出页面真实结构（发现类名，而不是猜）
                    *
