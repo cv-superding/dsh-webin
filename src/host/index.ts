@@ -335,6 +335,8 @@ interface ClientBeat {
     trace?: unknown[]
     fallback?: string
   }
+  /** ⭐ 页面结构报告（抓取失败时 client 自动导出一次）。 */
+  dom?: Record<string, unknown>
 }
 
 /**
@@ -1036,6 +1038,8 @@ export async function apply(ctx: {
             trace?: unknown[]
             fallback?: string
           }
+          /** ⭐ 页面结构报告。 */
+          dom?: Record<string, unknown>
         }
         try {
           payload = JSON.parse(body) as typeof payload
@@ -1064,6 +1068,7 @@ export async function apply(ctx: {
            * 这种「手工挑字段」的写法每加一个字段都要记得同步。
            */
           ...(payload.scrape === undefined ? {} : { scrape: payload.scrape }),
+          ...(payload.dom === undefined ? {} : { dom: payload.dom }),
         })
         sendJson(res, 200, { ok: true, clients: liveClients().length })
         return
@@ -1224,6 +1229,7 @@ export async function apply(ctx: {
               replyCount: c.replyCount,
               /** ⭐ 抓取诊断 —— 看「抓到的是不是回复」。 */
               ...(c.scrape === undefined ? {} : { scrape: c.scrape }),
+              ...(c.dom === undefined ? {} : { dom: c.dom }),
             })),
           },
           /**

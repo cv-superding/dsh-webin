@@ -19,6 +19,14 @@ import {
   loadSnapshot,
   saveSnapshot,
 } from './hook'
+/**
+ * 导出页面真实结构 —— 用来**发现**类名，而不是猜。
+ *
+ * ⚠️ 必须真的**调用**它（见下面诊断按钮里的用法），否则打包器会
+ * tree-shake 掉 —— 只在源码里 import 是不够的（踩过：import 了
+ * 但产物里搜不到）。
+ */
+import { buildDomReportScript } from './dom-report'
 import {
   buildClearInputScript,
   buildDiagnoseScript,
@@ -736,6 +744,23 @@ let propsLogged = false
  *
  * 把这几项挂上去，`/status` 就能直接看到，不用猜。
  */
+/**
+ * 页面结构报告 —— 抓取失败时**自动**导出一次（不需要用户点按钮）。
+ *
+ * ## 为什么需要
+ *
+ * trace 显示**所有候选都命中 0 个** —— 说明类名表整个是错的。
+ * 要修就得先看到**真实页面结构**，而等用户点诊断按钮太慢。
+ *
+ * 所以抓取走到 `longest-div` 兜底时自动导一次，跟着心跳上报：
+ *   - `chain`：含回复文字的元素祖先链 ⇒ 回复容器就在这条链上
+ *   - `topClasses`：出现 >= 2 次的类名频次
+ *   - `cands`：各候选选择器实际命中几个
+ *
+ * 只抓一次 —— 不给页面加持续负担。
+ */
+const domReportRef: { current: Record<string, unknown> | undefined } = { current: undefined }
+
 const scrapeDiagRef: {
   current: {
     selector?: string
@@ -1640,6 +1665,8 @@ export function LdwHost(): unknown {
          * 跟着心跳送上来，`/status` 就能直接看到。
          */
         scrape: scrapeDiagRef.current,
+        /** ⭐ 页面结构报告（抓取失败时自动导出一次）。 */
+        ...(domReportRef.current === undefined ? {} : { dom: domReportRef.current }),
       }
       void fetch('/dsh-webin/api/client/heartbeat', {
         method: 'POST',
@@ -1814,6 +1841,36 @@ export function LdwHost(): unknown {
                 lastLen: typeof scraped.last === 'string' ? scraped.last.length : -1,
                 head: typeof scraped.last === 'string' ? scraped.last.slice(0, 60) : '',
                 at: Date.now(),
+              }
+              /**
+               * ## ⭐ 页面结构报告（只在「还没成功过」时抓一次）
+               *
+               * ## 为什么自动做，而不是等用户点诊断按钮
+               *
+               * trace 显示**所有候选都命中 0 个** —— 说明我的类名表
+               * 整个是错的。要修就得先看到**真实页面结构**，
+               * 而等用户点按钮太慢（用户已经在等着了）。
+               *
+               * 所以：抓取失败（`selector` 是 `longest-div` 兜底）
+               * 且还没抓过时，自动导一次结构，跟着心跳上报。
+               * 只抓一次 —— 不给页面加持续负担。
+               */
+              if (
+                scrapeDiagRef.current.selector === 'longest-div' &&
+                domReportRef.current === undefined
+              ) {
+                const needle = typeof scraped.last === 'string' ? scraped.last.slice(0, 20) : ''
+                void execJs<string>(el, buildDomReportScript(needle), 15_000)
+                  .then((domRaw) => {
+                    if (domRaw === EXEC_TIMEOUT) return
+                    try {
+                      domReportRef.current = JSON.parse(String(domRaw)) as Record<string, unknown>
+                      console.log('[dsh-webin] 页面结构已导出', domReportRef.current)
+                    } catch {
+                      /* 解析失败就算了，不影响主链路 */
+                    }
+                  })
+                  .catch(() => undefined)
               }
               const last = typeof scraped.last === 'string' ? scraped.last : ''
               const think = typeof scraped.think === 'string' ? scraped.think : ''
@@ -2760,9 +2817,51 @@ export function LdwHost(): unknown {
                   const raw = await execJs<string>(el, buildDiagnoseScript(sendHintsFor(provider)), 15_000)
                   const base = raw === EXEC_TIMEOUT ? '{"error":"诊断脚本超时"}' : String(raw)
                   const scrapeRaw = await execJs<string>(el, buildScrapeScript(), 12_000)
+                  /**
+                   * ## ⭐ 导出页面真实结构（发现类名，而不是猜）
+                   *
+                   * ## 为什么必须做（trace 给出的决定性证据）
+                   *
+                   * 端到端跑完读 trace，拿到：
+                   *
+                   *     .ds-markdown          → found: 0
+                   *     [class*="markdown"]   → found: 0   ← 极宽泛的匹配也是 0！
+                   *     root: "body"                        ← 没有 main
+                   *
+                   * `[class*="markdown"]` 命中 0 说明页面上**根本没有**
+                   * 带 "markdown" 的类名 —— 我的候选表整个是错的。
+                   *
+                   * 继续猜没意义，所以这里把结构导出来：
+                   *   - `chain`：含「最后一条回复文字」的元素祖先链
+                   *     ⇒ 回复容器与消息列表容器都在这条链上
+                   *   - `topClasses`：出现 >= 2 次的类名频次
+                   *   - `cands`：各候选选择器**实际命中几个**
+                   *
+                   * needle 用「最后一条回复的前 20 字」—— 那是页面上
+                   * 一定存在的文字，用它反查容器最可靠。
+                   */
+                  const scrapeForNeedle =
+                    scrapeRaw === EXEC_TIMEOUT
+                      ? ''
+                      : (() => {
+                          try {
+                            const s = JSON.parse(String(scrapeRaw)) as { last?: string }
+                            return String(s.last ?? '').slice(0, 20)
+                          } catch {
+                            return ''
+                          }
+                        })()
+                  const domRaw = await execJs<string>(el, buildDomReportScript(scrapeForNeedle), 15_000)
                   let merged = base
                   try {
                     const parsed = JSON.parse(base) as Record<string, unknown>
+                    if (domRaw !== EXEC_TIMEOUT) {
+                      try {
+                        parsed.dom = JSON.parse(String(domRaw)) as unknown
+                      } catch {
+                        parsed.dom = { error: 'DOM 报告 JSON 解析失败' }
+                      }
+                    }
                     if (scrapeRaw !== EXEC_TIMEOUT) {
                       const s = JSON.parse(String(scrapeRaw)) as {
                         ok?: boolean
