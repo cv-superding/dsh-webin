@@ -550,6 +550,39 @@ console.log('\n[14] ⭐⭐ 虚拟列表滚动适配 + 页面健康度')
   )
 }
 
+
+console.log('\n[15] ⭐⭐⭐ 交付判据不许有长度门槛（第二处残留，实测卡死）')
+{
+  /**
+   * ## 真实事故（同一个 bug 的第二处）
+   *
+   * 第一处在抓取侧（hook.ts 的 picked 过滤），已修。
+   * **第二处在这里** —— client 交付判据：
+   *
+   *     if (scraped.ok === true && last.length >= 8 && ...)
+   *
+   * 实测：问「写一句你好」，网页版答「你好。」（3 字符）。
+   * 抓取侧拿到了（lastLen=3），交付判据拒掉 ⇒ state=claimed 永不交付
+   * ⇒ 卡 180 秒超时。
+   *
+   * ## 教训
+   *
+   * 同一个错误判据会在多处复制。修一处必须全库搜同款。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  const cb = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+
+  check(
+    '⭐⭐⭐ 交付判据没有 length >= 8',
+    clientSrc.includes('last.length >= 8 && (countGrew'),
+    false,
+  )
+  check('⭐⭐ 交付只要求非空', /last\.length > 0 && \(countGrew/.test(clientSrc), true)
+  check('⭐⭐ 产物同步', cb.includes('last.length >= 8&&(countGrew') || cb.includes('last.length>=8&&(countGrew'), false)
+  /** 教训注释要在。 */
+  check('⭐ 事故记录在注释里', /第二处残留/.test(clientSrc), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
