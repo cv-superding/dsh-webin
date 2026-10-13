@@ -795,6 +795,9 @@ const loadedBundleRev: { current: string | null } = { current: null }
  */
 const promptRef: { current: string } = { current: '' }
 
+/** DOM 报告上次抓取时刻（限流：20 秒最多一次，防拖死 tick —— 见抓取处注释）。 */
+const domReportAtRef: { current: number } = { current: 0 }
+
 const scrapeDiagRef: {
   current: {
     selector?: string
@@ -1972,14 +1975,19 @@ export function LdwHost(): unknown {
                * 找到含它的最深元素，祖先链上就有「用户消息容器」，
                * 而**回复容器通常和它是兄弟**（同一个消息列表的相邻项）。
                *
-               * ## 时机：流式期间抓，而不是只抓一次
+               * ## 时机：流式期间抓，但**必须限流**
                *
-               * 流式渲染意味着 DOM 每一刻都在变 —— 在「还没生成」的瞬间抓，
-               * 看到的是空列表。所以改成**每次轮询都可能抓**（但限制频率）：
-               * 只要还没拿到过「needle 命中 > 0」的报告，就继续抓。
+               * 流式渲染意味着 DOM 每一刻都在变 —— 要在流式期间抓。
+               * 但这份报告很重（全页遍历 + 15 秒超时的跨进程调用）——
+               * **不限流的话 needle=0 时每 1.5 秒轮询都会跑一次** ⇒
+               * tick 循环被拖死 ⇒ 心跳饿死 ⇒ 面板被判死 ⇒ 任务卡 claimed
+               * （真实事故：job-5 卡 200 秒，面板心跳 44s 后消失）。
+               *
+               * 所以：**每 20 秒最多抓一次**，且命中 0 的报告不缓存当结论。
                */
               if (
                 scrapeDiagRef.current.selector === 'longest-div' &&
+                Date.now() - domReportAtRef.current > 20_000 &&
                 (domReportRef.current === undefined ||
                   (domReportRef.current as { needleHits?: number }).needleHits === 0)
               ) {
@@ -1995,6 +2003,7 @@ export function LdwHost(): unknown {
                     try {
                       const parsed = JSON.parse(String(domRaw)) as Record<string, unknown>
                       domReportRef.current = parsed
+                      domReportAtRef.current = Date.now()
                       const hits = (parsed as { needleHits?: number }).needleHits ?? 0
                       console.log('[dsh-webin] 页面结构已导出（needle=' + needle.slice(0, 12) + '… 命中 ' + hits + '）')
                     } catch {
