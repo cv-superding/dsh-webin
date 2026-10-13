@@ -2201,20 +2201,54 @@ export function LdwHost(): unknown {
           if (stopped) return
         }
 
-        /** ③ 触发发送（只点一下，立刻返回，不验证）。 */
+        /**
+         * ③ 触发发送 —— **并确认页面真的接受了**。
+         *
+         * ## ⭐ 为什么现在要确认（用户报的「网页版早就有答案了，dsh 还在深度求索」）
+         *
+         * 早期这一步点完就返回 `ok:true`，**从不验证**。于是「点了但没生效」
+         * （按钮被遮挡 / 是禁用态 / 点错了元素）时，插件以为发出去了，
+         * 一路等一个**永远不会来的回复**。
+         *
+         * 用户看到的现象正是：
+         *   - 网页版里**根本没有那条消息**（输入框还留着字，或者已被清空但没发）
+         *   - DSH 一直「深度求索中」，直到超时
+         *
+         * 现在 `buildTriggerScript` 内部会等 1.2 秒探「输入框是否被清空」
+         * （页面接受发送时一定会清空），失败就 `ok:false` ⇒ 这里立刻交错误。
+         *
+         * 超时给 15 秒：脚本内部最多等 1.2 秒，剩下的是跨进程开销余量。
+         */
         const trigRaw = await execJs<string>(el, buildTriggerScript(sendHintsFor(provider)), 15_000)
         const trig =
           trigRaw === EXEC_TIMEOUT
             ? { ok: false, how: 'timeout', message: '触发发送超时（页面可能正在导航）' }
-            : (JSON.parse(String(trigRaw)) as { ok: boolean; how?: string; method?: string; message?: string })
+            : (JSON.parse(String(trigRaw)) as {
+                ok: boolean
+                how?: string
+                method?: string
+                message?: string
+                confirmed?: boolean
+                reason?: string
+                left?: string
+              })
         console.log('[dsh-webin] 触发结果', trig)
 
         if (trig.ok !== true) {
           clearPending()
+          /**
+           * 错误信息要**能照做** —— 用户看到「发送失败」时得知道下一步。
+           * `input-not-cleared` 是最常见的那种（点了没生效），
+           * 明确提示「重试」而不是让他去猜。
+           */
+          const detail =
+            trig.reason === 'input-not-cleared'
+              ? '消息没有真正发出去（输入框没被清空）。可能是页面还没就绪或按钮被遮挡，请重试。'
+              : (trig.message ?? '触发发送失败')
           await fetchJson(`/dsh-webin/api/job/${id}/result`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ error: `send-failed: ${trig.message ?? '触发发送失败'}` }),
+            body: JSON.stringify({ error: `send-failed: ${detail}` }),
           })
           return
         }
@@ -2231,7 +2265,8 @@ export function LdwHost(): unknown {
         sentAtRef.current = Date.now()
         setLastSend({
           at: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-          how: `${trig.method ?? trig.how ?? '?'}（已触发，等待页面回复）`,
+          /** 现在能说「已确认」了 —— `buildTriggerScript` 探过输入框是否被清空。 */
+          how: `${trig.method ?? trig.how ?? '?'}（已确认发出，等待页面回复）`,
           chars: prompt.length,
         })
         // 不在这里交结果 —— 由 DOM 轮询 / hook 事件来交。

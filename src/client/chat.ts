@@ -279,6 +279,22 @@ export function buildTriggerScript(hints?: SendHints): string {
     return false;
   }
 
+  /**
+   * 读输入框当前内容。
+   *
+   * textarea / input 用 value；contenteditable 用 innerText（它比
+   * textContent 更接近用户看到的内容 —— 会忽略隐藏元素）。
+   *
+   * ⚠️ 发送确认靠它判断「页面是否接受了这条消息」。
+   */
+  function readInput(el) {
+    if (!el) return '';
+    try {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return String(el.value || '');
+      return String(el.innerText || el.textContent || '');
+    } catch (e) { return ''; }
+  }
+
   function labelOf(el) {
     if (!el) return '';
     var parts = [];
@@ -384,27 +400,78 @@ export function buildTriggerScript(hints?: SendHints): string {
     /**
      * ⚠️ 与 cuckoo 一致的策略：**先点按钮，找不到才用 Enter**。
      *
-     * 但这里**立刻返回**，不验证结果 —— 验证是客户端后面的事。
-     * 所以两个都做（双保险）：点按钮 **并且** 补一次 Enter？
-     * 不行 —— 那可能发出两条。所以只选一个：
-     *   - 有够分（>0）的候选按钮 ⇒ 点它
-     *   - 否则 ⇒ 合成 Enter
+     * 两个都做（点按钮 + 补 Enter）不行 —— 那可能发出两条。
+     * 所以只选一个：有够分（>0）的候选按钮就点它，否则合成 Enter。
      */
+    var how;
+    var method;
     if (best && best.score > 0) {
       try { best.el.click(); } catch (e) {}
-      return JSON.stringify({
-        ok: true, how: best.how, method: 'click',
-        score: Math.round(best.score),
-        candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
-        url: location.href
-      });
+      how = best.how;
+      method = 'click';
+    } else {
+      pressEnter(input);
+      how = 'enter';
+      method = 'enter';
     }
 
-    pressEnter(input);
-    return JSON.stringify({
-      ok: true, how: 'enter', method: 'enter',
-      candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
-      url: location.href
+    /**
+     * ## ⭐⭐ 发送**确认**（用户报的「网页版早就有答案了，dsh 还在深度求索」）
+     *
+     * ## 为什么必须确认
+     *
+     * 早期这里点完就返回 ok:true，**从不验证**。于是「点了但没生效」
+     * （按钮被遮挡 / 是禁用态 / 点了别的元素）时，插件以为发出去了，
+     * 一路等一个**永远不会来的回复** —— 用户看到的正是：
+     *
+     *   网页版里根本没有那条消息，DSH 却一直「深度求索中」。
+     *
+     * ## 判据：输入框被清空
+     *
+     * 页面接受发送时**一定会清空输入框**（把内容搬进消息列表）。
+     * 这个信号不依赖任何注入时机（hook 装不上也能用），
+     * 而且是**页面自己做的动作**，比「请求计数」可靠。
+     *
+     * ⚠️ 只等 **1.2 秒**（分几次探）：
+     *   - 真实发送时 React 几乎立刻清空（几十毫秒）
+     *   - 等太久会拖慢每一轮；而这一段的目的是「尽早发现失败」
+     * 1.2 秒内没清空 ⇒ 判定失败，**立刻交错误**，而不是等到超时。
+     *
+     * ⚠️ 代价：极慢的页面（>1.2s 才清空）会被误判成失败。
+     * 但那种情况下我们本来也只能干等，早报错对用户更有利 ——
+     * 而且错误信息里写明了「可以重试」。
+     */
+    return new Promise(function (resolve) {
+      var before = readInput(input);
+      var tries = 0;
+      var MAX_TRIES = 6;      /* 6 × 200ms = 1.2s */
+      function probe() {
+        tries++;
+        var now = readInput(input);
+        /** 输入框空了（或至少明显变短）⇒ 页面接受了。 */
+        if (now.trim() === '' || (before !== '' && now.length < before.length * 0.5)) {
+          resolve(JSON.stringify({
+            ok: true, how: how, method: method, confirmed: true,
+            candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
+            url: location.href
+          }));
+          return;
+        }
+        if (tries >= MAX_TRIES) {
+          resolve(JSON.stringify({
+            ok: false, how: how, method: method, confirmed: false,
+            reason: 'input-not-cleared',
+            message: '点了发送但输入框没被清空 —— 消息很可能没发出去',
+            left: now.slice(0, 40),
+            candidates: out.slice(0, 5).map(function (c) { return { how: c.how, score: Math.round(c.score) }; }),
+            url: location.href
+          }));
+          return;
+        }
+        setTimeout(probe, 200);
+      }
+      /** 先给页面一个 tick 处理点击，再开始探。 */
+      setTimeout(probe, 120);
     });
   } catch (e) {
     return JSON.stringify({ ok: false, message: String(e && e.message) });

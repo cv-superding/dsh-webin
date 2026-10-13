@@ -169,7 +169,25 @@ console.log('\n[3b] ⭐ 触发脚本：有候选就点，否则合成 Enter')
   /** 与 cuckoo 的 fallbackSend 一致（chat-input.ts:482-501）。 */
   check('⭐ 有候选按钮就点', /best\.el\.click\(\)/.test(script), true)
   check('⭐ 没有就合成 Enter', /pressEnter\(input\)/.test(script), true)
-  check('⭐ 两者只选一个（不会发两条）', /if \(best && best\.score > 0\) \{[\s\S]{0,400}return/.test(script), true)
+  /**
+   * ⭐ 两者只选一个（不会发两条）。
+   *
+   * ⚠️ 原来断言的是 `if (best && best.score > 0) { ... return }` 那个形态 ——
+   * 后来加了「发送确认」（点完要等 1.2 秒探输入框是否被清空），
+   * 于是不能再直接 `return`，改成了 if/else + 统一 Promise 收口。
+   *
+   * 所以断言改成验**语义**：点击在 if 分支里，Enter 在 else 分支里。
+   */
+  check(
+    '⭐ 两者只选一个（点击 / Enter 互斥）',
+    /if \(best && best\.score > 0\) \{[\s\S]{0,300}?best\.el\.click\(\)[\s\S]{0,200}?\} else \{[\s\S]{0,200}?pressEnter\(input\)/.test(
+      script,
+    ),
+    true,
+  )
+  /** ⭐ 发送确认：探输入框是否被清空（用户报的「网页版没那条消息」）。 */
+  check('⭐ 有发送确认（探输入框清空）', /readInput\(input\)/.test(script), true)
+  check('⭐ 确认失败给 input-not-cleared', /input-not-cleared/.test(script), true)
   /** 输入框附近也纳入候选（DeepSeek 的发送键是纯图标 div）。 */
   check('⭐ 附近按钮纳入候选', /near-input\(L/.test(script), true)
   check('点了哪个要报告（便于排查）', /candidates: out\.slice\(0, 5\)/.test(script), true)
