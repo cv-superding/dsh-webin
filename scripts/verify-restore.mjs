@@ -282,8 +282,9 @@ console.log('\n[6] 客户端时序：必须先导航，再 restore，再 reload�
   /**
    * ⚠️ 窗口要够大 —— 中间插了 cookie 写回逻辑后这段变长了
    * （踩过：写死 200 字符匹配不到 markLive）。
+   * 后来又插了 `.reload()` 的事故说明注释（几十行），窗口从 900 放到 2200。
    */
-  check('无快照路径会 markLive（不卡住）', /无登录态快照[\s\S]{0,900}markLive\(\)/.test(bundle), true)
+  check('无快照路径会 markLive（不卡住）', /无登录态快照[\s\S]{0,2200}markLive\(\)/.test(bundle), true)
   check('加载失败会回退阶段', /stageRef\.current = "boot"/.test(bundle), true)
   check('渲染崩溃会回退阶段', bundle.includes('render-process-gone'), true)
 }

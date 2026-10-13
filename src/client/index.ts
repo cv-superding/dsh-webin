@@ -1214,7 +1214,32 @@ export function LdwHost(): unknown {
                  */
                 if (cookieRestored > 0) {
                   stageRef.current = 'reloading'
-                  void element.reload().catch(() => undefined)
+                  /**
+                   * ## ⚠️⚠️ `reload()` **不返回 Promise** —— 不能 `.catch()`
+                   *
+                   * ## 真实事故（DSH 直接崩溃）
+                   *
+                   * 崩溃日志：
+                   *
+                   *     TypeError: Cannot read properties of undefined (reading 'catch')
+                   *     at dsh-app://app/plugins/??dsh-webin/client.js:4162
+                   *     Error: web boot: 1 entry did not activate
+                   *     dsh-webin: import failed
+                   *
+                   * 根因：`<webview>.reload()` 是 **Electron 的同步方法**，
+                   * 返回 `undefined` —— 而这里写了 `.reload().catch(...)`，
+                   * 于是对 `undefined` 读 `.catch` ⇒ **抛 TypeError**。
+                   *
+                   * 这个异常发生在 effect 里，冒泡成 unhandled rejection ⇒
+                   * **整个 client bundle import 失败** ⇒ DSH 报
+                   * 「应用无法启动或已意外停止」。
+                   *
+                   * ⚠️ 这个 bug **一直存在**，只是之前被别的错误掩盖了；
+                   * 等前面那些错修掉后它就暴露出来，直接把 DSH 打崩。
+                   *
+                   * 正确写法：直接调用，不做链式。
+                   */
+                  element.reload()
                   return
                 }
                 // 没有快照也要继续走「就绪」流程，否则插件永远不工作
@@ -1238,7 +1263,13 @@ export function LdwHost(): unknown {
               if (restored || cookieRestored > 0) {
                 // 带着刚写回的登录态 reload；下一次 dom-ready 会走到下面的 live 分支
                 stageRef.current = 'reloading'
-                void element.reload().catch(() => undefined)
+                /**
+                 * ⚠️ 同上：`<webview>.reload()` 是同步方法、返回 `undefined`，
+                 * 不能 `.catch()` —— 那会抛 `TypeError: Cannot read properties
+                 * of undefined (reading 'catch')`，把整个 client bundle 打崩
+                 * （DSH 直接弹「应用无法启动」，见第一处的完整事故记录）。
+                 */
+                element.reload()
               } else {
                 stageRef.current = 'live'
                 markLive()

@@ -451,5 +451,60 @@ console.log('\n[12] ⭐⭐⭐ 虚拟列表探测（DOM 树揭示的真相）')
   check('⭐⭐ 产物有 tree', /tree: tree/.test(cb), true)
 }
 
+
+console.log('\n[13] ⭐⭐⭐ webview 同步方法不能链式 .catch()（DSH 被打崩的事故）')
+{
+  /**
+   * ## 真实事故（用户截图：「DeepSeek Harness 无法使用」）
+   *
+   *     应用无法启动或已意外停止。
+   *     web boot: 1 entry did not activate
+   *     dsh-webin: import failed (see console for the import error)
+   *
+   * 崩溃日志（renderer console）：
+   *
+   *     Uncaught (in promise) TypeError:
+   *       Cannot read properties of undefined (reading 'catch')
+   *     at dsh-app://app/plugins/??dsh-webin/client.js:4162
+   *
+   * ## 根因
+   *
+   * `<webview>.reload()` 是 **Electron 的同步方法**，返回 `undefined`。
+   * 代码写了 `.reload().catch(...)` ⇒ 对 undefined 读 .catch ⇒ TypeError
+   * ⇒ 整个 client bundle import 失败 ⇒ **DSH 直接弹崩溃框**。
+   *
+   * ⚠️ 这个 bug 一直存在，被其他错误掩盖；前面的错修掉后它就暴露了。
+   *
+   * ## 对照
+   *
+   *   - `reload()`   → 返回 undefined（同步）⇒ **不能链式**
+   *   - `loadURL()` → 返回 Promise          ⇒ 可以 .then/.catch
+   */
+  const chatSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+
+  /** 源码：真实代码里不许有 .reload().catch（注释里的除外）。 */
+  const realLines = chatSrc
+    .split('\n')
+    .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+  check(
+    '⭐⭐⭐ 源码没有 .reload().catch()',
+    realLines.some((l) => /\.reload\(\)\.catch\(/.test(l)),
+    false,
+  )
+  check(
+    '⭐⭐⭐ 产物没有 .reload().catch()（排除注释）',
+    bundle
+      .split('\n')
+      .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+      .some((l) => /\.reload\(\)\.catch\(/.test(l)),
+    false,
+  )
+  /** 直接调用的写法应该在（两处都改成 element.reload()）。 */
+  check('⭐ reload 直接调用在', /element\.reload\(\)/.test(chatSrc), true)
+  /** 注释里要记下事故，防止再犯。 */
+  check('⭐ 事故记录在注释里', /Electron 的同步方法/.test(chatSrc), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
