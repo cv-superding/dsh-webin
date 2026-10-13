@@ -199,7 +199,7 @@ console.log('[1] 取消语义：?running=<id> 在任务被取消后必须返回 
   await new Promise((r) => setTimeout(r, 150))
 
   // client 领活
-  const claimed = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  const claimed = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek&session=lifecycle-1')
   check('领到任务', claimed.json?.job !== undefined && claimed.json.job !== null, true)
   const jobId = claimed.json.job.id
 
@@ -207,7 +207,7 @@ console.log('[1] 取消语义：?running=<id> 在任务被取消后必须返回 
   const before = await call(
     route.handler,
     'GET',
-    `/dsh-webin/api/job/next?platform=deepseek&running=${encodeURIComponent(jobId)}`,
+    `/dsh-webin/api/job/next?platform=deepseek&session=revive-test&running=${encodeURIComponent(jobId)}`,
   )
   check('未取消时不返回 cancel', before.json?.cancel, undefined)
 
@@ -223,7 +223,8 @@ console.log('[1] 取消语义：?running=<id> 在任务被取消后必须返回 
   const iter2 = stream2[Symbol.asyncIterator]()
   const p2 = iter2.next()
   await new Promise((r) => setTimeout(r, 150))
-  const claimed2 = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  /** ⚠️ 这个任务属于 lifecycle-2（见上面 stream2 的 sessionId）—— 用对会话才领得到。 */
+  const claimed2 = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek&session=lifecycle-2')
   const jobId2 = claimed2.json?.job?.id
   check('第二个任务已领', typeof jobId2 === 'string' && jobId2 !== '')
 
@@ -235,7 +236,7 @@ console.log('[1] 取消语义：?running=<id> 在任务被取消后必须返回 
   const after = await call(
     route.handler,
     'GET',
-    `/dsh-webin/api/job/next?platform=deepseek&running=${encodeURIComponent(jobId2)}`,
+    `/dsh-webin/api/job/next?platform=deepseek&session=lifecycle-2&running=${encodeURIComponent(jobId2)}`,
   )
   check('⭐ 取消后返回 cancel', after.json?.cancel, jobId2)
   check('取消时不派新任务', after.json?.job, null)
@@ -267,10 +268,10 @@ console.log('\n[2] 平台隔离：不同平台领不到彼此的活')
   const first = iter.next()
   await new Promise((r) => setTimeout(r, 150))
 
-  const wrong = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  const wrong = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek&session=lifecycle-1')
   check('deepseek 领不到 qwen 的活', wrong.json?.job, null)
 
-  const right = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=qwen')
+  const right = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=qwen&session=qwen-1')
   check('qwen 能领到自己的活', right.json?.job?.platform, 'qwen')
 
   await call(route.handler, 'PUT', `/dsh-webin/api/job/${right.json.job.id}/result`, JSON.stringify({ text: 'ok', think: '', status: 'finished' }))
@@ -314,7 +315,7 @@ console.log('\n[3b] ⭐⭐ 已取消的任务不能被迟到结果「复活」�
   /** 领到任务。 */
   let jobId
   for (let i = 0; i < 60 && jobId === undefined; i += 1) {
-    const res = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+    const res = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek&session=revive-test')
     if (res.json?.job?.id !== undefined) jobId = res.json.job.id
     else await new Promise((r) => setTimeout(r, 50))
   }
@@ -337,7 +338,7 @@ console.log('\n[3b] ⭐⭐ 已取消的任务不能被迟到结果「复活」�
     const probe = await call(
       route.handler,
       'GET',
-      `/dsh-webin/api/job/next?platform=deepseek&running=${encodeURIComponent(jobId)}`,
+      `/dsh-webin/api/job/next?platform=deepseek&session=lifecycle-1&running=${encodeURIComponent(jobId)}`,
     )
     if (probe.json?.cancel === jobId) cancelled = true
   }

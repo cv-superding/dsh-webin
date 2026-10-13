@@ -704,6 +704,27 @@ interface HostRect {
 let hostRect: HostRect | null = null
 const rectListeners = new Set<(r: HostRect | null) => void>()
 
+/**
+ * 当前窗口挂在哪个 DSH 会话上。
+ *
+ * ## 谁写入
+ *
+ * `LdwPlaceholder`（挂在 `conversation.view` 上）从 props 拿到 DSH 给的
+ * `sessionId` 后写进来并上报 host。
+ *
+ * ## 谁读
+ *
+ * 发送循环领活时带上它（`?session=<id>`）—— host 据此只派发属于本窗口的
+ * 任务。没有它就会「所有窗口都生效」（用户实测报过）。
+ *
+ * ⚠️ 是模块级而不是 state：发送循环跑在 `setInterval` 里，读 state 会拿到
+ * 闭包里的旧值。ref 语义更合适。
+ */
+const sessionIdRef: { current: string } = { current: '' }
+
+/** 「props 已经打过日志了吗」—— 只打一次，不刷屏。 */
+let propsLogged = false
+
 function publishRect(rect: HostRect | null): void {
   hostRect = rect
   for (const fn of rectListeners) fn(rect)
@@ -1851,9 +1872,24 @@ export function LdwHost(): unknown {
          * 被取消就去按页面的停止按钮（否则页面白生成到结束、烧配额、还会串台）。
          */
         const running = pendingJobRef.current
+        /**
+         * ## ⭐ 领活必须带上**本窗口的会话身份**（用户报的「所有窗口都生效」）
+         *
+         * host 据此只派发属于本会话的任务。不带的话任何窗口都能领走任何
+         * 任务 —— 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的
+         * 同一个会话窗口」。
+         *
+         * `sessionIdRef` 由 `LdwPlaceholder`（挂 `conversation.view`）从
+         * DSH 给的 standardProps 写入 —— 是**官方 prop**，不是猜的。
+         *
+         * ⚠️ 没拿到时不带这个参数（host 退回按平台派发），
+         * 而不是拿一个空串去匹配 —— 那会导致谁也领不到活。
+         */
+        const sid = sessionIdRef.current
         const query =
           '/dsh-webin/api/job/next?platform=' +
           encodeURIComponent(provider.id) +
+          (sid === '' ? '' : '&session=' + encodeURIComponent(sid)) +
           (running === undefined ? '' : '&running=' + encodeURIComponent(running))
         /**
          * ⚠️ **领活请求也必须带超时**（审计发现）。
@@ -3943,8 +3979,63 @@ export function LdwLoginButton(): unknown {
 }
 
 
-export function LdwPlaceholder(): unknown {
+export function LdwPlaceholder(props?: { sessionId?: string }): unknown {
   const ref = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * ## ⭐ 上报「我挂在哪个 DSH 会话上」（用户报的「所有窗口都生效」）
+   *
+   * ## 事实（不是猜的）
+   *
+   * `conversation.view` 的 standardProps 里**直接有 `sessionId: SessionId`**
+   * —— 这是 DSH 官方提供的 prop（用 Slots Inspect 查到的
+   * `standardProps` 列表，含 `sessionId`、`useSession`、`useChat` 等）。
+   *
+   * ## 为什么需要
+   *
+   * 早期 `/job/next` 只按平台过滤 ⇒ **任何 DSH 窗口都能领走任何任务**。
+   * 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的同一个会话窗口」、
+   * 「所有窗口都生效」。
+   *
+   * 上报之后，host 派发时能带上目标会话，client 领活时也只领自己的。
+   *
+   * ⚠️ 拿不到 sessionId 时**不报错**（退回按平台派发）—— 那只是不够精确，
+   * 比整个功能坏掉好。
+   */
+  useEffect(() => {
+    const sid = typeof props?.sessionId === 'string' ? props.sessionId.trim() : ''
+    /**
+     * ## ⚠️ 把「实际收到了什么 props」打出来 —— 不猜
+     *
+     * 我按 Slots Inspect 的 `standardProps` 列表认定 `conversation.view`
+     * 会传 `sessionId`。但**契约写着有 ≠ 运行时真的传了** ——
+     * 所以第一次挂载时把**实际收到的 key** 打出来，
+     * 一眼就能确认（而不是靠我推断）。
+     *
+     * 用户要求「不要猜」—— 这就是把推断变成观测。
+     */
+    if (!propsLogged) {
+      propsLogged = true
+      const keys = props === undefined ? [] : Object.keys(props)
+      console.log('[dsh-webin] conversation.view 收到的 props', {
+        keys,
+        sessionId: sid === '' ? '(空)' : sid,
+        hasSessionId: sid !== '',
+      })
+    }
+    if (sid === '') return
+    sessionIdRef.current = sid
+    void fetchJson('/dsh-webin/api/client/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: sid }),
+    }).then((res) => {
+      if (res !== undefined && res.ok) {
+        console.log('[dsh-webin] 已上报会话身份', sid)
+      }
+    })
+  }, [props?.sessionId])
+
   useEffect(() => {
     const el = ref.current
     if (el === null) return

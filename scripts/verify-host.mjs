@@ -342,13 +342,13 @@ console.log('\n[7] 任务队列：领活 / 交结果')
   await new Promise((r) => setTimeout(r, 100))
 
   // 按平台领取：面板只领自己平台的活
-  const claimed = await call(apiRoute.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  const claimed = await call(apiRoute.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek&session=verify-host-session-1')
   check('client 能领到任务', claimed.json?.job !== undefined && claimed.json.job !== null, claimed.text)
   check('任务带 prompt', claimed.json?.job?.prompt?.includes('hello'), String(claimed.json?.job?.prompt))
   check('任务带 platform', claimed.json?.job?.platform === 'deepseek', String(claimed.json?.job?.platform))
 
   // 别的平台不该领到这个任务（多平台隔离）
-  const other = await call(apiRoute.handler, 'GET', '/dsh-webin/api/job/next?platform=qwen')
+  const other = await call(apiRoute.handler, 'GET', '/dsh-webin/api/job/next?platform=qwen&session=verify-host-session-1')
   check('别的平台领不到（平台隔离）', other.json?.job === null, other.text)
 
   const jobId = claimed.json.job.id

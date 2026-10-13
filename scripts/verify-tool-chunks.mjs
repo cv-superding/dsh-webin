@@ -168,7 +168,16 @@ async function runRound(adapter, route, opts) {
   const first = iter.next()
   await new Promise((r) => setTimeout(r, 150))
 
-  const claimed = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  /**
+   * ⚠️ 领活必须带**会话身份** —— 任务派发时带上了 `sessionId`，
+   * 窗口不带就领不到（这正是「所有窗口都生效」的修复）。
+   */
+  const claimSession = opts.sessionId ?? `chunk-${roundSeq}`
+  const claimed = await call(
+    route.handler,
+    'GET',
+    `/dsh-webin/api/job/next?platform=deepseek&session=${encodeURIComponent(claimSession)}`,
+  )
   const job = claimed.json?.job
   if (job === null || job === undefined) {
     await first.catch(() => undefined)

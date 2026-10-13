@@ -56,12 +56,40 @@ interface Job {
   createdAt: number
   /** 已领走的时间（client 拿到后置位，避免重复派发）。 */
   claimedAt?: number
+  /**
+   * 被**哪个 DSH 会话**的窗口领走的（诊断用）。
+   *
+   * 用户报「所有窗口都生效」时，靠它一眼看出「哪个窗口领了哪个任务」——
+   * 不用猜。见 `JobQueue.inspect()`。
+   */
+  claimedBy?: string
   /** client 交回的结果。 */
   done?: { text: string; think: string; status: string; chatUrl?: string }
   /** client 交回的错误。 */
   failed?: string
   /** 是否被用户取消（abort / 停止）。 */
   cancelled?: boolean
+  /**
+   * 该任务属于哪个 **DSH 会话**（`sessionId`）。
+   *
+   * ## ⭐ 为什么必须带上它（用户报的「所有窗口都生效」）
+   *
+   * 早期 `/job/next` **只按平台过滤** —— 于是任何 DSH 窗口都能领走任何任务。
+   * 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的同一个会话窗口」，
+   * 以及「所有窗口都生效」。
+   *
+   * 根因：`claimNext(platform)` 既不知道任务属于哪个会话，也不知道
+   * 来领活的 client 是哪个窗口。
+   *
+   * 现在任务带上 `sessionId`；client 半从 `conversation.view` 的
+   * standardProps 拿到自己窗口的 `sessionId`（**DSH 官方提供的 prop**，
+   * 不是我猜的 —— 见 Slots Inspect 的 `standardProps`），领活时带上，
+   * host 只派发给匹配的窗口。
+   *
+   * ⚠️ 没有 `sessionId` 时（老 client / 没上报）退回「按平台派发」，
+   * 保持向后兼容 —— 但记一条日志便于排查。
+   */
+  sessionId?: string
   /**
    * 发送前必须先导航到这个 URL —— 该任务所属 DSH 会话绑定的网页对话。
    *
@@ -107,6 +135,8 @@ class JobQueue {
     platform: string,
     expectUrl?: string,
     freshChat?: boolean,
+    /** 任务属于哪个 DSH 会话 —— client 据此只领自己窗口的活。 */
+    sessionId?: string,
   ): Job {
     const job: Job = {
       id: `job-${Date.now()}-${++this.seq}`,
@@ -116,6 +146,7 @@ class JobQueue {
       createdAt: Date.now(),
       ...(expectUrl === undefined ? {} : { expectUrl }),
       ...(freshChat === true ? { freshChat: true } : {}),
+      ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
     }
     this.jobs.set(job.id, job)
     /**
@@ -145,17 +176,74 @@ class JobQueue {
   /**
    * client 领一个待办任务（跳过已领走的）。
    *
+   * ## ⭐ 必须同时按**平台**和**会话**过滤（用户报的「所有窗口都生效」）
+   *
+   * 早期只按 `platform` 过滤 —— 于是**任何 DSH 窗口都能领走任何任务**。
+   * 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的同一个会话窗口」、
+   * 「所有窗口都生效」。
+   *
+   * 现在多一个 `sessionId`：
+   *   - 任务**有** `sessionId` ⇒ 只派给 `sessionId` 相同的窗口
+   *   - 任务**没有** `sessionId`（老 client 派发的）⇒ 任何窗口都能领
+   *     （向后兼容，不然任务会永远没人领）
+   *   - 窗口**没上报** `sessionId` ⇒ 只领「没有 sessionId」的任务
+   *     （不抢别人的活）
+   *
    * @param platform - 只领该平台的任务。面板可能同时挂着多个平台的 webview，
    *   各自只领自己平台的活，避免 DeepSeek 的面板去发 Qwen 的消息。
+   * @param sessionId - 来领活的窗口是哪个 DSH 会话（client 从
+   *   `conversation.view` 的 standardProps 拿到并上报）。
    */
-  claimNext(platform?: string): Job | undefined {
+  claimNext(platform?: string, sessionId?: string): Job | undefined {
     for (const job of this.jobs.values()) {
       if (job.done !== undefined || job.failed !== undefined || job.claimedAt !== undefined) continue
       if (platform !== undefined && job.platform !== platform) continue
+      /**
+       * 会话匹配：任务带 sessionId 时，只有同会话的窗口能领。
+       *
+       * ⚠️ 任务不带 sessionId 时**放行**（老路径）—— 否则那些任务
+       * 会永远躺在队列里没人领（比派错更糟）。
+       */
+      if (job.sessionId !== undefined && job.sessionId !== sessionId) continue
       job.claimedAt = Date.now()
+      job.claimedBy = sessionId ?? '(未上报)'
       return job
     }
     return undefined
+  }
+
+  /**
+   * 诊断：当前队列里有哪些任务、被谁领走了。
+   *
+   * 用户报「所有窗口都生效」时，靠这个能一眼看出**哪个窗口领了哪个任务** ——
+   * 不用再猜。
+   */
+  inspect(): {
+    id: string
+    platform: string
+    sessionId: string
+    claimedBy: string
+    state: string
+    ageMs: number
+  }[] {
+    const now = Date.now()
+    return [...this.jobs.values()].map((j) => ({
+      id: j.id,
+      platform: j.platform,
+      sessionId: j.sessionId ?? '(无)',
+      claimedBy: j.claimedBy ?? '(未领)',
+      state:
+        j.done !== undefined
+          ? 'done'
+          : j.failed !== undefined
+            ? j.cancelled === true
+              ? 'cancelled'
+              : 'failed'
+            : j.claimedAt !== undefined
+              ? 'claimed'
+              : 'pending',
+      ageMs: now - j.createdAt,
+    }))
   }
 
   /**
@@ -823,9 +911,20 @@ export function createAdapter(deps: AdapterDeps) {
       provider.id,
       diff.chatUrl,
       diff.chatUrl === undefined,
+      /**
+       * ⭐ 带上**DSH 会话 id** —— client 据此只领自己窗口的活。
+       *
+       * 用 `options.sessionId`（DSH 给的原始值）而不是 `sessionKey`
+       * （那个在没 sessionId 时会退化成 `platform#fingerprint`，
+       * 不是真正的会话标识，client 那边对不上）。
+       */
+      options.sessionId === undefined || options.sessionId === ''
+        ? undefined
+        : String(options.sessionId),
     )
     deps.logger?.debug?.(
-      `job ${job.id} 已派发（平台=${provider.id}，${diff.note}，${prompt.length} 字符，thinking=${String(spec.thinking)}）`,
+      `job ${job.id} 已派发（平台=${provider.id}，会话=${job.sessionId ?? '(无)'}，` +
+        `${diff.note}，${prompt.length} 字符，thinking=${String(spec.thinking)}）`,
     )
 
     let result: { text: string; think: string; status: string; chatUrl?: string }

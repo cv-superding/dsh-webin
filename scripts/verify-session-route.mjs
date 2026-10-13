@@ -175,7 +175,17 @@ async function runOne(adapter, route, sessionId, history, chatUrl, seen) {
   const last = iter.next()
   await new Promise((r) => setTimeout(r, 150))
 
-  const claimed = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  /**
+   * ⚠️ 领活必须带**会话身份** —— 任务派发时带上了 `sessionId`，
+   * 窗口不带就领不到（这正是「所有窗口都生效」的修复）。
+   *
+   * 这个测试用 `sessionId` 参数模拟不同窗口，所以领活也要用它。
+   */
+  const claimed = await call(
+    route.handler,
+    'GET',
+    `/dsh-webin/api/job/next?platform=deepseek&session=${encodeURIComponent(sessionId)}`,
+  )
   const job = claimed.json?.job ?? null
   if (job === null) {
     await last.catch(() => undefined)

@@ -414,6 +414,16 @@ export async function apply(ctx: {
    * cookie 写回**新** partition，从而实现免登录。
    */
   const partitions = new Map<string, { partition: string; domain: string; at: number }>()
+
+  /**
+   * 上报过身份的 DSH 会话（`sessionId` → 最后上报时刻）。
+   *
+   * client 半挂载 `conversation.view` 的 LDW 视图时上报自己窗口的
+   * `sessionId`（DSH 的 standardProps 直接给）。用途：
+   *   - `/status` 能列出「现在有哪些窗口挂着 LDW」
+   *   - 排查「任务被别的窗口领走」时，对照任务的 `sessionId`
+   */
+  const knownSessions = new Map<string, number>()
   const liveClients = (): ClientBeat[] => {
     const now = Date.now()
     const out: ClientBeat[] = []
@@ -625,10 +635,65 @@ export async function apply(ctx: {
         return
       }
 
+      /**
+       * ## POST /client/session —— client 上报「我挂在哪个 DSH 会话上」
+       *
+       * ## 为什么需要（用户报的「所有窗口都生效」）
+       *
+       * 早期 `/job/next` 只按平台过滤 ⇒ **任何窗口都能领走任何任务**。
+       * 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的同一个
+       * 会话窗口」、「所有窗口都生效」。
+       *
+       * client 半从 `conversation.view` 的 standardProps 拿到 `sessionId`
+       * （**DSH 官方提供的 prop**，见 Slots Inspect 的 standardProps 列表），
+       * 挂载时上报一次。之后领活带上 `?session=<id>`，host 只派匹配的。
+       *
+       * ⚠️ 上报失败不影响功能（退回按平台派发），所以这里**不返回错误**
+       * 给用户造成困扰 —— 只记日志。
+       */
+      if (method === 'POST' && pathname === `${API_PREFIX}/client/session`) {
+        const body = await readBody(req)
+        let payload: { sessionId?: string; platform?: string }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const sid = typeof payload.sessionId === 'string' ? payload.sessionId.trim() : ''
+        if (sid === '') {
+          sendJson(res, 400, { ok: false, reason: 'missing sessionId' })
+          return
+        }
+        knownSessions.set(sid, Date.now())
+        /** 顺手清理 10 分钟没上报的（窗口关了）。 */
+        const cutoff = Date.now() - 600_000
+        for (const [id, at] of knownSessions) if (at < cutoff) knownSessions.delete(id)
+        sendJson(res, 200, { ok: true, known: knownSessions.size })
+        return
+      }
+
       // GET /job/next —— client 领一个待办任务
       // `?platform=<id>` 让每个平台的 webview 只领自己的活
       if (method === 'GET' && pathname === `${API_PREFIX}/job/next`) {
         const platform = url.searchParams.get('platform') ?? undefined
+        /**
+         * ## ⭐ `?session=<sessionId>` —— 来领活的窗口是哪个 DSH 会话
+         *
+         * ## 为什么必须有（用户报的「所有窗口都生效」）
+         *
+         * 早期只按 `platform` 过滤 ⇒ **任何 DSH 窗口都能领走任何任务**。
+         * 用户实测：「换了几个 dsh 窗口聊天，发现全都是在网页版的同一个
+         * 会话窗口」、「所有窗口都生效」。
+         *
+         * client 半从 `conversation.view` 的 standardProps 拿到
+         * `sessionId`（**DSH 官方提供的 prop**，见 Slots Inspect 的
+         * `standardProps` 列表），领活时带上。
+         *
+         * ⚠️ 没带时退回「按平台派发」（向后兼容）—— 否则老 client
+         * 的任务会永远没人领。
+         */
+        const session = url.searchParams.get('session') ?? undefined
         /**
          * `?running=<jobId>` —— client 报告「我正在跑哪个任务」。
          *
@@ -645,7 +710,7 @@ export async function apply(ctx: {
           }
         }
 
-        const job = queue.claimNext(platform)
+        const job = queue.claimNext(platform, session)
         if (job === undefined) {
           sendJson(res, 200, { ok: true, job: null, clientOnline: queue.hasClaimed() })
           return
@@ -657,6 +722,8 @@ export async function apply(ctx: {
             prompt: job.prompt,
             thinking: job.thinking,
             platform: job.platform,
+            /** 该任务属于哪个 DSH 会话 —— client 可据此确认没领错。 */
+            ...(job.sessionId === undefined ? {} : { sessionId: job.sessionId }),
             /**
              * 该任务所属 DSH 会话绑定的网页对话 URL。
              * client 发现当前页面不在这里时，先导航过去再发送 ——
@@ -972,6 +1039,22 @@ export async function apply(ctx: {
            * 也读这个字段决定显示「去登录」还是「已登录」。
            */
           loggedInPlatforms: loggedInPlatforms(registry.all()),
+          /**
+           * ## ⭐ 任务队列快照 —— 「所有窗口都生效」时看这里，不用猜
+           *
+           * 每条显示：任务属于哪个会话、被**哪个会话的窗口**领走、当前状态。
+           *
+           * 排查「任务被别的窗口抢走了」时，这一眼就能看出来：
+           *   - `sessionId` 是任务的归属会话
+           *   - `claimedBy` 是实际领走它的窗口
+           *   - 两者不一致 ⇒ 就是派发错了
+           */
+          jobs: queue.inspect(),
+          /** client 上报过哪些会话（每个窗口挂载 LDW 视图时会上报）。 */
+          knownSessions: [...knownSessions.entries()].map(([id, at]) => ({
+            sessionId: id,
+            ageMs: Date.now() - at,
+          })),
           routes: [
             `GET    ${API_PREFIX}/status`,
             `GET    ${API_PREFIX}/providers`,

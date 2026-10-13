@@ -145,7 +145,15 @@ async function claimJob(adapter, route, opts) {
   const iter = stream[Symbol.asyncIterator]()
   const first = iter.next()
   await new Promise((r) => setTimeout(r, 120))
-  const claimed = await call(route.handler, 'GET', '/dsh-webin/api/job/next?platform=deepseek')
+  /**
+   * ⚠️ 领活必须带**会话身份** —— 任务派发时带上了 `sessionId`，
+   * 窗口不带就领不到（这正是「所有窗口都生效」的修复）。
+   */
+  const claimed = await call(
+    route.handler,
+    'GET',
+    `/dsh-webin/api/job/next?platform=deepseek&session=${encodeURIComponent(opts.sessionId)}`,
+  )
   const job = claimed.json?.job ?? null
   // 收尾：交一个空结果让流结束，避免悬挂
   if (job !== null) {
