@@ -82,6 +82,14 @@ function el(tag, opts = {}, ...children) {
     offsetWidth: opts.hidden === true ? 0 : 100,
     offsetHeight: opts.hidden === true ? 0 : 20,
     childNodes: children.flat().filter((c) => c !== null && c !== undefined && c !== ''),
+    /**
+     * ⭐ 元素子节点（真实 DOM 每个元素都有 children）——
+     * 思考块排除判据用 `node.children[0]` 判「第一个孩子是不是折叠条」，
+     * 桩缺这个 ⇒ fc2 = undefined ⇒ 判据静默跳过 ⇒ 测试测不出排除效果（踩过）。
+     */
+    get children() {
+      return this.childNodes.filter((c) => c.nodeType === 1)
+    },
     getAttribute(k) {
       return k in this.attrs ? this.attrs[k] : null
     },
@@ -138,6 +146,27 @@ function el(tag, opts = {}, ...children) {
     },
     querySelector(sel) {
       return this.querySelectorAll(sel)[0] ?? null
+    },
+    /**
+     * ⭐ 前一个元素兄弟（真实 DOM 每个元素都有）——
+     * 思考区排除 v3 用「前一个兄弟是折叠条」判思考 body，
+     * 桩缺了判据静默失效（与 children 同理，踩过）。
+     */
+    get previousElementSibling() {
+      const p = this.parentElement
+      if (!p) return null
+      const sibs = p.childNodes.filter((c) => c.nodeType === 1)
+      const i = sibs.indexOf(this)
+      return i > 0 ? sibs[i - 1] : null
+    },
+    /** ⭐ 真实 DOM 的 contains（思考子树跳过依赖它 —— 桩缺了会静默失效，踩过）。 */
+    contains(other) {
+      let n = other
+      while (n) {
+        if (n === this) return true
+        n = n.parentElement ?? null
+      }
+      return false
     },
   }
   return node
@@ -704,6 +733,33 @@ console.log('\n[22] ⭐⭐ 回复正文里含 nav/sidebar 字样的类名不能�
   const r = run(script, [el('body', {}, reply)])
   check('⭐⭐ 正文没被误杀', r.count, 1)
   check('⭐⭐ 内容完整', String(r.last).includes('提到了 sidebar'), true)
+}
+
+
+console.log('\n[23] ⭐⭐⭐ 思考块不混入正文（折叠条判定，实测类名无关）')
+{
+  /**
+   * ## 真实事故（用户实测鹈鹕任务）
+   *
+   * DeepSeek 新版把思考渲染在 .ds-markdown 容器里，
+   * 旧思考类名（think-content）不存在 ⇒ isThinkNode 拦不住 ⇒
+   * 42KB 思考被当回复交付。
+   *
+   * ## 修法（类名无关，用 UI 文案）
+   *
+   * 思考区的特征：节点文本里有「已思考（用时 N 秒）」折叠条。
+   * render 时节点文本含它且位置靠前 ⇒ 整个子树排除。
+   */
+  const thinkBlock = el('div', { cls: 'ds-markdown' },
+    el('div', { cls: 'think-header' }, text('已思考（用时 46 秒）')),
+    el('div', { cls: 'think-body' }, text('模型的长篇思考内容应该出现在这里而不是正文里。')),
+    el('div', { cls: 'answer' }, text('这是真正的回复正文。')),
+  )
+  const r = run(script, [thinkBlock])
+  check('⭐⭐⭐ 正文不含思考内容', String(r.last).includes('长篇思考内容'), false)
+  check('⭐⭐ 正文保留', String(r.last).includes('真正的回复正文'), true)
+  /** 思考进 think 字段（readThink 折叠条定位）。 */
+  check('⭐ think 字段读到思考', String(r.think).includes('长篇思考内容'), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

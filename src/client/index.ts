@@ -1994,7 +1994,6 @@ export function LdwHost(): unknown {
                * 所以：**每 20 秒最多抓一次**，且命中 0 的报告不缓存当结论。
                */
               if (
-                scrapeDiagRef.current.selector === 'longest-div' &&
                 Date.now() - domReportAtRef.current > 20_000 &&
                 (domReportRef.current === undefined ||
                   (domReportRef.current as { needleHits?: number }).needleHits === 0)

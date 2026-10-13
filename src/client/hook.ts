@@ -949,6 +949,36 @@ export function buildScrapeScript(): string {
        * 找到的思考容器时会得到空串（踩过：改完正文排除后思考读不到了）。
        */
       if (!forThink && isThinkNode(node)) return '';
+      /**
+       * ⭐⭐ 「思考区」排除（两层判据，实测类名无关）：
+       *   A) 节点文本含「已思考（用时」且 < 60 字 ⇒ 折叠条标题本身
+       *   B) 节点的**第一个孩子**文本是折叠条 ⇒ 思考块（标题+内容）
+       * 命中任一 ⇒ 排除（render 与 fallback 都走这里）。
+       * 容器（ds-markdown）不排除 —— 它还装正文。
+       */
+      if (!forThink && node.parentElement) {
+        /**
+         * ⭐⭐ 思考区排除 v3（基于「兄弟结构」而非「首孩」）：
+         *
+         * 用户截图的页面结构：折叠条、思考内容、正文是**依次的兄弟**
+         * （都在消息容器里）。排除规则：
+         *   A) 节点自身是折叠条（文本 < 60 且含「已思考（用时」）
+         *   B) 节点的**前一个兄弟**是折叠条 ⇒ 节点是思考 body
+         *
+         * ⚠️ 不能用「首孩是折叠条」判容器 —— 容器的首孩也是折叠条，
+         * 排除容器会把正文一起丢（实测踩过：last 变空）。
+         * ⚠️ previousElementSibling 真实 DOM 有；桩也要有（已加）。
+         */
+        var nt3 = '';
+        try { nt3 = String(node.textContent || ''); } catch (e) { nt3 = ''; }
+        if (nt3.indexOf('已思考（用时') !== -1 && nt3.length < 60) return '';
+        var prev = node.previousElementSibling || null;
+        if (prev) {
+          var pt = '';
+          try { pt = String(prev.textContent || ''); } catch (e) { pt = ''; }
+          if (pt.indexOf('已思考（用时') !== -1 && pt.length < 60) return '';
+        }
+      }
 
       var tag = String(node.tagName || '').toLowerCase();
       if (tag === 'br') return '\\n';
@@ -1012,6 +1042,40 @@ export function buildScrapeScript(): string {
        *
        * 所以优先用 「ds-think-content」（精确），后面几个是页面改版时的兜底。
        */
+      /**
+       * ⭐ 优先用「已思考」折叠条定位（类名无关，UI 文案稳定）。
+       *
+       * 标题条：含「已思考」且无更深含「已思考」的子节点。
+       * 思考内容 = 标题条的**下一个兄弟**（展开时是缩进块）；
+       * 找不到兄弟就用父级文本（排除标题条自身）。
+       */
+      try {
+        var els2 = document.querySelectorAll('*');
+        for (var wi = els2.length - 1; wi >= 0; wi--) {
+          var wt = '';
+          try { wt = String(els2[wi].textContent || ''); } catch (e) { wt = ''; }
+          if (wt.indexOf('已思考') === -1 || wt.length > 200) continue;
+          var wkk = els2[wi].children || [];
+          var wdeeper = false;
+          for (var wj = 0; wj < wkk.length; wj++) {
+            if (String(wkk[wj].textContent || '').indexOf('已思考') !== -1) { wdeeper = true; break; }
+          }
+          if (wdeeper) continue;
+          /** 找到标题条。思考 = 它父级里除标题条外文本最长的兄弟。 */
+          var best2 = null, bestLen2 = 0;
+          var sibs2 = els2[wi].parentElement ? (els2[wi].parentElement.children || []) : [];
+          for (var si2 = 0; si2 < sibs2.length; si2++) {
+            if (sibs2[si2] === els2[wi]) continue;
+            var st2 = '';
+            try { st2 = String(sibs2[si2].textContent || ''); } catch (e) { st2 = ''; }
+            if (st2.length > bestLen2) { bestLen2 = st2.length; best2 = sibs2[si2]; }
+          }
+          if (best2 && bestLen2 > 10) return tidy(render(best2, true));
+          /** 没有兄弟（思考收起）—— 退回普通选择器路径。 */
+          break;
+        }
+      } catch (e) { /* 降级到 SEL 路径 */ }
+
       var SEL = [
         '.ds-think-content',
         '[class*="think-content"]',
@@ -1279,10 +1343,24 @@ export function buildScrapeScript(): string {
     var fallbackInfo = "";
       var all = root.querySelectorAll('div');
       var best = '';
+      var excluded = [];
       for (var k = 0; k < all.length; k++) {
         if (!present(all[k])) continue;
         if (inChrome(all[k])) continue;
         var txt = tidy(render(all[k]));
+        if (txt === '') {
+          /**
+           * ⭐ render 排除了它（思考块等）—— 记下子树，
+           * 后面不再扫它的孩子（否则思考 body 这个子 div 会被抓）。
+           */
+          excluded.push(all[k]);
+          continue;
+        }
+        var under = false;
+        for (var ei = 0; ei < excluded.length; ei++) {
+          try { if (excluded[ei].contains(all[k])) { under = true; break; } } catch (e) {}
+        }
+        if (under) continue;
         if (txt.length > best.length) best = txt;
       }
       if (best.length >= 8) { list = [best]; usedSelector = 'longest-div'; }
