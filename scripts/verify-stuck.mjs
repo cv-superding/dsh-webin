@@ -145,13 +145,17 @@ console.log('\n[2] ⭐ 发送拆成两个短调用（照 cuckoo 的架构）')
   /** 随机延迟必须在**客户端**侧。 */
   check('⭐ 延迟在客户端 setTimeout', /await new Promise\(\(r\) => setTimeout\(r, gapMs\)\)/.test(clientSrc), true)
   check('用 pickSendDelay 取延迟', /pickSendDelay\(cfgNow\.sendDelayMinMs/.test(clientSrc), true)
-  /** 填充与触发是两次独立调用。 */
-  const iFill = clientSrc.indexOf('buildFillScript(prompt')
+  /**
+   * 填充与触发是两次独立调用（主发送路径）。
+   * ⚠️ 用 lastIndexOf —— 看门狗（cuckoo 式「请继续」催继续）也复用
+   * fill/trigger 两段式，出现在主路径**之前**；indexOf 会误判顺序（踩过）。
+   */
+  const iFill = clientSrc.lastIndexOf('buildFillScript(prompt')
   /**
    * ⚠️ 只匹配函数名前缀 —— 现在调用是多行的（多了 expectText 参数），
    * 把参数写死会在加参数时误报失败（踩过）。
    */
-  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider)')
+  const iTrig = clientSrc.lastIndexOf('buildTriggerScript(sendHintsFor(provider)')
   check('⭐ 两次独立调用（填充在前）', iFill > 0 && iTrig > iFill, true)
 }
 

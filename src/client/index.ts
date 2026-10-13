@@ -798,6 +798,12 @@ const promptRef: { current: string } = { current: '' }
 /** DOM 报告上次抓取时刻（限流：20 秒最多一次，防拖死 tick —— 见抓取处注释）。 */
 const domReportAtRef: { current: number } = { current: 0 }
 
+/**
+ * 看门狗催继续的计数（照抄 cuckoo watchdog：最多 3 次）。
+ * 每个新任务开始时重置为 0（见 clearPending）。
+ */
+const watchdogCountRef: { current: number } = { current: 0 }
+
 const scrapeDiagRef: {
   current: {
     selector?: string
@@ -1829,6 +1835,8 @@ export function LdwHost(): unknown {
         scrapedChangedAtRef.current = 0
         baselineRef.current = 0
         baselineTextRef.current = ''
+        /** 看门狗计数归零（新任务重新有 3 次催继续的机会）。 */
+        watchdogCountRef.current = 0
       }
       /**
        * ## ⚠️ 正在等回复时**绝不能再领新任务**
@@ -2093,6 +2101,74 @@ export function LdwHost(): unknown {
                 if ((scraped as { generating?: boolean }).generating === true) {
                   console.log('[dsh-webin] 内容静默但页面仍在生成（停止按钮在）—— 继续等')
                   scrapedChangedAtRef.current = now
+                  return
+                }
+
+                /**
+                 * ## ⭐⭐⭐ 看门狗（照抄 cuckoo `bridge/loop/watchdog.ts` 的本质）
+                 *
+                 * ## 对应的场景（用户实测两次）
+                 *
+                 * 模型长时间思考（46 秒）后**服务端把生成停了** ——
+                 * 正文一个字没写，页面停在「已停止」+「继续生成」。
+                 * 早期行为：把思考当回复交付（42KB）/ 卡到超时。
+                 *
+                 * ## cuckoo 的做法（本质照抄，信号换成了 DOM 静默）
+                 *
+                 * cuckoo：SSE 流静默超阈值 ⇒ 发提示词「请继续」催模型接着写，
+                 * 最多 3 次；3 次还不动才算完。
+                 *
+                 * 我的信号：DOM 静默（内容没变 + 不在生成中）⇒ 同样的动作。
+                 * SSE 静默检测用不了（hook 是 dom-ready 注入，晚于页面脚本，
+                 * 抓不到完整流）—— 但 DOM 静默是等价信号：生成中页面每 1.5s
+                 * 都在变，静默 = 断流。
+                 *
+                 * ## 判据
+                 *
+                 *   - 内容静默 ≥ 12 秒（STABLE_MS 的 4 倍 —— 正常停顿 3 秒内）
+                 *   - 且**不在生成中**（停止按钮不在）
+                 *   - 且**正文从未出现过**（交付了思考就是白交 —— 判据：
+                 *     最后内容是「长思考+短正文」的形状不可靠，改用
+                 *     「本轮已交付过思考？没有」+ 思考存在 ⇒ 大概率只思考完）
+                 *   - 催继续最多 3 次（WATCHDOG_MAX），每次间隔 12 秒
+                 *   - 3 次后放弃 ⇒ 正常交付（有什么交什么）
+                 */
+                const IDLE_WATCH_MS = 12_000
+                if (
+                  now - scrapedChangedAtRef.current >= IDLE_WATCH_MS &&
+                  think.length > 0 &&
+                  watchdogCountRef.current < 3
+                ) {
+                  watchdogCountRef.current += 1
+                  console.log(
+                    `[dsh-webin] 看门狗：流静默 ${Math.round((now - scrapedChangedAtRef.current) / 1000)}s 且只有思考（第 ${watchdogCountRef.current}/3 次催继续）`,
+                  )
+                  /**
+                   * 催继续 = 把「请继续」打进输入框并点发送。
+                   * 复用 fill/trigger 两段式（与正式发送同一套可靠路径）。
+                   */
+                  void (async () => {
+                    try {
+                      const fillRaw = await execJs<string>(
+                        el,
+                        buildFillScript('请继续', sendHintsFor(provider)),
+                        30_000,
+                      )
+                      if (fillRaw === EXEC_TIMEOUT) return
+                      await new Promise((r) => setTimeout(r, pickSendDelay(currentConfig())))
+                      await execJs<string>(
+                        el,
+                        buildTriggerScript(sendHintsFor(provider), '请继续'),
+                        15_000,
+                      )
+                      /** 催完重置静默计时 + 记住新的基线（消息列表又长了一条）。 */
+                      scrapedChangedAtRef.current = Date.now()
+                      baselineRef.current = count
+                      baselineTextRef.current = last
+                    } catch {
+                      /* 催失败不致命 —— 走原来的交付路径 */
+                    }
+                  })()
                   return
                 }
 
