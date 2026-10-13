@@ -85,6 +85,20 @@ function el(tag, opts = {}, ...children) {
     getAttribute(k) {
       return k in this.attrs ? this.attrs[k] : null
     },
+    /**
+     * ⭐ 元素自己的 querySelectorAll（真实 DOM 每个元素都有）。
+     *
+     * 抓取逻辑会先定位 main 再在它里面查 —— 桩缺这个就抛
+     * "root.querySelectorAll is not a function"（踩过）。
+     * 这里用 document 级实现过滤出**本子树内**的节点。
+     */
+    querySelectorAll(sel) {
+      const all = collectAll(this)
+      return all.filter((n) => n !== this && matches(n, sel))
+    },
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] ?? null
+    },
     /** 深度优先取全部文本（真实 textContent 的语义）。 */
     get textContent() {
       let out = ''
@@ -141,8 +155,28 @@ function run(script, roots) {
    * ⚠️ 这里**必须和真实 DOM 语义一致**，否则测试会因为桩的缺陷
    * 而误报（踩过：`.ds-markdown` 没被识别，脚本掉到模糊兜底分支）。
    */
+  /**
+   * ## ⭐ 建立 parentElement 链
+   *
+   * 真实 DOM 里每个节点都有 parentElement。新的抓取逻辑要用它
+   * **往上找祖先**（判断是否在侧边栏里），所以桩必须提供 ——
+   * 否则 inChrome 永远返回 false，测试就测不出效果（踩过）。
+   */
+  const linkParents = (node, parent) => {
+    if (node === null || node === undefined || node.nodeType !== 1) return
+    Object.defineProperty(node, 'parentElement', {
+      value: parent,
+      configurable: true,
+      writable: true,
+    })
+    for (const c of node.childNodes ?? []) linkParents(c, node)
+  }
+  for (const root of roots) linkParents(root, null)
+
   const matches = (n, sel) => {
     if (n.nodeType !== 1) return false
+    /** ⭐ 逗号分组：任一命中即算（真实 querySelectorAll 的语义）。 */
+    if (sel.includes(',')) return sel.split(',').some((p) => matches(n, p.trim()))
     const s = sel.trim()
     if (s.startsWith('.')) return String(n.className).split(/\s+/).includes(s.slice(1))
     const star = /^\[class\*=["']([^"']+)["']\]$/.exec(s)
@@ -323,11 +357,41 @@ console.log('\n[7] 不可见的回复要被跳过')
   check('读到可见那条', r.last.includes('这条回复是可见的内容'), true)
 }
 
-console.log('\n[8] 太短的内容不算回复（避免把占位当回复）')
+console.log('\n[8] ⭐⭐⭐ 短回复必须采信（这是「一直等」的真正根因）')
 {
+  /**
+   * ## ⚠️⚠️ 这一组原来是**反的** —— 它编码的正是那个 bug
+   *
+   * 原来断言「太短的内容不算回复」，要求 ds-markdown 里至少 8 个字符。
+   * 看起来合理，实际是灾难。
+   *
+   * ## 端到端现场（探针的原始输出）
+   *
+   *     root=MAIN  cand=1  present=true  inChrome=false
+   *     len=1  txt=5          ← 回复正文就是「5」
+   *     ...但 count=0         ← 被长度过滤拒了
+   *
+   * 用户问「1+1=?只回答数字」，DeepSeek 答「2」—— **一个字符**。于是：
+   *   1. 精确候选命中但内容太短 ⇒ 丢弃
+   *   2. 所有候选都被拒 ⇒ list 为空
+   *   3. 落到 longest-div 兜底 ⇒ **抓走侧边栏的会话列表**
+   *   4. 「内容变了吗」永远不成立 ⇒ **DSH 一直等，网页版早答完了**
+   *
+   * ## 正确判据
+   *
+   * **精确类名**（.ds-markdown，来自真实页面）命中就是回复 ——
+   * 内容再短也是回复。长度过滤只对**模糊候选**保留。
+   */
   const tiny = el('div', { cls: 'ds-markdown' }, el('p', {}, text('嗯')))
   const r = run(script, [tiny])
-  check('⭐ 太短不采信', r.ok, false)
+  check('⭐⭐⭐ 一个字的回复也要采信', r.ok, true)
+  check('⭐⭐ 内容读得到', String(r.last).trim(), '嗯')
+  check('⭐ 命中精确类名', r.selector, '.ds-markdown')
+
+  /** 模糊候选仍然要长度过滤（避免收进按钮碎片）。 */
+  const fuzzy = el('div', { cls: 'some-markdown-thing' }, text('嗯'))
+  const r2 = run(script, [fuzzy])
+  check('⭐ 模糊候选仍然过滤短内容', r2.ok, false)
 }
 
 console.log('\n[9] 空 DOM 不抛错（返回结构化失败）')
@@ -538,6 +602,99 @@ console.log('\n[19] ⭐⭐ 高度为 0 的回复也要算「有一条回复」')
   check('⭐⭐ 高度 0 也算一条回复', r.count, 1)
   check('⭐⭐ 内容读得到', r.last.includes('高度是 0，但内容在'), true)
   check('命中 ds-markdown', r.selector, '.ds-markdown')
+}
+
+console.log('\n[20] ⭐⭐⭐ 侧边栏不能被当成回复（端到端实测抓到的真 bug）')
+{
+  /**
+   * ## 现场（`node scripts/e2e-echo.mjs` 的真实输出）
+   *
+   * 问「1+1=?只回答数字」，抓回来 1256 字符，内容是：
+   *
+   *     开启新对话 / 置顶 / 低光增强Prompt模块设计与实现 /
+   *     REN模块去雨Prompt模块架构设计 / 今天 / 1加1等于2 /
+   *     在不在 / 技能调用确认 / 昨天
+   *
+   * —— **侧边栏的会话列表**，不是回复正文。
+   *
+   * ## 为什么
+   *
+   * 候选全没命中时走 longest-div 兜底：取**全页最长**的 div 文本。
+   * 侧边栏堆着所有历史会话标题，文本长度轻易超过一条回复 ⇒ 抓走侧边栏。
+   *
+   * ## 判据（两条一起用）
+   *
+   *   1. **正向**：先找 main 元素，在它里面找 —— 侧边栏不在 main 里
+   *   2. **反向**：inChrome 排除 aside/nav/role=navigation/
+   *      class 含 sidebar 等的**祖先**
+   */
+  const sidebarTitles = [
+    '低光增强Prompt模块设计与实现',
+    'REN模块去雨Prompt模块架构设计',
+    '1加1等于2',
+    '在不在',
+    '技能调用确认',
+    '安装 dsh-our-free-model 插件',
+    '鹅鹅骑自行车 HTML',
+    '模型思考强度无法调节',
+  ]
+  const sidebar = el(
+    'aside',
+    { cls: 'ds-sidebar' },
+    el('div', { cls: 'sidebar-inner' }, ...sidebarTitles.map((t) => el('div', { cls: 'item' }, text(t)))),
+  )
+  /** 回复正文（短得多）。 */
+  const reply = el('div', { cls: 'ds-markdown' }, el('p', {}, text('5')))
+  /** 主内容区包着回复。 */
+  const main = el('main', { cls: 'chat-main' }, reply)
+  const body = el('body', {}, sidebar, main)
+
+  const r = run(script, [body])
+  check('⭐⭐⭐ 抓到的是回复而不是侧边栏', String(r.last).trim(), '5')
+  check('⭐⭐ 命中精确类名', r.selector, '.ds-markdown')
+  check('⭐ 条数是 1（不是侧边栏那一坨）', r.count, 1)
+  check('⭐⭐ 侧边栏的标题没混进来', String(r.last).includes('低光增强'), false)
+  check('⭐ 主内容区定位正确', r.root, 'main')
+}
+
+console.log('\n[21] ⭐⭐ 没有 main 元素时靠 inChrome 排除侧边栏')
+{
+  /**
+   * 有些布局不用 main 标签。那时只能靠反向排除 —— 所以这条必须独立成立。
+   *
+   * 桩里侧边栏用 role="navigation"（语义标记），回复在普通 div 里，
+   * 且**故意让侧边栏文本更长** —— 逼着兜底路径去选，看它会不会选错。
+   */
+  const sidebar = el(
+    'div',
+    { cls: 'x', attrs: { role: 'navigation' } },
+    el('div', {}, text('很长的会话标题一'.repeat(20))),
+  )
+  /** 回复容器：故意不用 ds-markdown，逼兜底路径生效。 */
+  const reply = el('div', { cls: 'reply-body' }, text('这是真正的回复正文，长度很短。'))
+  const body = el('body', {}, sidebar, reply)
+
+  const r = run(script, [body])
+  check('⭐⭐ 兜底路径没选侧边栏', String(r.last).includes('真正的回复正文'), true)
+  check('⭐⭐ 侧边栏的长文本没被选中', String(r.last).includes('很长的会话标题'), false)
+  check('⭐ 走的是 longest-div 兜底', r.selector, 'longest-div')
+}
+
+console.log('\n[22] ⭐⭐ 回复正文里含 nav/sidebar 字样的类名不能被误杀')
+{
+  /**
+   * inChrome 只排除**祖先**，且用词边界匹配。
+   * 回复正文自己的类名里含这些词时**不该被排除** ——
+   * 否则会误伤（宁可漏排也不能错杀）。
+   */
+  const reply = el(
+    'div',
+    { cls: 'ds-markdown' },
+    el('p', {}, text('这段文字里提到了 sidebar 和 navigation 两个词。')),
+  )
+  const r = run(script, [el('body', {}, reply)])
+  check('⭐⭐ 正文没被误杀', r.count, 1)
+  check('⭐⭐ 内容完整', String(r.last).includes('提到了 sidebar'), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
