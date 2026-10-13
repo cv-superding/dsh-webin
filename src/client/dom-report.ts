@@ -428,6 +428,53 @@ export function buildDomReportScript(needle: string): string {
       }
     } catch (e) {}
 
+    /**
+     * ⭐⭐⭐ 「已思考」条 + 它后面的兄弟 —— 思考/正文的 DOM 分界。
+     *
+     * ## 用户截图给的特征
+     *
+     * 生成中/结束后，消息里有「已思考（用时 N 秒）˅」折叠条，
+     * 思考内容缩进在它下面；正文（如果有）在折叠条**之后**。
+     *
+     * 事故：思考 46 秒后服务端停了 ⇒ 正文永远没出现 ⇒
+     * 交付判据把「思考块」当回复（39KB 思考）。
+     *
+     * 导出：折叠条元素 + 它后面的兄弟（= 正文区），
+     * 拿到真实类名后就能在抓取时**排除思考块**。
+     */
+    var thinkChain = [];
+    try {
+      var els = document.querySelectorAll('*');
+      for (var ti = 0; ti < els.length; ti++) {
+        var tt = '';
+        try { tt = String(els[ti].textContent || ''); } catch (e) { tt = ''; }
+        /** 找含「已思考」且文本较短（是标题条不是整个思考）。 */
+        if (tt.indexOf('已思考') === -1 || tt.length > 200) continue;
+        var kk = els[ti].children || [];
+        var deeper = false;
+        for (var di = 0; di < kk.length; di++) {
+          if (String(kk[di].textContent || '').indexOf('已思考') !== -1) { deeper = true; break; }
+        }
+        if (deeper) continue;
+        /** 它自己和往上 4 层。 */
+        var n = els[ti];
+        for (var ui = 0; ui < 4 && n; ui++) {
+          var sibs = [];
+          if (n.parentElement) {
+            var ps = n.parentElement.children || [];
+            for (var wi = 0; wi < ps.length && wi < 10; wi++) {
+              var wt = '';
+              try { wt = String(ps[wi].textContent || ''); } catch (e) { wt = ''; }
+              sibs.push(describe(ps[wi]).slice(0, 44) + '(' + wt.length + ')');
+            }
+          }
+          thinkChain.push({ d: ui, el: describe(n).slice(0, 90), sibs: sibs.join(' | ').slice(0, 500) });
+          n = n.parentElement;
+        }
+        break;
+      }
+    } catch (e) {}
+
     /** 页面上的文本总量 —— 判断「内容到底渲染了没」。 */
     var bodyText = '';
     try { bodyText = String(document.body ? document.body.innerText || document.body.textContent || '' : ''); } catch (e) { bodyText = ''; }
@@ -454,6 +501,8 @@ export function buildDomReportScript(needle: string): string {
       shadowHosts: shadowHosts,
       /** iframe 数 —— 消息可能在另一个文档里。 */
       iframes: iframes,
+      /** ⭐⭐⭐ 已思考折叠条及其兄弟（思考/正文分界）。 */
+      thinkChain: thinkChain,
       /** ⭐⭐⭐ ds-markdown 内部块结构（修思考混入的关键）。 */
       mdBlocks: mdBlocks,
       /** ⭐⭐⭐ 消息清单（visible-items 的直接子元素）。 */
