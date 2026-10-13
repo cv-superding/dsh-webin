@@ -159,6 +159,18 @@ function el(tag, opts = {}, ...children) {
       const i = sibs.indexOf(this)
       return i > 0 ? sibs[i - 1] : null
     },
+    /**
+     * ⭐ 下一个元素兄弟（真实 DOM 每个元素都有）——
+     * 「语言标签条排除」用它判「下一个兄弟是不是 pre」，
+     * 桩缺了判据静默失效（与 children / previousElementSibling 同理，踩过）。
+     */
+    get nextElementSibling() {
+      const p = this.parentElement
+      if (!p) return null
+      const sibs = p.childNodes.filter((c) => c.nodeType === 1)
+      const i = sibs.indexOf(this)
+      return i >= 0 && i < sibs.length - 1 ? sibs[i + 1] : null
+    },
     /** ⭐ 真实 DOM 的 contains（思考子树跳过依赖它 —— 桩缺了会静默失效，踩过）。 */
     contains(other) {
       let n = other
