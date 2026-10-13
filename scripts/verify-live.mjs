@@ -378,5 +378,48 @@ console.log('\n[10] ⭐⭐ 页面结构报告要能列出「有内容的容器�
   check('⭐⭐ 产物里有 bodyTextLen', /bodyTextLen/.test(cb), true)
 }
 
+
+console.log('\n[11] ⭐⭐⭐ 注入式自检：不依赖 DSH 的 HMR（实测它浏览器端不消费）')
+{
+  /**
+   * ## 实测查清的完整事实链
+   *
+   * DSH 的 client-hmr **服务端全对**：
+   *   ✅ host 每 500ms stat 轮询 lib/client.js
+   *   ✅ SSE 推 rebuilt 帧（实测收到
+   *      {"type":"rebuilt","id":"dsh-webin","rev":"9a4929dc7a68"}）
+   *   ✅ 服务器按新 rev 提供新 bundle（拉到的新内容正确）
+   *   ❌ **浏览器端不消费那个帧** ⇒ 新代码永不生效
+   *
+   * 证据：面板 clientId 不变、新字段永不出现（跨多次重启验证）。
+   *
+   * ## 所以改用「往 index.html 注入自检脚本」
+   *
+   * 注入的脚本**每次页面加载都跑**，与 client bundle 版本无关 ——
+   * 绕开「旧面板读不懂新字段」的死循环。
+   */
+  const hostSrc = readFileSync(join(ROOT, 'src', 'host', 'index.ts'), 'utf8')
+
+  check('⭐⭐ 声明了 tapIndex', /tapIndex\?\(transform/.test(hostSrc), true)
+  check('⭐⭐ 用 tapIndex 注入', /ctx\.webServer\.tapIndex\(\(html\)/.test(hostSrc), true)
+  check('⭐⭐ 注入脚本自包含', /__ldwReloadCheck__/.test(hostSrc), true)
+  /** tapIndex 不可用时要有降级（不能因此让插件加载失败）。 */
+  check(
+    '⭐⭐ tapIndex 不可用时优雅降级',
+    /typeof ctx\.webServer\.tapIndex !== 'function'[\s\S]{0,200}?return \(\) => undefined/.test(hostSrc),
+    true,
+  )
+  /** 有任务在跑时不重载。 */
+  check('⭐⭐ 注入脚本 4 秒轮询', /setInterval\(check, 4000\)/.test(hostSrc), true)
+
+  /** /build 路由（注入脚本问它要当前 rev）。 */
+  check('⭐⭐ 有 /build 路由', /API_PREFIX\}\/build/.test(hostSrc), true)
+  check('⭐⭐ /build 用与 DSH 相同的 rev 算法', /framedHash|plugin-artifact/.test(hostSrc), true)
+
+  const hb = readFileSync(join(ROOT, 'lib', 'index.js'), 'utf8')
+  check('⭐⭐ 产物有 /build', /API_PREFIX\}\/build/.test(hb), true)
+  check('⭐⭐ 产物有注入脚本', /__ldwReloadCheck__/.test(hb), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

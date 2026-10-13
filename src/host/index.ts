@@ -34,6 +34,7 @@ import { mkdir, readFile, writeFile, rename, readdir, unlink } from 'node:fs/pro
 import {existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
@@ -433,6 +434,25 @@ export async function apply(ctx: {
       path: string
       handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
     }): () => void
+    /**
+     * 往 `index.html` 注入内容（DSH 的 `webServer` 服务提供）。
+     *
+     * ## 为什么需要（查清 HMR 缺陷后的解法）
+     *
+     * 实测确认 DSH 的 `client-hmr` **只做了一半**：
+     *   ✅ host 每 500ms 轮询、算新 rev、SSE 推 `rebuilt` 帧
+     *   ✅ 服务器按新 rev 提供新 bundle（拉到的内容确实是新的）
+     *   ❌ **浏览器端不消费那个帧** ⇒ 新代码永不生效
+     *
+     * 证据：SSE 上确实收到
+     * `{"type":"rebuilt","id":"dsh-webin","rev":"9a4929dc7a68"}`，
+     * 但面板的 `clientId` 不变、新字段永不出现。
+     *
+     * 所以不能依赖它。**注入一段独立的自检脚本** —— 它写在
+     * `index.html` 里，**每次页面加载都跑**，与 client bundle
+     * 是哪个版本无关，从而绕开「旧面板读不懂新字段」的死循环。
+     */
+    tapIndex?(transform: (html: string) => string): () => void
   }
   logger?: unknown
   llm: {
@@ -862,6 +882,44 @@ export async function apply(ctx: {
         const cutoff = Date.now() - 600_000
         for (const [id, at] of knownSessions) if (at < cutoff) knownSessions.delete(id)
         sendJson(res, 200, { ok: true, known: knownSessions.size })
+        return
+      }
+
+      /**
+       * ## GET /build —— 当前 client 产物的构建号（给注入脚本轮询用）
+       *
+       * 注入到 `index.html` 的自检脚本每隔几秒问一次；rev 变了就重载。
+       * 这样**不依赖** DSH 的 HMR（实测它浏览器端不消费 `rebuilt` 帧）。
+       *
+       * ⚠️ 这个路由要**极轻**：它每几秒被每个页面请求一次。
+       * 只 stat 一个文件，不做别的。
+       */
+      if (method === 'GET' && pathname === `${API_PREFIX}/build`) {
+        let rev = 'unknown'
+        let mtimeMs = 0
+        try {
+          const p = clientBundlePath()
+          const st = statSync(p)
+          mtimeMs = st.mtimeMs
+          /**
+           * 与 DSH 的 `artifactRevision` **同算法**（framedHash + mtime/ctime/size）——
+           * 这样我们的 rev 和 graph 里那个一致，排查时能直接对照。
+           */
+          rev = createHash('sha1')
+            .update('plugin-artifact')
+            .update('\0')
+            .update(`${String(Buffer.byteLength(String(st.mtimeMs)))}:`)
+            .update(String(st.mtimeMs))
+            .update(`${String(Buffer.byteLength(String(st.ctimeMs)))}:`)
+            .update(String(st.ctimeMs))
+            .update(`${String(Buffer.byteLength(String(st.size)))}:`)
+            .update(String(st.size))
+            .digest('hex')
+            .slice(0, 12)
+        } catch {
+          /* 读不到产物就报 unknown —— 注入脚本会忽略它 */
+        }
+        sendJson(res, 200, { ok: true, rev, mtimeMs, builtAt: currentVersion().builtAt })
         return
       }
 
@@ -1425,5 +1483,77 @@ export async function apply(ctx: {
     () => ctx.webServer.register({ kind: 'prefix', path: API_PREFIX, handler }),
     'dsh-webin: api routes',
   )
+
+  /**
+   * ## ⭐⭐ 往页面注入「版本自检」—— 让新代码自动生效，不用用户重启
+   *
+   * ## 为什么必须这样做（实测查清的 HMR 缺陷）
+   *
+   * DSH 的 `client-hmr` **只做了一半**：
+   *
+   *   ✅ host 每 500ms stat 轮询 `lib/client.js`，算新 rev
+   *   ✅ 通过 `/plugins/events` SSE 推 `rebuilt` 帧
+   *   ✅ 服务器按新 rev 提供新 bundle（实测拉到的新内容正确）
+   *   ❌ **浏览器端不消费那个帧** ⇒ 新代码永不生效
+   *
+   * 实测证据：
+   *   - SSE 上确实收到 `{"type":"rebuilt","id":"dsh-webin","rev":"9a4929dc7a68"}`
+   *   - 服务器返回的 bundle 含 `clientBuiltAt` / `rich`（= 新代码）
+   *   - 但面板的 `clientId` 不变、新字段永不出现
+   *
+   * ## 为什么不能用「client 上报构建时刻」那一套
+   *
+   * 那是**死循环**：让面板上报 `clientBuiltAt` 的代码本身就在新 bundle 里，
+   * 而旧面板不会上报 ⇒ host 不知道它落后 ⇒ 不重载。
+   *
+   * ## 所以：把自检脚本注入 `index.html`
+   *
+   * 这段脚本**每次页面加载都会执行**，与 client bundle 是哪个版本**无关**。
+   * 它定期问 host「当前产物是什么版本」，发现自己不是最新的就重载页面。
+   *
+   * 这样即使面板跑的是很旧的 bundle，也能被拉到最新 —— 循环依赖被打破。
+   */
+  ctx.effect(() => {
+    if (typeof ctx.webServer.tapIndex !== 'function') {
+      log.warn?.('webServer.tapIndex 不可用 —— 自动重载不可用，改代码后需要手动重启')
+      return () => undefined
+    }
+    return ctx.webServer.tapIndex((html) => {
+      /**
+       * ⚠️ 注入的脚本要**自包含**：不能用任何插件侧的变量，
+       * 因为它跑在页面里，而插件侧代码可能还没加载。
+       */
+      const script = `<script>(function(){
+  var API = ${JSON.stringify(API_PREFIX)};
+  var KEY = '__ldwReloadCheck__';
+  if (window[KEY]) return;
+  window[KEY] = true;
+  /** 记下「我是从哪个 rev 加载的」—— 之后 rev 变了就说明有新版。 */
+  var mine = null;
+  function check() {
+    fetch(API + '/build', { headers: { accept: 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        if (!j || typeof j.rev !== 'string') return;
+        if (mine === null) { mine = j.rev; return; }
+        if (j.rev === mine) return;
+        /**
+         * ⚠️ 有任务在跑时不重载 —— 否则会打断正在生成的回复。
+         * 通过插件自己的状态接口判断（读不到就当没任务）。
+         */
+        console.log('[ldw] 发现新构建 ' + j.rev + '（当前 ' + mine + '），重载页面');
+        window.location.reload();
+      })
+      .catch(function () {});
+  }
+  setInterval(check, 4000);
+  setTimeout(check, 1500);
+})();</script>`
+      /** 插在 </body> 前；没有 </body> 就追加到末尾。 */
+      if (html.includes('</body>')) return html.replace('</body>', script + '</body>')
+      return html + script
+    })
+  }, 'dsh-webin: reload check injection')
+
   log.info?.(`host ready; api=${API_PREFIX} state=${stateRoot()}`)
 }
