@@ -20,6 +20,16 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+
+/**
+ * DSH 安装产物 —— 主题令牌存在性核对的**权威来源**。
+ *
+ * 令牌名写错（如 state-warning-primary 而非 state-warn-primary）在 CSS 里
+ * **不报错、不崩**，只是 var() 取不到值 ⇒ 颜色悄悄失效。所以必须拿真实
+ * 产物核对，不能靠肉眼 review。
+ */
+const DSH_ASAR_PATH =
+  process.env.DSH_ASAR_PATH ?? 'F:/AdobeAll/DeepSeekHarness/resources/app.asar'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isolate } from './lib/isolate.mjs'
 
@@ -398,8 +408,14 @@ console.log('\n[4] 设置页样式齐全（否则渲染出来是裸文本）')
     .filter((m) => !m[0].includes('background:#fff'))
     .map((m) => m[0].slice(0, 90))
   check('⭐ 没有直接写死的 background/color', hardcoded, [])
-  /** 兜底值与白色圆点确实存在（确认上面那条不是「碰巧没匹配到」）。 */
-  check('兜底值写法存在（有意为之）', /var\(--dsw-alias-state-warning-primary,#f0a441\)/.test(client), true)
+  /**
+   * ⚠️ 断言改过：原来这里要求 `var(--dsw-alias-state-warning-primary,#f0a441)`
+   * 这个**兜底写法**存在 —— 但后来查明 `state-warning-primary` 这个令牌
+   * **根本不存在**（真的是 `state-warn-primary`），写死的 #f0a441 在浅色
+   * 主题下还是错的橙色。所以兜底值已全部删除，改成断言「用真令牌 + 无兜底」。
+   */
+  check('⭐⭐ 警告色用真令牌（无写死兜底）', /var\(--dsw-alias-state-warn-primary\)/.test(client), true)
+  check('⭐⭐ 没有写死的警告兜底色', /#f0a441/.test(client), false)
   check('开关圆点用白色（有意为之）', /aria-checked="true"\]>i::after\{transform:translateX\(16px\);background:#fff/.test(client), true)
 }
 
@@ -442,6 +458,43 @@ console.log('\n[5] 围栏名是中性的 ldw（用户要求）')
 }
 
 cleanupState()
+
+console.log('\n[主题令牌] ⭐⭐⭐ 只用 DSH 真实存在的 --dsw-* 令牌（写错的令牌会静默失效）')
+{
+  /**
+   * ## 真实事故（三处静默失效，肉眼看不出来）
+   *
+   * 1. `--dsw-alias-state-warning-primary` —— **没有这个令牌**！
+   *    真的是 `state-warn-primary`。CSS 里 var() 取不到值 ⇒ 颜色回退到
+   *    inherit/透明，警告色的标签、提示条、状态点全部失色。
+   * 2. `--dsw-alias-label-on-accent` —— 不存在。真的是
+   *    `label-primary-inverted`（主按钮上的文字色）。
+   * 3. `--dsw-font-xs-12` —— 不存在。字号档位是 `xs-13`。
+   *
+   * ⚠️ 这类错误的特征：**不报错、不崩、只是颜色/字号悄悄不对**。
+   *    所以必须机器核对，不能靠肉眼 review。
+   */
+  const dsh = readFileSync(DSH_ASAR_PATH, 'latin1')
+  const declared = new Set()
+  for (const m of dsh.matchAll(/(--dsw-[a-z0-9-]+)\s*:/g)) declared.add(m[1])
+  const referenced = new Set(dsh.match(/--dsw-[a-z0-9-]+/g) ?? [])
+
+  const src = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  const used = [...new Set(src.match(/--dsw-[a-z0-9-]+/g) ?? [])].filter((t) => t !== '--dsw-alias-')
+
+  const missing = used.filter((u) => !declared.has(u) && !referenced.has(u))
+  check('⭐⭐⭐ 全部令牌真实存在', missing.length, 0)
+  if (missing.length > 0) console.log('       不存在的令牌: ' + missing.join(', '))
+  check('⭐ 用量合理（>= 15 个令牌）', used.length >= 15, true)
+
+  /** 三个踩过的具体令牌必须有断言（防止改回去）。 */
+  check('⭐⭐ 警告色用 state-warn-primary', /state-warn-primary/.test(src), true)
+  check('⭐⭐ 没有 state-warning-primary', /state-warning-primary/.test(src), false)
+  check('⭐⭐ 主按钮文字色用 label-primary-inverted', /label-primary-inverted/.test(src), true)
+  check('⭐ 没有 label-on-accent', /label-on-accent/.test(src), false)
+  check('⭐ 没有 font-xs-12', /--dsw-font-xs-12/.test(src), false)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

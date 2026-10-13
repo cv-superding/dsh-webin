@@ -360,7 +360,7 @@ const CSS = `
 .webin-placeholder{width:100%;height:100%;min-height:0;flex:auto}
 .webin-bar{flex:none;display:flex;align-items:center;gap:8px;height:38px;padding:0 8px;
   box-sizing:border-box;border-bottom:.5px solid var(--dsw-alias-border-l3)}
-.webin-title{font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.webin-title{font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .webin-select{height:26px;max-width:200px;padding:0 6px;border-radius:var(--dsw-radius-sm);cursor:pointer;
   border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);
   color:var(--dsw-alias-label-primary);font:var(--dsw-font-xxs-12)}
@@ -382,7 +382,7 @@ const CSS = `
    提示文字只是状态说明，**不该拦住底下的页面**。 */
 .webin-note{position:absolute;left:0;right:0;bottom:0;top:38px;display:flex;align-items:center;
   justify-content:center;padding:24px;text-align:center;white-space:pre-wrap;pointer-events:none;
-  font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-tertiary)}
+  font:var(--dsw-font-xs-13);color:var(--dsw-alias-label-tertiary)}
 .webin-capture{flex:none;max-height:120px;overflow:auto;padding:6px 8px;box-sizing:border-box;
   border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);
   font:var(--dsw-font-xxs-12);color:var(--dsw-alias-label-secondary);white-space:pre-wrap}
@@ -446,8 +446,8 @@ const CSS = `
 .ldw-dot.ok{background:var(--dsw-alias-state-success-primary);
   box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary) 18%,transparent);
   animation:ldw-dot-breathe 2.6s ease-in-out infinite}
-.ldw-dot.warn{background:var(--dsw-alias-state-warning-primary,#f0a441);
-  box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 18%,transparent)}
+.ldw-dot.warn{background:var(--dsw-alias-state-warn-primary);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-warn-primary) 18%,transparent)}
 .ldw-dot.err{background:var(--dsw-alias-state-error-primary);
   box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-error-primary) 18%,transparent)}
 
@@ -555,7 +555,7 @@ const CSS = `
     color-mix(in srgb,var(--dsw-alias-state-business-primary) 88%,#fff),
     var(--dsw-alias-state-business-primary));
   border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary) 82%,#000);
-  color:var(--dsw-alias-label-on-accent,#fff);
+  color:var(--dsw-alias-label-primary-inverted,#fff);
   box-shadow:inset 0 1px 0 rgb(255 255 255 / 18%),
     0 2px 8px color-mix(in srgb,var(--dsw-alias-state-business-primary) 32%,transparent)}
 .ldw-btn.danger:hover:not(:disabled){border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 62%,var(--dsw-alias-border-l2));
@@ -590,8 +590,8 @@ const CSS = `
 
 /* ══ 提示条 ══════════════════════════════════════════════════════════ */
 .ldw-callout{display:flex;gap:9px;padding:10px 12px;border-radius:11px;
-  border:1px solid color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 34%,transparent);
-  background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 9%,transparent);
+  border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary) 34%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 9%,transparent);
   font-size:11.5px;line-height:1.55;color:var(--dsw-alias-label-secondary)}
 .ldw-callout.err{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary) 34%,transparent);
   background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 9%,transparent)}
@@ -607,9 +607,9 @@ const CSS = `
 .ldw-tag.ok{color:var(--dsw-alias-state-success-primary);
   border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 38%,transparent);
   background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 11%,transparent)}
-.ldw-tag.warn{color:var(--dsw-alias-state-warning-primary,#f0a441);
-  border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 38%,transparent);
-  background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 11%,transparent)}
+.ldw-tag.warn{color:var(--dsw-alias-state-warn-primary);
+  border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 38%,transparent);
+  background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 11%,transparent)}
 
 /* ══ 骨架屏（首次读取时的 shimmer）══════════════════════════════════ */
 @keyframes ldw-shimmer{0%{opacity:.45}50%{opacity:.85}100%{opacity:.45}}
@@ -632,7 +632,7 @@ const CSS = `
 .ldw-star{display:inline-flex;align-items:center;gap:6px;text-decoration:none}
 .ldw-star-icon{width:13px;height:13px;flex:none;fill:var(--dsw-alias-label-tertiary);
   transition:fill .2s ease,transform .24s cubic-bezier(.34,1.4,.4,1)}
-.ldw-star:hover .ldw-star-icon{fill:var(--dsw-alias-state-warning-primary,#f0a441);
+.ldw-star:hover .ldw-star-icon{fill:var(--dsw-alias-state-warn-primary);
   transform:rotate(-12deg) scale(1.12)}
 .ldw-updcmd{margin:6px 0 4px;padding:6px 9px;border-radius:8px;
   background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l1);
@@ -670,8 +670,8 @@ const CSS = `
 .ldw-entry:focus-visible{outline:2px solid color-mix(in srgb,var(--dsw-alias-state-business-primary) 78%,transparent);
   outline-offset:2px}
 /* 未登录时整体偏警示色 —— 一眼看出「这里需要你做点什么」 */
-.ldw-entry:has(.ldw-dot.warn){border-color:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#f0a441) 42%,transparent);
-  color:var(--dsw-alias-state-warning-primary,#f0a441)}
+.ldw-entry:has(.ldw-dot.warn){border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 42%,transparent);
+  color:var(--dsw-alias-state-warn-primary)}
 .ldw-entry-note{margin-left:4px;font-size:10.5px;color:var(--dsw-alias-label-quaternary)}
 `
 
