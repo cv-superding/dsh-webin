@@ -506,5 +506,43 @@ console.log('\n[13] ⭐⭐⭐ webview 同步方法不能链式 .catch()（DSH �
   check('⭐ 事故记录在注释里', /Electron 的同步方法/.test(chatSrc), true)
 }
 
+
+console.log('\n[14] ⭐⭐ 虚拟列表滚动适配 + 页面健康度')
+{
+  /**
+   * ## vlist 诊断的完整结论
+   *
+   *     ds-virtual-list          scrollH=2415 clientH=502 scrollTop=1913 overflow=auto
+     *     ds-virtual-list-items         h=1680→1960→2520→2800（一直涨）
+     *     ds-virtual-list-visible-items kids=0 h=0   ← **永远空**
+   *
+   * 滚动**成功**了（scrollTop 到底部）但项**永不渲染** ⇒
+   * 不是视口问题，是这个会话页面的列表渲染器没工作
+   * （连续自动发十几条「N+N=?」全进同一会话，高度一直涨 = 占位在加、
+   *   项不渲染 + 发送也失败 ⇒ 页面 JS 半坏/风控）。
+   */
+  const domSrc = readFileSync(join(ROOT, 'src', 'client', 'dom-report.ts'), 'utf8')
+  const hookSrc = readFileSync(join(ROOT, 'src', 'client', 'hook.ts'), 'utf8')
+
+  check('⭐⭐ 抓取前滚动到底（虚拟列表适配）', /抓取前把消息列表滚到底/.test(hookSrc), true)
+  check('⭐ 滚 ds-virtual-list 的滚动容器', /querySelectorAll\('\[class\*="ds-virtual-list"\]'\)/.test(hookSrc), true)
+
+  check('⭐⭐ 滚动链路诊断', /scrollInfo: scrollInfo/.test(domSrc), true)
+  check('⭐⭐ 页面健康度', /health: health/.test(domSrc), true)
+  check('⭐ 消息清单导出', /messages: messages/.test(domSrc), true)
+  /** needle 匹配的 innerText 兜底。 */
+  check('⭐⭐ needle 匹配加 innerText 兜底', /innerText \|\|/.test(domSrc), true)
+  /** needle 用提示词（流式渲染的关键观察）。 */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  check('⭐⭐⭐ needle 用提示词做', /const needle = p\.length > 24 \? p\.slice\(4, 20\) : p/.test(clientSrc), true)
+  check('⭐ 领活时记下提示词', /promptRef\.current = prompt/.test(clientSrc), true)
+  /** 报告要重抓（needle 命中 0 的不能缓存当结论）。 */
+  check(
+    '⭐⭐ needle 命中 0 时继续抓（不缓存坏结论）',
+    /needleHits === 0\)\)\s*\{/.test(clientSrc) || /needleHits === 0\)/.test(clientSrc),
+    true,
+  )
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

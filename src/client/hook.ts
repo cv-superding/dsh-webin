@@ -1133,6 +1133,35 @@ export function buildScrapeScript(): string {
       return document;
     }
 
+    /**
+     * ## ⭐⭐⭐ 抓取前把消息列表滚到底（虚拟列表适配）
+     *
+     * ## 根因（vlist 诊断给出的决定性证据）
+     *
+     *     ds-virtual-list-items          h=1680  ← 消息总高度（有内容）
+     *     ds-virtual-list-visible-items  kids=0 h=0  ← 但可见区是空的
+     *
+     * DeepSeek 用**虚拟滚动**：只把「视口内」的消息插进 DOM。
+     * 新回复在列表**底部**，视口若停在别处，最新回复就**不在 DOM 里**
+     * —— 这就是「网页版早就有答案了，DSH 抓不到」的最终根因。
+     *
+     * 修法：抓取前把虚拟列表的滚动容器滚到底，强制渲染最新消息。
+     * 改滚动位置**不改页面内容**，无副作用（用户看回复本来就在底部）。
+     */
+    try {
+      var scrollers = document.querySelectorAll('[class*="ds-virtual-list"]');
+      for (var sv = 0; sv < scrollers.length; sv++) {
+        var svEl = scrollers[sv];
+        /** 滚动容器是它的父级（ds-scroll-area），或它自己。 */
+        var target = svEl.parentElement && String(svEl.parentElement.className || '').indexOf('ds-scroll-area') !== -1
+          ? svEl.parentElement
+          : svEl;
+        if (target.scrollHeight > target.clientHeight) {
+          target.scrollTop = target.scrollHeight;
+        }
+      }
+    } catch (e) { /* 滚动失败不影响抓取 */ }
+
     var list = [];
     var usedSelector = '';
     var root = mainRoot();

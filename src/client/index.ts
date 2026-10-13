@@ -782,6 +782,20 @@ const CLIENT_BUILT_AT = (() => {
   }
 })()
 
+/**
+ * 当前任务的提示词 —— 诊断时用它做 needle。
+ *
+ * ## 为什么需要（用户的关键观察）
+ *
+ * 用户指出：「网页版都是一个字一个字蹦出来的」—— 回复是**流式逐字渲染**。
+ * 这意味着：
+ *   1. 回复**确实在 DOM 里**（用户看得见）—— 我之前「消息不在 DOM 里」
+ *      的结论是错的：那是**发消息前的一瞬**抓的快照，抓早了
+ *   2. 所以诊断的 needle 应该用**提示词本身**（它作为用户消息一定在
+ *      页面上），而不是「抓到的内容」（抓到的可能是侧边栏）
+ */
+const promptRef: { current: string } = { current: '' }
+
 const scrapeDiagRef: {
   current: {
     selector?: string
@@ -1949,29 +1963,52 @@ export function LdwHost(): unknown {
                 at: Date.now(),
               }
               /**
-               * ## ⭐ 页面结构报告（只在「还没成功过」时抓一次）
+               * ## ⭐ 页面结构报告（用**提示词**做 needle，在流式期间抓）
                *
-               * ## 为什么自动做，而不是等用户点诊断按钮
+               * ## 为什么 needle 必须换（用户的关键观察）
                *
-               * trace 显示**所有候选都命中 0 个** —— 说明我的类名表
-               * 整个是错的。要修就得先看到**真实页面结构**，
-               * 而等用户点按钮太慢（用户已经在等着了）。
+               * 用户指出：「网页版都是一个字一个字蹦出来的」——
+               * 回复是**流式逐字渲染**的。这意味着：
                *
-               * 所以：抓取失败（`selector` 是 `longest-div` 兜底）
-               * 且还没抓过时，自动导一次结构，跟着心跳上报。
-               * 只抓一次 —— 不给页面加持续负担。
+               *   1. 回复**确实在 DOM 里**（用户亲眼看得见）——
+               *      我之前「消息不在 DOM 里」的结论是**错的**：
+               *      那份报告是在**发消息前的一瞬**抓的快照，抓早了
+               *   2. 之前 needle 用「抓到的内容前 20 字」——但抓到的是
+               *      **侧边栏**，而 `innerText` 会把换行折叠/规范化，
+               *      所以那个 needle 在页面上根本匹配不到（`needle 命中 0`
+               *      的真正原因），「祖先链」自然是空的
+               *
+               * ## 现在的 needle
+               *
+               * 用**提示词本身** —— 它作为用户消息**一定**渲染在页面上，
+               * 找到含它的最深元素，祖先链上就有「用户消息容器」，
+               * 而**回复容器通常和它是兄弟**（同一个消息列表的相邻项）。
+               *
+               * ## 时机：流式期间抓，而不是只抓一次
+               *
+               * 流式渲染意味着 DOM 每一刻都在变 —— 在「还没生成」的瞬间抓，
+               * 看到的是空列表。所以改成**每次轮询都可能抓**（但限制频率）：
+               * 只要还没拿到过「needle 命中 > 0」的报告，就继续抓。
                */
               if (
                 scrapeDiagRef.current.selector === 'longest-div' &&
-                domReportRef.current === undefined
+                (domReportRef.current === undefined ||
+                  (domReportRef.current as { needleHits?: number }).needleHits === 0)
               ) {
-                const needle = typeof scraped.last === 'string' ? scraped.last.slice(0, 20) : ''
+                /**
+                 * ⚠️ needle 用提示词的中段（前 20 字可能被输入框回显
+                 * 逻辑改写，中段更稳）；提示词太短时用全文。
+                 */
+                const p = promptRef.current
+                const needle = p.length > 24 ? p.slice(4, 20) : p
                 void execJs<string>(el, buildDomReportScript(needle), 15_000)
                   .then((domRaw) => {
                     if (domRaw === EXEC_TIMEOUT) return
                     try {
-                      domReportRef.current = JSON.parse(String(domRaw)) as Record<string, unknown>
-                      console.log('[dsh-webin] 页面结构已导出', domReportRef.current)
+                      const parsed = JSON.parse(String(domRaw)) as Record<string, unknown>
+                      domReportRef.current = parsed
+                      const hits = (parsed as { needleHits?: number }).needleHits ?? 0
+                      console.log('[dsh-webin] 页面结构已导出（needle=' + needle.slice(0, 12) + '… 命中 ' + hits + '）')
                     } catch {
                       /* 解析失败就算了，不影响主链路 */
                     }
@@ -2182,6 +2219,19 @@ export function LdwHost(): unknown {
         if (stopped || data.job === null || data.job === undefined) return
 
         const { id, prompt } = data.job
+
+        /**
+         * ⭐ 记下提示词 —— 诊断时用它做 needle。
+         *
+         * ## 为什么（用户的关键观察：「网页版都是一个字一个字蹦出来的」）
+         *
+         * 回复是**流式逐字渲染**的。这意味着：
+         *   1. 回复**确实在 DOM 里**（用户看得见）—— 我之前「消息不在
+         *      DOM 里」的结论是错的：那是**发消息前的一瞬**抓的快照
+         *   2. 所以诊断的 needle 必须用**提示词本身**（它作为用户消息
+         *      一定在页面上），而不是「上次抓到的内容」（那可能是侧边栏）
+         */
+        promptRef.current = prompt
 
         /**
          * ## 会话路由：先导航到这个任务所属的网页对话
