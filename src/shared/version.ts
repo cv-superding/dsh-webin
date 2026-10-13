@@ -213,7 +213,7 @@ export async function checkForUpdate(repo?: string, timeoutMs = 10_000): Promise
     }
 
     /**
-     * compare 的 `commits` 数组是「远端比本地多的提交」（status=behind 时）。
+     * compare 的 `commits` 数组是「从 base 到 head 多出来的提交」。
      * 取最后一个 = 远端最新。
      */
     const list = Array.isArray(data.commits) ? data.commits : []
@@ -221,14 +221,39 @@ export async function checkForUpdate(repo?: string, timeoutMs = 10_000): Promise
     const latestCommit = typeof newest?.sha === 'string' ? newest.sha.slice(0, 7) : ''
     const status = String(data.status ?? '')
 
+    /**
+     * ## ⚠️ status 的方向语义（**踩过，反了会很严重**）
+     *
+     * 我们打的是 `compare/<mine>...main` —— base 是**本地提交**，
+     * head 是**远端 main**。所以 status 描述的是「从本地到远端」：
+     *
+     *   - `ahead`    —— **远端**比本地超前 ⇒ **我落后了，有更新** ✅
+     *   - `behind`   —— 远端比本地落后 ⇒ 我超前（自己提交了没推）
+     *   - `identical`—— 完全一致
+     *   - `diverged` —— 分叉
+     *
+     * ## 第一版写反了，后果很具体
+     *
+     * 原来写成 `behind: status === 'behind'` —— 于是**只有自己超前时才报
+     * 「有更新」，真正落后时反而报「本地更新」** ⇒ 用户永远不会看到
+     * 更新提示。这正是用户报的「插件更新的逻辑貌似有bug」。
+     *
+     * 实测证据（`compare/6d71261...main`，本地落后 28 个提交）：
+     *   `{"status":"ahead","ahead_by":28,"behind_by":0}`
+     * —— 远端超前 28，但 status 是 `ahead` 而不是 `behind`。
+     *
+     * 所以判据是 `ahead` ⇒ 有更新。
+     */
     return {
       ok: true,
       latestCommit: latestCommit === '' ? mine : latestCommit,
       latestMessage: String(newest?.commit?.message ?? '').split('\n')[0] ?? '',
       latestAt: newest?.commit?.committer?.date ?? '',
-      behind: status === 'behind' || status === 'diverged',
+      /** 远端超前（`ahead`）= 我落后 = 有更新。分叉也算。 */
+      behind: status === 'ahead' || status === 'diverged',
       same: status === 'identical',
-      ahead: status === 'ahead',
+      /** 远端落后（`behind`）= 我超前 = 自己提交了没推。 */
+      ahead: status === 'behind',
       checkedAt,
     }
   } catch (error) {

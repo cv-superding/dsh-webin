@@ -92,12 +92,13 @@ function fakeFetch(handler) {
   }
 }
 
-console.log('[1] ⭐ 正常：远端有更新的提交（behind）')
+console.log('[1] ⭐ 正常：远端有更新的提交')
 {
   const fn = buildCheckForUpdate('aaaaaaa', fakeFetch(() => ({
     status: 200,
     body: {
-      status: 'behind',
+      /** ⚠️ 真实语义：compare/<mine>...main 的 ahead = 远端超前 = 我落后。 */
+      status: 'ahead',
       commits: [
         { sha: 'bbbbbbb1', commit: { message: 'feat: 第一', committer: { date: '2026-01-01T00:00:00Z' } } },
         { sha: 'ccccccc2', commit: { message: 'fix: 最新', committer: { date: '2026-01-02T00:00:00Z' } } },
@@ -123,7 +124,8 @@ console.log('\n[2] ⭐⭐ 本地比远端新（自己提交了没推）—— �
    */
   const fn = buildCheckForUpdate('aaaaaaa', fakeFetch(() => ({
     status: 200,
-    body: { status: 'ahead', ahead_by: 2, behind_by: 0, commits: [] },
+    /** ⚠️ behind = 远端落后 = 我超前。 */
+    body: { status: 'behind', ahead_by: 0, behind_by: 2, commits: [] },
   })))
   const r = await fn()
   check('ok', r.ok, true)
@@ -149,8 +151,8 @@ console.log('\n[4] ⭐ 分叉（diverged）—— 报有更新，让用户自己
     status: 200,
     body: {
       status: 'diverged',
-      ahead_by: 1,
-      behind_by: 3,
+      ahead_by: 3,
+      behind_by: 1,
       commits: [{ sha: 'ddddddd9', commit: { message: '远端的新提交', committer: { date: '2026-01-03T00:00:00Z' } } }],
     },
   })))
@@ -283,6 +285,62 @@ console.log('\n[12] ⭐⭐ 客户端「检查更新」也必须带超时')
   check('⭐ 用了 host 的 updateSummary', /updateSummary/.test(firstFetch), true)
   /** 四种状态都要能显示出来（不能只区分「有/无更新」）。 */
   check('⭐ 显示 ahead 状态', /本地更新（远端还没有你的提交）/.test(firstFetch), true)
+}
+
+console.log('\n[13] ⭐⭐⭐ compare 的 status 方向语义（我第一版搞反过，后果严重）')
+{
+  /**
+   * ## 这个 bug 值得单独钉住
+   *
+   * 我们打的是 `compare/<mine>...main` —— base 是**本地提交**，
+   * head 是**远端 main**。所以 status 描述的是「从本地到远端」：
+   *
+   *   - `ahead`     —— **远端**比本地超前 ⇒ **我落后了，有更新**
+   *   - `behind`    —— 远端比本地落后 ⇒ 我超前（自己提交了没推）
+   *
+   * ## 第一版写成了 `behind: status === 'behind'`，完全反了
+   *
+   * 后果很具体：**只有自己超前时才报「有更新」，真正落后时反而报
+   * 「本地更新」** ⇒ 用户永远不会看到更新提示。
+   * 这正是用户报的「插件更新的逻辑貌似有bug」。
+   *
+   * 实测证据（`compare/6d71261...main`，本地落后 28 个提交）：
+   *   `{"status":"ahead","ahead_by":28,"behind_by":0}`
+   * —— 远端超前 28，status 却是 `ahead`。
+   *
+   * ⚠️ 这个 bug 的教训：**假数据编码了错误假设**。
+   * 我一开始的假响应也按错的方向写，于是测试全绿但真实行为是错的。
+   * 只有打真实 API（verify-update-live.mjs）才暴露出来。
+   */
+  /** 远端超前（status=ahead）⇒ 我落后 ⇒ behind=true。 */
+  const fn1 = buildCheckForUpdate('aaaaaaa', fakeFetch(() => ({
+    status: 200,
+    body: {
+      status: 'ahead',
+      ahead_by: 28,
+      behind_by: 0,
+      commits: [{ sha: 'fffffff1', commit: { message: '远端新提交' } }],
+    },
+  })))
+  const r1 = await fn1()
+  check('⭐⭐ status=ahead ⇒ behind=true（我有更新）', r1.behind, true)
+  check('⭐⭐ status=ahead ⇒ ahead=false', r1.ahead, false)
+
+  /** 远端落后（status=behind）⇒ 我超前 ⇒ ahead=true。 */
+  const fn2 = buildCheckForUpdate('aaaaaaa', fakeFetch(() => ({
+    status: 200,
+    body: { status: 'behind', ahead_by: 0, behind_by: 5, commits: [] },
+  })))
+  const r2 = await fn2()
+  check('⭐⭐ status=behind ⇒ ahead=true（本地更新）', r2.ahead, true)
+  check('⭐⭐ status=behind ⇒ behind=false', r2.behind, false)
+
+  /** 源码里也要能看出方向（防重构时又写反）。 */
+  const seg = verSrc.slice(verSrc.indexOf('status 的方向语义'))
+  check('⭐ 源码注明 ahead ⇒ 有更新', /behind: status === 'ahead'/.test(seg), true)
+  check('⭐ 源码注明 behind ⇒ 本地更新', /ahead: status === 'behind'/.test(seg), true)
+  /** 注释里要留实测证据，避免以后有人凭直觉改回去。 */
+  check('⭐ 注释带实测证据', /实测证据/.test(verSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)

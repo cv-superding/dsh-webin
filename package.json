@@ -73,6 +73,7 @@
     "verify:sequence": "node scripts/verify-sequence.mjs",
     "verify:update": "node scripts/verify-update.mjs",
     "verify:cookie": "node scripts/verify-cookie.mjs",
+    "verify:update-live": "node scripts/verify-update-live.mjs",
     "verify:skills-mcp": "node scripts/verify-skills-mcp.mjs",
     "verify:stuck": "node scripts/verify-stuck.mjs",
     "probe:thinking": "node scripts/probe-thinking.mjs",
