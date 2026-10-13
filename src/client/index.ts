@@ -31,6 +31,7 @@ import {
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
 import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
 import { snapshotLooksLoggedIn } from '../shared/auth-snapshot'
+import { formatBuiltAt, splitVersion } from '../shared/version'
 
 /**
  * 平台注册表（模块级单例）。
@@ -604,6 +605,16 @@ const CSS = `
   padding-top:12px;border-top:1px solid var(--dsw-alias-border-l1)}
 .ldw-ver{display:inline-flex;align-items:baseline;gap:6px}
 .ldw-ver-num{font-size:12.5px;font-weight:640;color:var(--dsw-alias-label-primary);letter-spacing:-.15px}
+/* 构建后缀 —— 版本号里**真正会变**的那部分，所以给它一点强调色。
+   用户报过「版本怎么一直是 0.1.0？？？」：完整版本号是 0.1.0+5.def5678，
+   整体显示时容易只看到开头的 0.1.0。拆开并给后缀上色后，
+   一眼能看出「主版本没变但构建变了」。 */
+/* 构建时间 —— 比提交号直观：pull 后忘了 build 时一眼能看出偏旧。 */
+.ldw-ver-when{font-size:10.5px;color:var(--dsw-alias-label-quaternary)}
+.ldw-ver-build{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;font-weight:600;
+  padding:1px 6px;border-radius:6px;color:var(--dsw-alias-state-success-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary) 28%,transparent)}
 .ldw-ver-commit{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
   padding:1px 6px;border-radius:6px;color:var(--dsw-alias-label-tertiary);
   background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 72%,transparent);
@@ -2602,6 +2613,8 @@ interface VersionState {
   repoUrl: string
   starUrl: string
   updateHint: string
+  /** 构建时刻（ISO）—— 让用户确认「这份是什么时候构建的」。 */
+  builtAt?: string
   update?: {
     ok: boolean
     reason?: string
@@ -2727,7 +2740,10 @@ export function LdwSettings(): unknown {
    * ⚠️ `check=1` 才真的打 GitHub —— 默认只回本地版本。
    * 未认证的 API 每小时 60 次配额，设置页一打开就查会很快打光。
    */
-  const loadVersion = useMemo(
+    /** 构建后缀（`0.1.0+5.def5678` 里的 `5.def5678`）—— 版本号里真正会变的那部分。 */
+  const buildPart = splitVersion(ver?.version ?? '').build
+
+const loadVersion = useMemo(
     () => async (check: boolean) => {
       if (check) setChecking(true)
       try {
@@ -2756,6 +2772,7 @@ export function LdwSettings(): unknown {
           repoUrl: String(data.repoUrl ?? ''),
           starUrl: String(data.starUrl ?? ''),
           updateHint: String(data.updateHint ?? ''),
+          builtAt: String(data.builtAt ?? ''),
           ...(data.update === undefined ? {} : { update: data.update }),
         })
         if (check) {
@@ -3201,6 +3218,7 @@ export function LdwSettings(): unknown {
         ),
       ),
 
+
       /**
        * 版本行 —— 放在 hero 里（页头第二行）。
        *
@@ -3213,8 +3231,38 @@ export function LdwSettings(): unknown {
         createElement(
           'span',
           { className: 'ldw-ver' },
-          createElement('span', { className: 'ldw-ver-num' }, `v${ver?.version ?? '?'}`),
+          /**
+           * ⚠️ 拆开显示主版本与构建后缀。
+           *
+           * 完整版本号是 `0.1.0+5.def5678` 这种形态。整体显示的话，
+           * 用户容易只看到开头的 `0.1.0` 就以为「没更新」——
+           * 而这正是他报的问题（「版本怎么一直是 0.1.0？？？」）。
+           *
+           * 拆开后：主版本醒目、构建后缀小号等宽 ——
+           * 一眼能看出**主版本没变但构建变了**。
+           */
+          createElement('span', { className: 'ldw-ver-num' }, `v${splitVersion(ver?.version ?? '?').base}`),
+          buildPart === ''
+            ? null
+            : createElement(
+                'code',
+                { className: 'ldw-ver-build', title: '距最近 tag 的提交数 · 提交号' },
+                `+${buildPart}`,
+              ),
           createElement('code', { className: 'ldw-ver-commit' }, ver?.commit ?? '?'),
+          /**
+           * 构建时间 —— 比提交号更直观。
+           *
+           * `git pull` 之后忘了 `npm run build` 时，时间戳会明显偏旧，
+           * 一眼就能看出「跑的还是旧产物」。
+           */
+          ver?.builtAt === undefined || ver.builtAt === ''
+            ? null
+            : createElement(
+                'span',
+                { className: 'ldw-ver-when', title: `构建于 ${ver.builtAt}` },
+                formatBuiltAt(ver.builtAt),
+              ),
         ),
         createElement(
           'button',

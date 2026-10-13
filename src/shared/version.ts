@@ -18,6 +18,7 @@
 declare const __LDW_VERSION__: string
 declare const __LDW_COMMIT__: string
 declare const __LDW_REPO__: string
+declare const __LDW_BUILT_AT__: string
 
 /**
  * 安全读取构建期常量（万一没注入 —— 比如别的工具链直接编译源码）。
@@ -30,6 +31,7 @@ function injected(name: string, fallback: string): string {
     if (name === 'version' && typeof __LDW_VERSION__ === 'string') return __LDW_VERSION__
     if (name === 'commit' && typeof __LDW_COMMIT__ === 'string') return __LDW_COMMIT__
     if (name === 'repo' && typeof __LDW_REPO__ === 'string') return __LDW_REPO__
+    if (name === 'builtAt' && typeof __LDW_BUILT_AT__ === 'string') return __LDW_BUILT_AT__
   } catch {
     /* 没注入 */
   }
@@ -38,12 +40,41 @@ function injected(name: string, fallback: string): string {
 
 /** 本插件的版本信息。 */
 export interface PluginVersion {
-  /** `package.json` 的 version。 */
+  /**
+   * 完整版本号，形态 `<tag 版本>+<距 tag 的提交数>.<提交号>`。
+   *
+   * 例：`0.1.0+5.def5678` —— tag 之后第 5 个提交。
+   *
+   * ## 为什么带 `+` 后缀（用户报的「版本怎么一直是 0.1.0？？？」）
+   *
+   * 原来版本号就是 `package.json` 里那个**手动**字段，只在建 release 时
+   * bump 过一次 —— 之后推了 5 个提交都没动它 ⇒ 设置页一直显示 `0.1.0`。
+   * **用户看到版本号不变，自然会以为「更新没生效」**（即使提交号确实变了）。
+   *
+   * 现在由构建期从 `git describe --tags --long` 自动生成，
+   * **每次提交后重新构建都会变**，不需要谁记得手动 bump。
+   */
   version: string
   /** 构建时的提交号（短）。 */
   commit: string
   /** `owner/repo`。 */
   repo: string
+  /** 构建时刻（ISO）。让用户能确认「这份是什么时候构建的」。 */
+  builtAt: string
+}
+
+/**
+ * 把完整版本号拆成「给人看的主版本」和「构建后缀」。
+ *
+ * `0.1.0+5.def5678` → `{ base: '0.1.0', build: '5.def5678' }`
+ *
+ * 设置页把主版本显示得醒目、构建后缀显示成小号等宽字 ——
+ * 这样用户一眼能看出**主版本没变但构建变了**，而不是以为「没更新」。
+ */
+export function splitVersion(version: string): { base: string; build: string } {
+  const i = version.indexOf('+')
+  if (i < 0) return { base: version, build: '' }
+  return { base: version.slice(0, i), build: version.slice(i + 1) }
 }
 
 /** 当前跑的这份是哪个版本。 */
@@ -52,6 +83,7 @@ export function currentVersion(): PluginVersion {
     version: injected('version', '0.0.0'),
     commit: injected('commit', 'unknown'),
     repo: injected('repo', 'cv-superding/dsh-webin'),
+    builtAt: injected('builtAt', ''),
   }
 }
 
@@ -297,6 +329,43 @@ export function updateHint(repo?: string): string {
 /** 一个提交号是不是「看起来像」短 sha（用于校验用户手填的值）。 */
 export function looksLikeCommit(value: string): boolean {
   return /^[0-9a-f]{7,40}$/i.test(value.trim())
+}
+
+/**
+ * 把构建时刻（ISO）格式化成给人看的样子。
+ *
+ * ## 为什么要显示构建时间
+ *
+ * 提交号对多数人没概念。而「什么时候构建的」很直观：
+ * `git pull` 之后忘了 `npm run build`，时间戳会明显偏旧 ——
+ * 一眼就能看出「跑的还是旧产物」。
+ *
+ * ## 显示规则（相对时间优先，因为「多久以前」比绝对时间更有信息量）
+ *
+ *   - 一分钟内      → `刚刚构建`
+ *   - 一小时内      → `12 分钟前构建`
+ *   - 24 小时内     → `3 小时前构建`
+ *   - 更早          → `2026-10-13 10:30 构建`
+ *
+ * ⚠️ 时间戳非法 / 为空时返回空串（调用方据此不渲染）——
+ * **不能让一个坏时间戳把设置页搞崩**。
+ *
+ * @param iso - 构建时刻（ISO 字符串）
+ * @param now - 当前时刻（测试可注入）
+ */
+export function formatBuiltAt(iso: string, now = Date.now()): string {
+  if (iso === '') return ''
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return ''
+  const diff = now - t
+  /** 时钟偏差导致的「未来时间」当成刚刚。 */
+  if (diff < 60_000) return '刚刚构建'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前构建`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前构建`
+  /** 更早：给绝对时间（本地时区，精确到分钟）。 */
+  const d = new Date(t)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} 构建`
 }
 
 /**

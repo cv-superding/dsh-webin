@@ -141,9 +141,19 @@ console.log('[1] ⭐ 版本号在构建期注入（host 侧，运行时读不到
   const client = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 
-  /** 产物里应该是**字面量**，不是 `readFileSync('package.json')`。 */
-  check('⭐ host 产物含版本字面量', host.includes(`"${pkg.version}"`), true)
+  /**
+   * 产物里应该是**字面量**，不是 `readFileSync('package.json')`。
+   *
+   * ⚠️ 断言的是**版本号形态**而不是「等于 package.json 的 version」——
+   * 版本号现在是自动生成的 `<tag>+<距 tag 提交数>.<提交号>`，
+   * 不再是 `package.json` 里那个手写值（用户报过「版本怎么一直是
+   * 0.1.0？？？」：手动字段没人记得 bump）。
+   */
+  check('⭐ host 产物含版本字面量（形如 0.1.0+5.def5678）', /return "0\.\d+\.\d+\+\d+\.[0-9a-f]+"/.test(host), true)
+  check('⭐ 版本号以 package.json 的 version 打底', host.includes(`"${pkg.version}+`) || host.includes(`"${pkg.version}"`), true)
   check('host 没有运行时读 package.json', /readFileSync\([^)]*package\.json/.test(host), false)
+  /** 构建时刻也要注入（让用户能看出「跑的是旧产物」）。 */
+  check('⭐ 注入构建时刻', /return "20\d\d-\d\d-\d\dT/.test(host), true)
 
   /**
    * ⚠️ **client 侧刻意不注入版本常量**。
