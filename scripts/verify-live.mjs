@@ -421,5 +421,35 @@ console.log('\n[11] ⭐⭐⭐ 注入式自检：不依赖 DSH 的 HMR（实测�
   check('⭐⭐ 产物有注入脚本', /__ldwReloadCheck__/.test(hb), true)
 }
 
+
+console.log('\n[12] ⭐⭐⭐ 虚拟列表探测（DOM 树揭示的真相）')
+{
+  /**
+   * ## DOM 树的决定性证据（自动重载后拿到的）
+   *
+   *     div.ds-virtual-list.ds-virtual-list--printable.ds-scroll-area
+   *       div.ds-virtual-list-items._6f2c522
+   *         div.ds-virtual-list-visible-items  k=0 t=0   ← **空的**
+   *
+   * DeepSeek 用**虚拟滚动**渲染消息列表 —— 只有「可见项」才插入 DOM。
+   * 这解释了我为什么一直抓不到回复：容器在，但消息不在 DOM 里。
+   *
+   * 所以报告要导出虚拟列表的状态（子节点数 / 文本量 / 高度）。
+   */
+  const domSrc = readFileSync(join(ROOT, 'src', 'client', 'dom-report.ts'), 'utf8')
+  check('⭐⭐ 导出 vlist', /vlist: vlist/.test(domSrc), true)
+  check('⭐ 查 virtual-list 容器', /\[class\*="virtual-list"\]/.test(domSrc), true)
+  check('⭐ 报高度（判断容器是否塌陷）', /h: vr \? Math\.round\(vr\.height\)/.test(domSrc), true)
+
+  /** DOM 树导出（看清页面结构）。 */
+  check('⭐⭐ 导出 tree', /tree: tree/.test(domSrc), true)
+  check('⭐ 探测 shadow DOM', /shadowHosts: shadowHosts/.test(domSrc), true)
+  check('⭐ 探测 iframe', /iframes: iframes/.test(domSrc), true)
+
+  const cb = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
+  check('⭐⭐ 产物有 vlist', /vlist: vlist/.test(cb), true)
+  check('⭐⭐ 产物有 tree', /tree: tree/.test(cb), true)
+}
+
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
