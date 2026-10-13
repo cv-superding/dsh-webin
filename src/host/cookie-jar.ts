@@ -149,6 +149,80 @@ function tryElectronSession(): {
   }
 }
 
+/**
+ * 诊断：**为什么**拿不到 Electron session？
+ *
+ * ## 为什么要这个（用户要求「不要猜」）
+ *
+ * 实测 `cookieApi: false`，但光看这一个布尔值**分不清原因**：
+ *   - `import.meta.url` 拿不到？
+ *   - `require('electron')` 抛 MODULE_NOT_FOUND（模块解析路径不对）？
+ *   - electron 拿到了但 `session` 是空壳（在渲染进程里）？
+ *
+ * 所以这里把**每一步的结果和错误原文**都返回出来 —— 一眼看出卡在哪。
+ */
+export function diagnoseElectron(): {
+  hasImportMetaUrl: boolean
+  importMetaUrl: string
+  requireKind: string
+  error?: string
+  electronKind: string
+  electronKeys?: string[]
+  hasSession: boolean
+  hasFromPartition: boolean
+  processType: string
+  electronVersion: string
+  nodeVersion: string
+} {
+  const out = {
+    hasImportMetaUrl: false,
+    importMetaUrl: '',
+    requireKind: 'none',
+    error: undefined as string | undefined,
+    electronKind: 'none',
+    electronKeys: undefined as string[] | undefined,
+    hasSession: false,
+    hasFromPartition: false,
+    processType: String((process as unknown as { type?: string }).type ?? '(none)'),
+    electronVersion: String((process.versions as unknown as { electron?: string }).electron ?? '(none)'),
+    nodeVersion: process.version,
+  }
+
+  const meta = import.meta as unknown as { url?: string }
+  out.hasImportMetaUrl = typeof meta.url === 'string'
+  out.importMetaUrl = typeof meta.url === 'string' ? meta.url.slice(0, 200) : ''
+
+  let req: ((m: string) => unknown) | undefined
+  try {
+    req =
+      typeof meta.url === 'string'
+        ? (createRequire(meta.url) as (m: string) => unknown)
+        : (globalThis as unknown as { require?: (m: string) => unknown }).require
+    out.requireKind = typeof req
+  } catch (e) {
+    out.requireKind = 'throw'
+    out.error = 'createRequire 抛错: ' + ((e as Error)?.message ?? String(e))
+    return out
+  }
+  if (typeof req !== 'function') {
+    out.error = 'req 不是函数（ESM 里没有 require，且 import.meta.url 不可用）'
+    return out
+  }
+
+  try {
+    const electron = req('electron') as Record<string, unknown> | undefined
+    out.electronKind = typeof electron
+    out.electronKeys = electron === undefined || electron === null ? [] : Object.keys(electron).slice(0, 30)
+    out.hasSession = electron?.session !== undefined && electron?.session !== null
+    const ses = electron?.session as { fromPartition?: unknown } | undefined
+    out.hasFromPartition = typeof ses?.fromPartition === 'function'
+  } catch (e) {
+    out.electronKind = 'throw'
+    out.error = "require('electron') 抛错: " + ((e as Error)?.message ?? String(e))
+  }
+  return out
+}
+
 /** Electron 的 session 是否可用（供 `/status` 显示，让用户知道走哪条路）。 */
 export function cookieApiAvailable(): boolean {
   return tryElectronSession() !== undefined

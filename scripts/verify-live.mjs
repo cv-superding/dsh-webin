@@ -187,6 +187,23 @@ console.log('\n[6] 活体检查：对运行中的 host 打真实请求（只报�
       headers: { ...h, 'content-type': 'application/json' },
       body: JSON.stringify({ platform: 'deepseek', partition: 'probe', domain: 'chat.deepseek.com' }),
     })
+
+    /** ⭐ 诊断路由：为什么拿不到 Electron session（不猜）。 */
+    const dg = await api('/dsh-webin/api/diagnose/electron')
+    if (dg.status === 404) {
+      console.log('  诊断路由: 404（host 未重启，新路由还没加载）')
+    } else if (dg.body?.ok === true) {
+      console.log('  ── Electron 诊断 ──')
+      console.log('    import.meta.url 可用:', dg.body.hasImportMetaUrl, dg.body.importMetaUrl.slice(0, 80))
+      console.log('    require 类型     :', dg.body.requireKind)
+      console.log('    electron 类型    :', dg.body.electronKind)
+      console.log('    electron 的键    :', JSON.stringify(dg.body.electronKeys))
+      console.log('    hasSession       :', dg.body.hasSession)
+      console.log('    hasFromPartition :', dg.body.hasFromPartition)
+      console.log('    进程类型         :', dg.body.processType)
+      console.log('    electron 版本    :', dg.body.electronVersion)
+      if (dg.body.error !== undefined) console.log('    ❌ 错误:', dg.body.error)
+    }
     console.log(`  cookieApi: ${p.body?.cookieApi}`)
     if (p.body?.cookieApi === false) {
       console.log('  ⚠️  拿不到 Electron session API —— host 未重启（旧代码用了 eval(require)）')

@@ -41,6 +41,7 @@ import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
 import { snapshotTextLooksLoggedIn } from '../shared/auth-snapshot'
 import {
   cookieApiAvailable,
+  diagnoseElectron,
   grabCookies,
   loadCookieArchive,
   restoreCookies,
@@ -656,6 +657,21 @@ export async function apply(ctx: {
           total: archive.cookies.length,
           ...(n === 0 ? { reason: '写回失败（可能拿不到 Electron session API）' } : {}),
         })
+        return
+      }
+
+      /**
+       * ## GET /diagnose/electron —— 为什么拿不到 Electron session
+       *
+       * 用户要求「不要猜」。`cookieApi: false` 只是一个布尔值，
+       * 分不清是 `import.meta.url` 拿不到、`require` 抛错、
+       * 还是 electron 拿到了但 session 是空壳。
+       *
+       * 这个路由把**每一步的结果和错误原文**都返回出来 ——
+       * 一眼看出卡在哪，不用再猜。
+       */
+      if (method === 'GET' && pathname === `${API_PREFIX}/diagnose/electron`) {
+        sendJson(res, 200, { ok: true, ...diagnoseElectron() })
         return
       }
 
