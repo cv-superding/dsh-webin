@@ -1,6 +1,6 @@
 {
   "name": "dsh-webin",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Unofficial DSH plugin: drive chat.deepseek.com in a REAL browser (DSH's own Chromium webview guest) — real login, real typing, real send, reply captured by observing the page's own SSE. Structurally a port of cuckoo-code's approach.",
   "type": "module",
   "main": "./lib/index.js",
@@ -17,7 +17,8 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "provider.example.json"
+    "provider.example.json",
+    "CHANGELOG.md"
   ],
   "license": "Apache-2.0",
   "repository": {
@@ -70,12 +71,14 @@
     "verify:scrape": "node scripts/verify-scrape.mjs",
     "verify:audit": "node scripts/verify-audit.mjs",
     "verify:sequence": "node scripts/verify-sequence.mjs",
+    "verify:update": "node scripts/verify-update.mjs",
+    "verify:cookie": "node scripts/verify-cookie.mjs",
     "verify:skills-mcp": "node scripts/verify-skills-mcp.mjs",
     "verify:stuck": "node scripts/verify-stuck.mjs",
     "probe:thinking": "node scripts/probe-thinking.mjs",
     "probe:frames": "node scripts/probe-frames.mjs",
     "preflight": "node scripts/preflight.mjs",
-    "check": "node scripts/build.mjs && node scripts/verify.mjs && node scripts/verify-snapshot.mjs && node scripts/verify-diff.mjs && node scripts/verify-restore.mjs && node scripts/verify-lifecycle.mjs && node scripts/verify-extract.mjs && node scripts/verify-session-route.mjs && node scripts/verify-tools.mjs && node scripts/verify-tool-chunks.mjs && node scripts/verify-persist.mjs && node scripts/verify-settings.mjs && node scripts/verify-config.mjs && node scripts/verify-thinking.mjs && node scripts/verify-fence.mjs && node scripts/verify-login-gate.mjs && node scripts/verify-version.mjs && node scripts/verify-fill.mjs && node scripts/verify-scrape.mjs && node scripts/verify-audit.mjs && node scripts/verify-sequence.mjs && node scripts/verify-skills-mcp.mjs && node scripts/verify-stuck.mjs && node scripts/verify-host.mjs && node scripts/preflight.mjs",
+    "check": "node scripts/build.mjs && node scripts/verify.mjs && node scripts/verify-snapshot.mjs && node scripts/verify-diff.mjs && node scripts/verify-restore.mjs && node scripts/verify-lifecycle.mjs && node scripts/verify-extract.mjs && node scripts/verify-session-route.mjs && node scripts/verify-tools.mjs && node scripts/verify-tool-chunks.mjs && node scripts/verify-persist.mjs && node scripts/verify-settings.mjs && node scripts/verify-config.mjs && node scripts/verify-thinking.mjs && node scripts/verify-fence.mjs && node scripts/verify-login-gate.mjs && node scripts/verify-version.mjs && node scripts/verify-fill.mjs && node scripts/verify-scrape.mjs && node scripts/verify-audit.mjs && node scripts/verify-sequence.mjs && node scripts/verify-update.mjs && node scripts/verify-cookie.mjs && node scripts/verify-skills-mcp.mjs && node scripts/verify-stuck.mjs && node scripts/verify-host.mjs && node scripts/preflight.mjs",
     "probe:dom": "node scripts/probe-dom.mjs",
     "probe:send": "node scripts/probe-send.mjs",
     "probe:chain": "node scripts/probe-chain.mjs",

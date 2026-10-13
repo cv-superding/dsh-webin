@@ -256,12 +256,34 @@ console.log('\n[6] 客户端时序：必须先导航，再 restore，再 reload�
   check('阶段机存在（restoring）', idxRestoring > 0, true)
   check('阶段机存在（reloading）', idxReloading > 0, true)
   check('导航在 restore 之前', idxLoad > 0 && idxLoad < idxRestore, true)
-  check('restore 在 reload 之前', idxRestore > 0 && idxRestore < idxReload, true)
   check('restore 在 restoring 阶段', idxRestoring < idxRestore, true)
   check('hook 在 reload 之后注入', bundle.indexOf('buildDeepSeekHook(provider.completionPath') > idxReload, true)
 
+  /**
+   * ⚠️ 「restore 在 reload 之前」原来用**全局第一个** `.reload()` 定位。
+   *
+   * 后来加了「cookie 写回成功后 reload」这条路径 —— 它出现在 restore
+   * **之前**（cookie 必须在页面加载前写），于是全局第一个 `.reload()`
+   * 不再对应「restore 之后那次」⇒ 断言误报失败（踩过）。
+   *
+   * 改成**只在 restore 之后**的区间里找 reload。
+   */
+  check('⭐ restore 之后有 reload', bundle.indexOf('.reload()', idxRestore) > idxRestore, true)
+
+  /**
+   * ⭐ cookie 写回必须在页面快照回写**之前** ——
+   * cookie 是请求头的一部分，页面开始加载后再写就晚了（首屏仍是登录页）。
+   */
+  const idxCookieRestore = bundle.indexOf('/cookies')
+  check('⭐ cookie 写回存在', idxCookieRestore > 0, true)
+  check('⭐ cookie 写回在页面快照之前', idxCookieRestore > 0 && idxCookieRestore < idxRestore, true)
+
   // 关键：没有快照也要能走到 live（否则插件永久失效）
-  check('无快照路径会 markLive（不卡住）', /无登录态快照[\s\S]{0,200}markLive\(\)/.test(bundle), true)
+  /**
+   * ⚠️ 窗口要够大 —— 中间插了 cookie 写回逻辑后这段变长了
+   * （踩过：写死 200 字符匹配不到 markLive）。
+   */
+  check('无快照路径会 markLive（不卡住）', /无登录态快照[\s\S]{0,900}markLive\(\)/.test(bundle), true)
   check('加载失败会回退阶段', /stageRef\.current = "boot"/.test(bundle), true)
   check('渲染崩溃会回退阶段', bundle.includes('render-process-gone'), true)
 }

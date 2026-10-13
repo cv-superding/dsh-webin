@@ -244,9 +244,20 @@ console.log('\n[5] ⭐ 更新检查：网络失败不能抛错，要如实报告
 console.log('\n[6] ⭐ host 侧缓存（保护 GitHub 未认证配额）')
 {
   const host = readFileSync(join(ROOT, 'src', 'host', 'index.ts'), 'utf8')
-  check('⭐ 有 lastUpdateCheck 缓存', host.includes('lastUpdateCheck'), true)
-  check('⭐ 有 60 秒复用窗口', /60_000|60000/.test(host), true)
+  /**
+   * ⚠️ 缓存已从「一个模块级变量」改成**按仓库分键的 Map**。
+   *
+   * 原因（真实 bug）：单变量时，用户改了 repo 后 60 秒内仍会拿到
+   * **上一个仓库**的结果 —— 显示的是别人的版本信息。
+   */
+  check('⭐ 有 updateChecks 缓存（按仓库分键）', host.includes('updateChecks'), true)
+  check('⭐ 缓存按 repo 分键', /updateChecks\.get\(info\.repo\)/.test(host), true)
+  check('⭐ 有 60 秒复用窗口', /UPDATE_CACHE_MS = 60_000/.test(host), true)
   check('⭐ 默认不检查（?check=1 才查）', host.includes("get('check') === '1'"), true)
+  /** 单变量写法必须已删除（否则等于没修）。 */
+  check('⭐ 没有旧的单变量缓存', /let lastUpdateCheck/.test(host), false)
+  /** 要给出「一句话总结」，让设置页不用自己拼（四种状态分开说）。 */
+  check('⭐ 响应带 updateSummary', /updateSummary:/.test(host), true)
 }
 
 console.log('\n[7] ⭐ client 侧：设置页有版本行 + Star 按钮')

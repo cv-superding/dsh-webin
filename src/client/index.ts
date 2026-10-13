@@ -365,9 +365,14 @@ const CSS = `
    这样 React 的 reconciliation 不会碰到 webview（它是非受控 DOM）。 */
 .webin-guest{flex:auto;min-height:0;display:flex}
 .webin-guest webview{width:100%;height:100%;display:flex;border:0}
-/* 未就绪提示：盖在 guest 区域上（跳过 38px 工具栏），不遮挡按钮 */
+/* 未就绪提示：盖在 guest 区域上（跳过 38px 工具栏）。
+   ⚠️ **必须 pointer-events:none** —— 用户实测报过「点开 LDW 会卡在这个界面
+   点不了，只能等『真实浏览器已就绪』」：这层原本会吃掉鼠标事件，
+   而启动阶段（loadURL + 快照读取 + 登录态回写）最长要几十秒，
+   那段时间里登录表单/二维码全都点不动。
+   提示文字只是状态说明，**不该拦住底下的页面**。 */
 .webin-note{position:absolute;left:0;right:0;bottom:0;top:38px;display:flex;align-items:center;
-  justify-content:center;padding:24px;text-align:center;white-space:pre-wrap;
+  justify-content:center;padding:24px;text-align:center;white-space:pre-wrap;pointer-events:none;
   font:var(--dsw-font-xs-12);color:var(--dsw-alias-label-tertiary)}
 .webin-capture{flex:none;max-height:120px;overflow:auto;padding:6px 8px;box-sizing:border-box;
   border-top:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-1);
@@ -857,6 +862,43 @@ export function LdwHost(): unknown {
           return
         }
         leaseRef.current = reservation.lease
+        /**
+         * ## ⭐ 把 partition 上报给 host（解决「重启必须重新登录」）
+         *
+         * ## 为什么要上报
+         *
+         * DSH 的 guest partition 是 `dsh-sidebar-browser-${randomUUID()}`
+         * （`lib/main.js:9638`）—— **无 `persist:` 前缀 = 内存分区**，
+         * 进程退出 cookie 全丢。
+         *
+         * 而 DeepSeek 的登录态主要靠 **httpOnly cookie**，页面里的
+         * `document.cookie` **看不见也写不了**它们 —— 所以「快照
+         * localStorage + document.cookie」这条路天生不完整
+         * （用户实测：「每次重启 dsh 都需要重新登陆」）。
+         *
+         * **partition 名是随机的，host 猜不到** —— 但它就在这个返回值里。
+         * 上报之后，host 半（跑在 Electron 主进程）就能用
+         * `session.fromPartition(name).cookies` 读写**含 httpOnly** 的
+         * 完整 cookie，重启后写回去即可免登录。
+         *
+         * ⚠️ 上报失败不能影响主流程（这只是增强，不是必需）。
+         */
+        void fetchJson('/dsh-webin/api/client/partition', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            platform: provider.id,
+            partition: reservation.partition,
+            /** 目标域名 —— host 侧按它过滤 cookie。 */
+            domain: (() => {
+              try {
+                return new URL(provider.homeUrl).hostname
+              } catch {
+                return ''
+              }
+            })(),
+          }),
+        })
 
         const element = document.createElement('webview') as GuestElement
         element.setAttribute('partition', reservation.partition)
@@ -994,10 +1036,54 @@ export function LdwHost(): unknown {
           if (stageRef.current === 'navigating') {
             stageRef.current = 'restoring'
             void (async () => {
+              /**
+               * ## ⭐ 第一步：让 host 把 **httpOnly cookie** 写回当前 partition
+               *
+               * 这比页面侧快照更根本 —— DeepSeek 的登录态主要靠
+               * httpOnly cookie，而页面 JS 既读不到也写不了它们。
+               *
+               * 顺序很重要：**必须在页面加载前写**（cookie 是请求头的一部分，
+               * 页面开始加载后再写就晚了，首屏仍然是登录页）。
+               * 这里处于 `navigating` 阶段，页面刚 loadURL、还没渲染完，
+               * 是能赶上的最早时机。
+               *
+               * ⚠️ 失败不阻断（走页面快照那条降级路径）。
+               */
+              let cookieRestored = 0
+              try {
+                const res = await fetchJson(
+                  `/dsh-webin/api/auth/${encodeURIComponent(provider.id)}/cookies`,
+                  undefined,
+                  10_000,
+                )
+                if (res !== undefined && res.ok) {
+                  const j = (await res.json()) as { restored?: number; total?: number }
+                  cookieRestored = typeof j.restored === 'number' ? j.restored : 0
+                  console.log('[dsh-webin] httpOnly cookie 已写回', {
+                    restored: cookieRestored,
+                    total: j.total ?? 0,
+                  })
+                } else if (res !== undefined && res.status !== 404 && res.status !== 409) {
+                  console.log('[dsh-webin] cookie 写回跳过', res.status)
+                }
+              } catch {
+                /* 不阻断 */
+              }
+
               const snap = await loadSnapshot(provider.id)
               if (snap === undefined) {
                 console.log('[dsh-webin] 无登录态快照，跳过回写')
                 stageRef.current = 'live'
+                /**
+                 * ⚠️ cookie 写回成功时**必须 reload** ——
+                 * 页面是在 cookie 写回**之前**开始加载的，首屏还是登录页；
+                 * 不 reload 的话用户看到的就是登录界面（即使 cookie 已经好了）。
+                 */
+                if (cookieRestored > 0) {
+                  stageRef.current = 'reloading'
+                  void element.reload().catch(() => undefined)
+                  return
+                }
                 // 没有快照也要继续走「就绪」流程，否则插件永远不工作
                 markLive()
                 return
@@ -1015,7 +1101,8 @@ export function LdwHost(): unknown {
                 console.warn('[dsh-webin] 登录态回写失败', error)
               }
               if (disposed) return
-              if (restored) {
+              /** cookie 写回也算「有东西变了」，同样需要 reload。 */
+              if (restored || cookieRestored > 0) {
                 // 带着刚写回的登录态 reload；下一次 dom-ready 会走到下面的 live 分支
                 stageRef.current = 'reloading'
                 void element.reload().catch(() => undefined)
@@ -2228,6 +2315,38 @@ export function LdwHost(): unknown {
 
           const ok = await saveSnapshot(text, provider.id)
           if (stopped || !ok) return
+          /**
+           * ## ⭐ 顺便让 host 抓一次**含 httpOnly** 的 cookie
+           *
+           * 页面侧的 `document.cookie` 看不见 httpOnly —— 而那正是
+           * DeepSeek 登录态的载体。host 半跑在 Electron 主进程里，
+           * 能用 `session.fromPartition(partition).cookies` 读到全部。
+           *
+           * partition 名已经由 client 在挂载 webview 时上报过，
+           * 所以这里只需要说一句「现在存」。
+           *
+           * ⚠️ 失败**不影响**页面快照（那是另一条独立的恢复路径）——
+           * 拿不到 electron API 时这里会 501，属于预期降级。
+           */
+          void fetchJson(`/dsh-webin/api/auth/${encodeURIComponent(provider.id)}/cookies`, {
+            method: 'POST',
+          }).then((res) => {
+            if (stopped || res === undefined) return
+            if (!res.ok) {
+              /** 501 = 环境不支持（纯 node）；409 = 还没上报 partition。都不是致命错。 */
+              console.log('[dsh-webin] cookie 存档跳过', res.status)
+              return
+            }
+            void res
+              .json()
+              .then((j: { count?: number; domain?: string }) => {
+                console.log('[dsh-webin] httpOnly cookie 已存档', {
+                  count: j.count ?? 0,
+                  domain: j.domain ?? '',
+                })
+              })
+              .catch(() => undefined)
+          })
           console.log('[dsh-webin] 登录态快照已存入 host', {
             keys: Object.keys(parsed.localStorage ?? {}),
             cookieChars: (parsed.cookie ?? '').length,
@@ -2490,6 +2609,10 @@ interface VersionState {
     latestMessage?: string
     latestAt?: string
     behind?: boolean
+    /** 本地提交与远端相同。 */
+    same?: boolean
+    /** 本地提交比远端新（自己提交了没推）。 */
+    ahead?: boolean
     checkedAt: number
   }
 }
@@ -2608,7 +2731,23 @@ export function LdwSettings(): unknown {
     () => async (check: boolean) => {
       if (check) setChecking(true)
       try {
-        const res = await fetch(`${LDW_API}/version${check ? '?check=1' : ''}`)
+        /**
+         * ⚠️ **必须带超时**（真实 bug）。
+         *
+         * 早期直接 `await fetch(...)` —— 而 `?check=1` 会让 host 去问
+         * GitHub。国内网络下那次请求**可能一直挂着不报错**，
+         * 于是这个 fetch 永不返回 ⇒ 按钮永远显示「检查中…」。
+         *
+         * 用户报的就是这个：「插件更新的逻辑貌似有bug」。
+         *
+         * host 侧那次请求自己有 10 秒超时，这里给 20 秒（留出余量），
+         * 兜住「host 整个卡住」的情况。
+         */
+        const res = await fetchJson(`${LDW_API}/version${check ? '?check=1' : ''}`, undefined, 20_000)
+        if (res === undefined) {
+          if (check) setCheckNote('检查失败：请求超时（host 无响应）')
+          return
+        }
         const data = (await res.json()) as VersionState & { ok?: boolean }
         setVer({
           version: String(data.version ?? '?'),
@@ -2620,12 +2759,24 @@ export function LdwSettings(): unknown {
           ...(data.update === undefined ? {} : { update: data.update }),
         })
         if (check) {
+          /**
+           * 用 host 给的一句话总结（四种状态分开说）。
+           *
+           * 早期这里自己拼：「behind ? 有新提交 : 已是最新」——
+           * 于是「本地比远端新」（自己提交了没推）也显示成「已是最新」，
+           * 用户会困惑「我明明改了代码」。
+           */
+          const summary = (data as { updateSummary?: string }).updateSummary
           setCheckNote(
-            data.update?.ok !== true
-              ? `检查失败：${data.update?.reason ?? '未知原因'}`
-              : data.update.behind === true
-                ? `有新提交 ${data.update.latestCommit}`
-                : '已是最新',
+            typeof summary === 'string' && summary !== ''
+              ? summary
+              : data.update?.ok !== true
+                ? `检查失败：${data.update?.reason ?? '未知原因'}`
+                : data.update?.behind === true
+                  ? `有新提交 ${data.update.latestCommit}`
+                  : data.update?.ahead === true
+                    ? '本地更新（远端还没有你的提交）'
+                    : '已是最新',
           )
         }
       } catch (error) {

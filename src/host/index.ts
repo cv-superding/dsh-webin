@@ -40,7 +40,15 @@ import type { CursorStore, SessionCursor } from './adapter'
 import { DEFAULT_PROVIDER_ID, ProviderRegistry } from '../shared/providers'
 import { snapshotTextLooksLoggedIn } from '../shared/auth-snapshot'
 import {
+  cookieApiAvailable,
+  grabCookies,
+  loadCookieArchive,
+  restoreCookies,
+  saveCookieArchive,
+} from './cookie-jar'
+import {
   checkForUpdate,
+  describeUpdate,
   currentVersion,
   repoUrl,
   starUrl,
@@ -379,8 +387,33 @@ export async function apply(ctx: {
    *
    * 未认证的 GitHub API 每小时只有 60 次配额 —— 用户在设置页连点几次
    * 「检查更新」就能把它打光。缓存一下，正常使用完全够。
+   *
+   * ## ⚠️ 按仓库分键（修掉的真实 bug）
+   *
+   * 早期是**一个模块级变量**。若用户在设置页把 repo 改成别的仓库，
+   * 60 秒内仍会拿到**上一个仓库**的结果 —— 显示的是别人的版本信息。
+   *
+   * 现在用 Map 按 `owner/repo` 分键。
    */
-  let lastUpdateCheck: UpdateCheck | undefined
+  const updateChecks = new Map<string, UpdateCheck>()
+  /** 缓存有效期。 */
+  const UPDATE_CACHE_MS = 60_000
+
+  /**
+   * 各平台当前的 guest partition 名（由 client 上报）。
+   *
+   * ## 为什么需要（解决「重启必须重新登录」）
+   *
+   * DSH 分配的 partition 是 `dsh-sidebar-browser-${randomUUID()}` ——
+   * **随机、内存分区**，host 猜不到名字。而只有拿到名字才能用
+   * `session.fromPartition(name).cookies` 读写**含 httpOnly** 的 cookie
+   * （那是 DeepSeek 登录态的真正载体，页面 JS 看不到）。
+   *
+   * client 半在 `browser.acquire()` 的返回值里拿得到，所以由它上报。
+   * 重启后 client 会重新上报一个新的 partition 名 —— host 用存档里的
+   * cookie 写回**新** partition，从而实现免登录。
+   */
+  const partitions = new Map<string, { partition: string; domain: string; at: number }>()
   const liveClients = (): ClientBeat[] => {
     const now = Date.now()
     const out: ClientBeat[] = []
@@ -494,6 +527,104 @@ export async function apply(ctx: {
       const method = (req.method ?? 'GET').toUpperCase()
 
       // ---- 任务队列：client 领活 / 交结果 ----
+
+      /**
+       * ## POST /client/partition —— client 上报它拿到的 guest partition 名
+       *
+       * ## 为什么需要这个（解决「重启必须重新登录」）
+       *
+       * DSH 给 guest 分配的 partition 是 `dsh-sidebar-browser-${randomUUID()}`
+       * （`lib/main.js:9638`）—— **无 `persist:` 前缀 = 内存分区**，
+       * 进程退出 cookie 全丢。
+       *
+       * 而 DeepSeek 的登录态主要靠 **httpOnly cookie**：页面里的
+       * `document.cookie` 看不见也写不了。所以只靠页面侧快照
+       * **天生补不全**（用户实测：「每次重启 dsh 都需要重新登陆」）。
+       *
+       * partition 名是随机的、host 猜不到 —— 但 client 半在
+       * `browser.acquire()` 的返回值里拿得到。上报后，host 就能用
+       * Electron 的 `session.fromPartition(name).cookies` 读写**含
+       * httpOnly** 的完整 cookie。
+       *
+       * ⚠️ 拿不到 electron（纯 node / 测试环境）时**不能报错** ——
+       * 那会让 client 的这次上报看起来像失败。返回 `cookieApi:false`
+       * 让 client 知道走的是降级路径。
+       */
+      if (method === 'POST' && pathname === `${API_PREFIX}/client/partition`) {
+        const body = await readBody(req)
+        let payload: { platform?: string; partition?: string; domain?: string }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const platform = typeof payload.platform === 'string' ? payload.platform : ''
+        const partition = typeof payload.partition === 'string' ? payload.partition : ''
+        const domain = typeof payload.domain === 'string' ? payload.domain : ''
+        if (platform === '' || partition === '') {
+          sendJson(res, 400, { ok: false, reason: 'missing platform/partition' })
+          return
+        }
+        partitions.set(platform, { partition, domain, at: Date.now() })
+        sendJson(res, 200, {
+          ok: true,
+          /** electron 可用时才能真正读写 httpOnly cookie。 */
+          cookieApi: cookieApiAvailable(),
+          /** 有没有存档可以写回。 */
+          archived: loadCookieArchive(stateRoot(), platform) !== undefined,
+        })
+        return
+      }
+
+      /** POST /auth/<platform>/cookies —— 抓取当前 partition 的 cookie 并存档。 */
+      if (method === 'POST' && pathname.startsWith(`${API_PREFIX}/auth/`) && pathname.endsWith('/cookies')) {
+        const platform = decodeURIComponent(pathname.slice(`${API_PREFIX}/auth/`.length, -'/cookies'.length))
+        const known = partitions.get(platform)
+        if (known === undefined) {
+          sendJson(res, 409, {
+            ok: false,
+            reason: '还不知道该平台的 partition —— 请先打开 LDW 标签让它上报',
+          })
+          return
+        }
+        const domain = known.domain === '' ? platform : known.domain
+        const cookies = await grabCookies(known.partition, domain)
+        if (cookies === undefined) {
+          sendJson(res, 501, {
+            ok: false,
+            reason: '当前环境拿不到 Electron session API（无法读取 httpOnly cookie）',
+          })
+          return
+        }
+        saveCookieArchive(stateRoot(), { platform, cookies, at: Date.now() })
+        sendJson(res, 200, { ok: true, count: cookies.length, domain })
+        return
+      }
+
+      /** GET /auth/<platform>/cookies —— 把存档写回当前 partition。 */
+      if (method === 'GET' && pathname.startsWith(`${API_PREFIX}/auth/`) && pathname.endsWith('/cookies')) {
+        const platform = decodeURIComponent(pathname.slice(`${API_PREFIX}/auth/`.length, -'/cookies'.length))
+        const known = partitions.get(platform)
+        if (known === undefined) {
+          sendJson(res, 409, { ok: false, reason: '还不知道该平台的 partition' })
+          return
+        }
+        const archive = loadCookieArchive(stateRoot(), platform)
+        if (archive === undefined) {
+          sendJson(res, 404, { ok: false, reason: '没有 cookie 存档' })
+          return
+        }
+        const n = await restoreCookies(known.partition, archive.cookies)
+        sendJson(res, 200, {
+          ok: n > 0,
+          restored: n,
+          total: archive.cookies.length,
+          ...(n === 0 ? { reason: '写回失败（可能拿不到 Electron session API）' } : {}),
+        })
+        return
+      }
+
       // GET /job/next —— client 领一个待办任务
       // `?platform=<id>` 让每个平台的 webview 只领自己的活
       if (method === 'GET' && pathname === `${API_PREFIX}/job/next`) {
@@ -771,12 +902,16 @@ export async function apply(ctx: {
         let update: UpdateCheck | undefined
         if (wantCheck) {
           const now = Date.now()
-          /** 60 秒内复用上次结果（用户连点「检查更新」不会打爆配额）。 */
-          if (lastUpdateCheck !== undefined && now - lastUpdateCheck.checkedAt < 60_000) {
-            update = lastUpdateCheck
+          /**
+           * 60 秒内复用上次结果（用户连点「检查更新」不会打爆配额）。
+           * ⚠️ **按仓库分键** —— 见 `updateChecks` 的说明。
+           */
+          const cached = updateChecks.get(info.repo)
+          if (cached !== undefined && now - cached.checkedAt < UPDATE_CACHE_MS) {
+            update = cached
           } else {
             update = await checkForUpdate(info.repo)
-            lastUpdateCheck = update
+            updateChecks.set(info.repo, update)
           }
         }
         sendJson(res, 200, {
@@ -785,6 +920,8 @@ export async function apply(ctx: {
           repoUrl: repoUrl(info.repo),
           starUrl: starUrl(info.repo),
           updateHint: updateHint(info.repo),
+          /** 一句话总结（四种状态分开说，见 `describeUpdate`）。 */
+          updateSummary: update === undefined ? undefined : describeUpdate(update, info.commit),
           ...(update === undefined ? {} : { update }),
         })
         return

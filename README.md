@@ -29,6 +29,8 @@ Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（Deep
 选择器用的是**实测出来的真实类名**（`ds-markdown` / `ds-think-content` /
 `ds-pow-response`），后面才是语义兜底 —— 不靠猜。
 
+> 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 安装
 
 ```bash
