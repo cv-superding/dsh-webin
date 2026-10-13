@@ -247,7 +247,15 @@ console.log('\n[11] ⭐ 交付路径一定带 jobId 与 via=dom')
 {
   check('交结果带 via=dom', /via: 'dom'/.test(clientSrc), true)
   check('交结果用当前 jobId', /api\/job\/\$\{jobId\}\/result/.test(clientSrc), true)
-  check('交付前先取 jobId', /const jobId = pendingJobRef\.current![\s\S]{0,4000}?api\/job\/\$\{jobId\}\/result/.test(clientSrc), true)
+  /**
+   * ⚠️ 窗口从 4000 放宽到 9000 —— 中间加了抓取诊断（决策轨迹）后
+   * 两处距离变远，原窗口会误报（断言窗口太小是常见误报源，踩过）。
+   */
+  check(
+    '交付前先取 jobId',
+    /const jobId = pendingJobRef\.current![\s\S]{0,9000}?api\/job\/\$\{jobId\}\/result/.test(clientSrc),
+    true,
+  )
   /** 交付时要带上页面 URL（host 靠它绑定会话↔对话）。 */
   check('交付带 chatUrl', /chatUrl === '' \? \{\} : \{ chatUrl \}/.test(clientSrc), true)
 }

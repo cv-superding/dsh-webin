@@ -1136,6 +1136,17 @@ export function buildScrapeScript(): string {
     var list = [];
     var usedSelector = '';
     var root = mainRoot();
+    /**
+     * ## ⭐ 决策轨迹 —— 每个候选为什么被选中/跳过
+     *
+     * ## 为什么加（用户：「不要猜」）
+     *
+     * 抓到侧边栏时，我**看不到**内部判断过程：是 「.ds-markdown」 没匹配上？
+     * 还是匹配上了但被 present/inChrome 过滤？还是长度不够？
+     *
+     * 有了轨迹，一次调用就能看出卡在哪 —— 不用改代码、重启、再看。
+     */
+    var trace = [];
     for (var c = 0; c < CANDIDATES.length; c++) {
       var found;
       /**
@@ -1146,6 +1157,8 @@ export function buildScrapeScript(): string {
       if (found.length === 0 && root !== document.body) {
         try { found = document.querySelectorAll(CANDIDATES[c]); } catch (e) { continue; }
       }
+      /** 记录：命中几个节点。 */
+      var skipped = { present: 0, chrome: 0, short: 0 };
       /**
        * ⭐ 这个候选是不是**精确类名**（.ds-markdown 这类）。
        *
@@ -1185,16 +1198,24 @@ export function buildScrapeScript(): string {
          * 用 present 而不是 visible —— 正在生成的回复骨架高度可能是 0，
          * 但它确实是本轮的新回复。见 present 的说明。
          */
-        if (!present(found[i])) continue;
+        if (!present(found[i])) { skipped.present++; continue; }
         /** ⭐ 排除侧边栏/导航区（端到端实测抓到的 bug）。 */
-        if (inChrome(found[i])) continue;
+        if (inChrome(found[i])) { skipped.chrome++; continue; }
         var t = tidy(render(found[i]));
         /**
          * ⚠️ 精确候选：**只要非空就收**（回复可能只有一个字）。
          * 模糊候选：仍然要求 >= 8，避免收进按钮文字之类的碎片。
          */
         if (precise ? t.length > 0 : t.length >= 8) picked.push(t);
+        else skipped.short++;
       }
+      trace.push({
+        sel: CANDIDATES[c],
+        found: found.length,
+        picked: picked.length,
+        precise: precise,
+        skipped: skipped.present + "/" + skipped.chrome + "/" + skipped.short
+      });
       if (picked.length > 0) { list = picked; usedSelector = CANDIDATES[c]; break; }
     }
 
@@ -1207,6 +1228,7 @@ export function buildScrapeScript(): string {
      * 并且仍然过一遍 inChrome。
      */
     if (list.length === 0) {
+    var fallbackInfo = "";
       var all = root.querySelectorAll('div');
       var best = '';
       for (var k = 0; k < all.length; k++) {
@@ -1216,6 +1238,7 @@ export function buildScrapeScript(): string {
         if (txt.length > best.length) best = txt;
       }
       if (best.length >= 8) { list = [best]; usedSelector = 'longest-div'; }
+      fallbackInfo = "divs=" + all.length + " bestLen=" + best.length;
     }
 
     return JSON.stringify({
@@ -1229,7 +1252,9 @@ export function buildScrapeScript(): string {
       count: list.length,
       url: location.href,
       /** 诊断：主内容区是从哪找到的（排查抓错区时看这个）。 */
-      root: root === document.body ? 'body' : String(root.tagName || '').toLowerCase()
+      root: root === document.body ? 'body' : String(root.tagName || '').toLowerCase(),
+      trace: trace,
+      fallback: fallbackInfo
     });
   } catch (e) {
     return JSON.stringify({ ok: false, last: '', all: [], error: String(e && e.message) });

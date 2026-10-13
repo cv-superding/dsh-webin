@@ -319,6 +319,22 @@ interface ClientBeat {
   loggedIn: boolean
   hasGuest: boolean
   replyCount: number
+  /**
+   * ⭐ 抓取诊断 —— 页面上到底抓到了什么（selector / count / 内容前 60 字）。
+   *
+   * 用户要求「不要猜」：抓到侧边栏还是回复，看这个字段一眼就知道。
+   */
+  scrape?: {
+    selector?: string
+    count?: number
+    root?: string
+    lastLen?: number
+    head?: string
+    at?: number
+    /** ⭐ 决策轨迹：每个候选的 found/picked/skipped。 */
+    trace?: unknown[]
+    fallback?: string
+  }
 }
 
 /**
@@ -1184,6 +1200,8 @@ export async function apply(ctx: {
               loggedIn: c.loggedIn,
               hasGuest: c.hasGuest,
               replyCount: c.replyCount,
+              /** ⭐ 抓取诊断 —— 看「抓到的是不是回复」。 */
+              ...(c.scrape === undefined ? {} : { scrape: c.scrape }),
             })),
           },
           /**

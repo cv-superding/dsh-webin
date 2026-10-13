@@ -569,7 +569,16 @@ console.log('\n[18] ⭐⭐⭐ 折叠元素的内容不能被丢掉（用户报�
    *   - `render()` 内部**不用任何可见性判据**过滤节点
    */
   check('⭐⭐ 有 present 判据', /function present\(el\)/.test(script), true)
-  check('⭐⭐ 候选容器用 present', /if \(!present\(found\[i\]\)\) continue/.test(script), true)
+  /**
+   * ⚠️ 判据改过：现在 present 不通过时会**记数**（决策轨迹用），
+   * 所以形式是 `if (!present(...)) { skipped.present++; continue; }`。
+   * 断言只匹配「用 present 过滤」这个语义，不把语句形式写死。
+   */
+  check(
+    '⭐⭐ 候选容器用 present',
+    /if \(!present\(found\[i\]\)\) \{ skipped\.present\+\+; continue; \}/.test(script),
+    true,
+  )
   check('⭐⭐ 兜底也用 present', /if \(!present\(all\[k\]\)\) continue/.test(script), true)
   check('⭐ present 排除 display:none', /s\.display === 'none'/.test(script), true)
   check('⭐ present 排除 visibility:hidden', /s\.visibility === 'hidden'/.test(script), true)

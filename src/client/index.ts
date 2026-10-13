@@ -726,6 +726,33 @@ const sessionIdRef: { current: string } = { current: '' }
 let propsLogged = false
 
 /**
+ * 最近一次 DOM 抓取的诊断信息（跟着心跳上报给 host）。
+ *
+ * ## 为什么需要（用户：「不要猜」）
+ *
+ * 端到端测试抓到侧边栏而不是回复时，我**看不到**抓取脚本内部
+ * 选了什么容器、命中哪个 selector、主内容区定位到哪 —— 只能
+ * 改代码→重启→再看，一轮一轮猜。
+ *
+ * 把这几项挂上去，`/status` 就能直接看到，不用猜。
+ */
+const scrapeDiagRef: {
+  current: {
+    selector?: string
+    count?: number
+    root?: string
+    lastLen?: number
+    /** 内容前 60 字 —— 一眼看出抓的是不是侧边栏。 */
+    head?: string
+    at?: number
+    /** ⭐ 决策轨迹：每个候选的 found/picked/skipped。 */
+    trace?: unknown[]
+    /** 兜底路径的信息。 */
+    fallback?: string
+  }
+} = { current: {} }
+
+/**
  * drain 轮询间隔。
  *
  * ## ⚠️ 为什么从 500ms 放宽到 1500ms（**实测发现的问题**）
@@ -1601,6 +1628,18 @@ export function LdwHost(): unknown {
         hasGuest: el !== null,
         lastReplyAt: lastReplyAtRef.current,
         replyCount: replyCountRef.current,
+        /**
+         * ## ⭐ 抓取诊断 —— 让「页面上到底抓到了什么」可见
+         *
+         * ## 为什么加（用户：「不要猜」）
+         *
+         * 端到端测试抓到的是侧边栏而不是回复，但我**看不到**抓取脚本
+         * 内部的判断过程 —— 只能改代码、重启、再看，一轮一轮猜。
+         *
+         * 把最近一次抓取的 `selector` / `count` / `root` / 内容长度
+         * 跟着心跳送上来，`/status` 就能直接看到。
+         */
+        scrape: scrapeDiagRef.current,
       }
       void fetch('/dsh-webin/api/client/heartbeat', {
         method: 'POST',
@@ -1756,6 +1795,25 @@ export function LdwHost(): unknown {
                 think?: string
                 count?: number
                 selector?: string
+                root?: string
+              }
+              /**
+               * ⭐ 记下抓取诊断 —— 跟着心跳上报，`/status` 直接可见。
+               *
+               * 这样「抓到侧边栏还是回复」不用猜：看 `selector` 和
+               * `head` 就知道。
+               */
+              scrapeDiagRef.current = {
+                trace: Array.isArray((scraped as { trace?: unknown }).trace)
+                  ? ((scraped as { trace?: unknown[] }).trace ?? []).slice(0, 8)
+                  : [],
+                fallback: String((scraped as { fallback?: unknown }).fallback ?? ""),
+                selector: scraped.selector ?? '',
+                count: typeof scraped.count === 'number' ? scraped.count : -1,
+                root: scraped.root ?? '',
+                lastLen: typeof scraped.last === 'string' ? scraped.last.length : -1,
+                head: typeof scraped.last === 'string' ? scraped.last.slice(0, 60) : '',
+                at: Date.now(),
               }
               const last = typeof scraped.last === 'string' ? scraped.last : ''
               const think = typeof scraped.think === 'string' ? scraped.think : ''
