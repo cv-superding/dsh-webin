@@ -725,6 +725,34 @@ const sessionIdRef: { current: string } = { current: '' }
 /** 「props 已经打过日志了吗」—— 只打一次，不刷屏。 */
 let propsLogged = false
 
+/**
+ * drain 轮询间隔。
+ *
+ * ## ⚠️ 为什么从 500ms 放宽到 1500ms（**实测发现的问题**）
+ *
+ * 这个轮询每轮都要跨进程 `executeJavaScript` 去读 hook 事件数组 ——
+ * 也就是**每秒 2 次 IPC**，而且**空闲时也在跑**。
+ *
+ * 加上 hook 看门狗（1500ms）和心跳（5000ms），client 侧同时跑着三个
+ * 定时器，每个都打 IPC。实测后果：
+ *
+ *     心跳延迟 10943ms → 12975ms → 14985ms → **掉线**
+ *
+ * 延迟每次 +2000ms（正好是采样间隔）说明心跳**停了** —— 主线程被
+ * 这些 IPC 往返占住，5 秒的心跳漏成了 15 秒以上，触发 host 的
+ * `CLIENT_STALE_MS` 判死。
+ *
+ * ## 为什么放宽到 1500ms 是安全的
+ *
+ * drain 只是 hook 事件的**辅助通道**（主路径是 DOM 抓取，1.5s 一轮）。
+ * 事件在页面里是**累积在数组里**的，晚读一轮不会丢 —— 只是延迟一点。
+ * 而少掉 2/3 的 IPC 能让主线程喘过来，心跳才稳。
+ *
+ * 副作用：hook 抓到回复后的交付最多晚 1.5 秒。可接受 ——
+ * 相比「面板被判掉线」，这个代价小得多。
+ */
+const DRAIN_INTERVAL_MS = 1_500
+
 function publishRect(rect: HostRect | null): void {
   hostRect = rect
   for (const fn of rectListeners) fn(rect)
@@ -1532,7 +1560,7 @@ export function LdwHost(): unknown {
           }
         })
         .catch(() => undefined)
-    }, 500)
+    }, DRAIN_INTERVAL_MS)
     return () => window.clearInterval(timer)
   }, [ready, provider.id])
 

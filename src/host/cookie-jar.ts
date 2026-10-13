@@ -46,6 +46,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
 /** 一个平台的 cookie 存档。 */
@@ -80,13 +81,31 @@ function cookieFile(stateRoot: string, platform: string): string {
 /**
  * 尝试拿 Electron 的 session 模块。
  *
- * ## 为什么用 try + 动态 require
+ * ## ⚠️ 为什么不能用 `eval('require')`（我第一版写错了，**实测才发现**）
  *
- * - 插件 host 半在 Electron 主进程里跑时，`require('electron')` 可用
- * - 但**单元测试 / 纯 node 环境**下不可用（会 MODULE_NOT_FOUND）
- * - 而且 Electron 的 `session` 只在主进程可用，渲染进程拿到的是空壳
+ * 第一版写的是 `const req = eval('require')` —— 以为这样能绕过打包器。
+ * 但**插件的 host 产物是 ESM**（`tsdown.config.ts` 里 `format: 'esm'`），
+ * ESM 模块里**根本没有 `require`** ⇒ `eval('require')` 抛
+ * `ReferenceError` ⇒ 被 catch 吞掉 ⇒ 永远返回 undefined。
  *
- * 所以这里探测式获取：拿不到就返回 undefined，调用方走降级路径。
+ * **实测证据**（对运行中的 host 打 `POST /client/partition`）：
+ *
+ *     {"ok":true,"cookieApi":false,"archived":false}
+ *
+ * `cookieApi:false` 意味着「重启免登录」那条路**从来没生效过** ——
+ * 用户报「每次重启 dsh 都需要重新登陆」，我以为是分区问题，
+ * 实际上我连 Electron API 都没拿到。
+ *
+ * ## 正确做法：`createRequire(import.meta.url)`
+ *
+ * ESM 里拿 `require` 的标准方式。
+ *
+ * ## 为什么还要 try/catch
+ *
+ * - **单元测试 / 纯 node 环境**下 `require('electron')` 会 MODULE_NOT_FOUND
+ * - Electron 的 `session` 只在**主进程**可用
+ *
+ * 拿不到就返回 undefined，调用方走降级路径。
  * **绝不能因为拿不到就抛错** —— 那会让整个插件加载失败。
  */
 function tryElectronSession(): {
@@ -99,9 +118,19 @@ function tryElectronSession(): {
   }
 } | undefined {
   try {
-    /** 动态 require —— 静态 import 会让打包器把 electron 塞进产物。 */
+    /**
+     * ESM 里拿 require 的标准方式。
+     *
+     * ⚠️ 用 `typeof` 探测 `import.meta.url` —— CJS 产物里它不存在，
+     * 直接读会抛（插件可能被不同加载器加载）。
+     */
+    const meta = import.meta as unknown as { url?: string }
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const req = eval('require') as (m: string) => unknown
+    const req: ((m: string) => unknown) | undefined =
+      typeof meta.url === 'string'
+        ? (createRequire(meta.url) as (m: string) => unknown)
+        : (globalThis as unknown as { require?: (m: string) => unknown }).require
+    if (typeof req !== 'function') return undefined
     const electron = req('electron') as {
       session?: {
         fromPartition: (name: string) => {

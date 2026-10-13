@@ -72,6 +72,7 @@
     "verify:send-reliable": "node scripts/verify-send-reliable.mjs",
     "verify:session-isolation": "node scripts/verify-session-isolation.mjs",
     "verify:session-behavior": "node scripts/verify-session-behavior.mjs",
+    "verify:live": "node scripts/verify-live.mjs",
     "verify:scrape": "node scripts/verify-scrape.mjs",
     "verify:audit": "node scripts/verify-audit.mjs",
     "verify:sequence": "node scripts/verify-sequence.mjs",
