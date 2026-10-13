@@ -198,3 +198,5 @@ console.log('\n[7] 混合：快照重置后继续累积（新回复）')
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

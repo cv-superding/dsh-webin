@@ -402,3 +402,9 @@ console.log('\n[4] 静态：停止脚本的定位规则（实测校准）')
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1
+/**
+ * ⚠️ 显式退出 —— 测试全过后进程仍挂着的 handle（server/定时器）会让
+ * `npm run check` 整体卡死（实测：check 跑 5 分钟无输出，被误判为超时）。
+ * exitCode 已设好，直接退出不影响结果。
+ */
+process.exit(process.exitCode)

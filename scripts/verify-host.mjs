@@ -426,3 +426,5 @@ console.log('\n[9] logger 畸形形态不得让插件加载失败')
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

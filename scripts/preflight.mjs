@@ -111,10 +111,9 @@ console.log('\n[5] dsh 装配字段')
 check('dsh.bundle.patch 已声明', typeof self?.dsh?.bundle?.patch === 'string', String(self?.dsh?.bundle?.patch))
 check('dsh.client.platform = web', self?.dsh?.client?.platform === 'web', String(self?.dsh?.client?.platform))
 check(
-  'dsh.client.inject 含 runtime 与 slots',
+  'dsh.client.inject 不含已从 DSH 移除的 dsh-client-runtime',
   Array.isArray(self?.dsh?.client?.inject) &&
-    self.dsh.client.inject.includes('@deepseek-ai/dsh-client-runtime') &&
-    self.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-slots'),
+    !self.dsh.client.inject.includes('@deepseek-ai/dsh-client-runtime'),
   JSON.stringify(self?.dsh?.client?.inject),
 )
 

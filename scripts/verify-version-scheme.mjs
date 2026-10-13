@@ -133,3 +133,5 @@ console.log('\n[6] ⭐ 发版纪律：有 release 就要有 tag，且 tag 与 pa
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

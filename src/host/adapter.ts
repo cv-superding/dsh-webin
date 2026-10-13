@@ -128,6 +128,35 @@ class JobQueue {
   private readonly jobs = new Map<string, Job>()
   private seq = 0
 
+  /**
+   * ⭐⭐ 任务看门狗：claimed 超时回收。
+   *
+   * ## 为什么需要（真实事故）
+   *
+   * 面板在生成中途死掉 ⇒ 结果永远不来 ⇒ 任务永远 claimed ⇒
+   * DSH 只能干等到 adapter 超时（默认 10 分钟）。
+   *
+   * claim 后 3 分钟没结果 ⇒ 判定执行者死了 ⇒ 标 failed 让 DSH 立刻报错。
+   * 3 分钟的依据：正常回复最慢 6 分钟（注释里有实测），但那是「已发送、
+   * 在生成」的场景 —— 而生成中面板会持续心跳；面板死了心跳就断。
+   * 这里用 claim 时刻算 3 分钟（比 replyTimeout 短），宁可早点报错
+   * 让用户重试，也不让用户干等 10 分钟。
+   *
+   * @param now - 当前时刻（默认 Date.now()，测试可注入）。
+   * @returns 被回收的任务数。
+   */
+  reapStaleClaimed(now: number = Date.now(), timeoutMs: number = 180_000): number {
+    let reaped = 0
+    for (const job of this.jobs.values()) {
+      if (job.claimedAt === undefined) continue
+      if (job.done !== undefined || job.failed !== undefined) continue
+      if (now - job.claimedAt < timeoutMs) continue
+      job.failed = '执行面板中途失联（心跳停止）—— 任务没能完成，请重试'
+      reaped += 1
+    }
+    return reaped
+  }
+
   /** 派一个新任务。 */
   enqueue(
     prompt: string,

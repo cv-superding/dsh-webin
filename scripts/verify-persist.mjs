@@ -339,3 +339,5 @@ console.log('\n[6] client 侧：freshChat 分支存在且逻辑正确')
 rmSync(TMP, { recursive: true, force: true })
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

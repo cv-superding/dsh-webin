@@ -762,25 +762,24 @@ let propsLogged = false
 const domReportRef: { current: Record<string, unknown> | undefined } = { current: undefined }
 
 /**
- * 本 client 半的**构建时刻** —— 跟着心跳上报，让 host 判断面板是否落后。
+ * ## 面板加载时的产物 rev（自动重载判据 v2）
  *
- * ## 为什么用时间而不是内容哈希
+ * ## ⚠️ v1 判据（builtAt vs mtime）造成**每 2 秒无限重载**，已废弃
  *
- * 内容哈希在构建期算的是**上一次**的产物（构建会重写文件）
- * ⇒ 烘进去的值永远等于旧产物 ⇒ 永远判定自己过期 ⇒ **无限重载**（踩过）。
+ * v1 让面板上报烘死的 `clientBuiltAt`，host 比 `mtime` —— 但 builtAt
+ * 在构建开始算、client.js 在构建末尾写盘，机器稍慢差值就超容差
+ * ⇒ **永远判定落后** ⇒ 每次心跳都 reload ⇒ 死循环（群友实测每 2 秒一次，
+ * 甚至拖崩 DSH 桌面端 —— 用户拿这个问题去找了别的 agent）。
  *
- * 构建时间 + host 侧比文件 mtime，没有这个循环依赖。
+ * ## v2：只比「rev 变没变」—— 自收敛
  *
- * ⚠️ 用 `currentVersion()`（带 try/catch 的安全读取器），不直接引用
- * 构建期常量 —— 别的工具链编译源码时会 ReferenceError。
+ * 第一次心跳把 host 回的 `bundleRev` 记下来（= 我加载时是哪个版本）；
+ * 之后 rev **变了** ⇒ 真的出了新构建 ⇒ 才 reload。reload 后拿到的
+ * 就是新 bundle ⇒ 记下的 rev 更新 ⇒ 停止。
+ *
+ * **不需要任何持久化**：模块级变量在 reload 后随模块重建，正好重置。
  */
-const CLIENT_BUILT_AT = (() => {
-  try {
-    return currentVersion().builtAt
-  } catch {
-    return ''
-  }
-})()
+const loadedBundleRev: { current: string | null } = { current: null }
 
 /**
  * 当前任务的提示词 —— 诊断时用它做 needle。
@@ -1720,15 +1719,6 @@ export function LdwHost(): unknown {
         lastReplyAt: lastReplyAtRef.current,
         replyCount: replyCountRef.current,
         /**
-         * ⭐ 本 client 半的**构建时刻** —— 让 host 判断面板是否落后。
-         *
-         * 用构建时间而不是「内容哈希」：内容哈希在构建期算的是
-         * **上一次**的产物（构建会重写文件）⇒ 永远判定自己过期
-         * ⇒ 无限重载（踩过）。
-         *
-         * 构建时间 + host 侧比文件 mtime，就没有这个循环依赖。
-         */
-        clientBuiltAt: CLIENT_BUILT_AT,
         /**
          * ## ⭐ 抓取诊断 —— 让「页面上到底抓到了什么」可见
          *
@@ -1750,45 +1740,43 @@ export function LdwHost(): unknown {
         body: JSON.stringify(payload),
       })
         .then((res) => (res.ok ? res.json() : undefined))
-        .then((j: { reload?: boolean; bundleMtimeMs?: number } | undefined) => {
-          if (stopped || j === undefined || j.reload !== true) return
+        .then((j: { bundleRev?: string } | undefined) => {
+          if (stopped || j === undefined || typeof j.bundleRev !== 'string') return
           /**
-           * ## ⭐⭐ 自动重载 —— 让「改完代码要重启 DSH」这件事消失
+           * ## ⭐⭐ 自动重载 v2 —— 判据是 **rev 变化**（修复死循环）
            *
-           * ## 为什么需要（实测查清的 HMR 缺陷）
+           * ## ⚠️ v1 判据（builtAt vs mtime）造成**每 2 秒无限重载**
            *
-           * DSH 的 `client-hmr` 插件**只做了一半**：
+           * 群友实测：面板每 2~2.2 秒重载一次、永不停止，甚至拖崩
+           * DSH 桌面端。根因：`builtAt` 在**构建开始**算，`client.js`
+           * 在**构建末尾**写盘 —— 机器稍慢差值就超 5 秒容差 ⇒
+           * **永远判定落后** ⇒ 每次心跳都要求重载 ⇒ 死循环。
            *
-           *   ✅ host 每 500ms stat 轮询 `lib/client.js`
-           *   ✅ 变化时算新 rev，通过 `/plugins/events` SSE 推 graph 帧
-           *   ✅ 服务器按新 rev 提供新 bundle（实测拉到的新内容正确）
-           *   ❌ **浏览器端不应用** —— `clientId` 不变、新代码不生效
+           * ## v2：只比「rev 变没变」—— 自收敛
            *
-           * 实测证据（三次独立验证）：
-           *   - touch 文件后 rev 从 `c98f6f92` → `ddff8634`，SSE 立刻报新 rev
-           *   - 服务器返回的 bundle 里 `domReportRef` 存在（= 新代码）
-           *   - 但面板心跳里的 `dom` 字段始终没有 ⇒ 跑的还是旧代码
+           *   1. host 每次心跳回包都带当前产物 `bundleRev`
+           *   2. 面板第一次收到时记下来（= 我加载时是哪个版本）
+           *   3. 之后 rev **变了** ⇒ 真的出了新构建 ⇒ 才 reload
+           *   4. reload 后加载到新 bundle ⇒ 记下的 rev 更新 ⇒ 停止
            *
-           * 于是每次改代码都要用户手动重启 DSH —— 用户已经为此抱怨
-           * （「老是让我重启啥意思」）。
+           * **自收敛**：只有文件真的换了 rev 才会变。不需要任何持久化
+           * （模块级变量就够了 —— reload 会重建模块，正好重置）。
            *
-           * ## 做法
-           *
-           * host 在心跳响应里告诉面板「你落后了」（带上最新 rev）。
-           * 面板收到就 `location.reload()` —— **自己刷新自己**。
-           *
-           * 这样以后改完代码，只要面板在跑，几秒内自动生效，不需要用户做任何事。
-           *
-           * ⚠️ 只在**没有任务在跑**时重载 —— 否则会把正在生成的回复打断。
-           * ⚠️ 重载后 `clientId` 会变（新挂载），这是正常的。
+           * ⚠️ 有任务在跑时不重载 —— 否则打断正在生成的回复。
            */
-          if (pendingJobRef.current !== undefined) {
-            console.log('[dsh-webin] 发现新版本，但当前有任务在跑 —— 等它结束再重载')
+          if (loadedBundleRev.current === null) {
+            /** 第一次心跳：记下「我加载时是哪个版本」。 */
+            loadedBundleRev.current = j.bundleRev
             return
           }
-          console.log('[dsh-webin] 发现新版本，自动重载页面', {
-            mine: CLIENT_BUILT_AT,
-            bundleMtime: j.bundleMtimeMs,
+          if (loadedBundleRev.current === j.bundleRev) return
+          if (pendingJobRef.current !== undefined) {
+            console.log('[dsh-webin] 发现新构建，但当前有任务在跑 —— 等它结束再重载')
+            return
+          }
+          console.log('[dsh-webin] 发现新构建，自动重载页面', {
+            mine: loadedBundleRev.current,
+            latest: j.bundleRev,
           })
           window.location.reload()
         })

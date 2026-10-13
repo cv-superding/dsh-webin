@@ -365,6 +365,8 @@ async function main() {
 
     console.log(`\n=== 冷启动结论：${pass} 通过 / ${fail} 失败 ===`)
     process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)
   } finally {
     try { ws?.close() } catch { /* ignore */ }
     try { child.kill() } catch { /* ignore */ }

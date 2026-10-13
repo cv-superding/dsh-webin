@@ -299,55 +299,61 @@ console.log('\n[8] ⭐⭐⭐ 心跳里的诊断字段不能被 handler 丢掉')
 }
 
 
-console.log('\n[9] ⭐⭐⭐ 面板能自己发现「代码更新了」并重载（不用用户重启 DSH）')
+console.log('\n[9] ⭐⭐⭐ 自动重载 v2：判据是 rev 变化（修复每 2 秒死循环）')
 {
   /**
-   * ## 用户的话
+   * ## 用户的话 + 群友实测
    *
    * 「你再仔细检查一下，老是让我重启啥意思」
+   * 群友：**面板每 2~2.2 秒无限重载，甚至拖崩 DSH 桌面端**。
    *
-   * ## 实测查清的事实（DSH 的 client-hmr 只做了一半）
+   * ## v1 判据为什么死循环
    *
-   *   ✅ host 每 500ms stat 轮询 lib/client.js
-   *   ✅ 变化时算新 rev 并通过 /plugins/events SSE 推 graph 帧
-   *   ✅ 服务器按新 rev 提供新 bundle（拉到的新内容正确）
-   *   ❌ **浏览器端不应用** —— clientId 不变、新代码不生效
+   * 面板上报烘死的 `clientBuiltAt`，host 比 `mtime`，差 5 秒以上回 reload。
+   * 但 builtAt 在**构建开始**算、client.js 在**构建末尾**写盘 ——
+   * 机器稍慢差值就超容差 ⇒ **永远判定落后** ⇒ 每次心跳都 reload。
    *
-   * 证据（三次独立验证）：
-   *   - touch 文件后 rev c98f6f92 → ddff8634，SSE 立刻报新 rev
-   *   - 服务器返回的 bundle 里 domReportRef 在（= 新代码）
-   *   - 但面板心跳里的 dom 字段始终没有 ⇒ 跑的还是旧代码
+   * ## v2 判据：rev 变化 —— 自收敛
    *
-   * ## 修法：面板自己重载
-   *
-   * host 在心跳响应里说「你落后了」，面板 location.reload()。
-   * 判据用**构建时间 vs 产物 mtime**（晚 5 秒以上）——
-   * 不能用内容哈希（构建期算的是上一次产物 ⇒ 无限重载）。
+   * host 每次心跳回包都带 `bundleRev`；面板第一次记下来，
+   * 之后 rev **变了**才 reload。reload 后拿到新 bundle ⇒ 记下的 rev
+   * 更新 ⇒ 停止。不需要持久化（模块级变量随 reload 重建，正好重置）。
    */
   const hostSrc = readFileSync(join(ROOT, 'src', 'host', 'index.ts'), 'utf8')
   const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
 
-  check('⭐⭐ client 上报构建时刻', /clientBuiltAt: CLIENT_BUILT_AT/.test(clientSrc), true)
-  check('⭐⭐ client 收到 reload 就重载', /window\.location\.reload\(\)/.test(clientSrc), true)
+  /** ⚠️ v1 判据必须彻底消失（它就是死循环的根源）。 */
+  check(
+    '⭐⭐⭐ v1 死循环判据已删（mtime - mine > 5_000）',
+    hostSrc.includes('st.mtimeMs - mine > 5_000'),
+    false,
+  )
+  check(
+    '⭐⭐⭐ v1 上报已删（clientBuiltAt: CLIENT_BUILT_AT）',
+    clientSrc.includes('clientBuiltAt: CLIENT_BUILT_AT'),
+    false,
+  )
+  check('⭐⭐ v2 声明 loadedBundleRev', /const loadedBundleRev: \{ current: string \| null \}/.test(clientSrc), true)
+  check('⭐⭐ v2 第一次心跳先记录 rev', /loadedBundleRev\.current === null\) \{[\s\S]{0,200}?loadedBundleRev\.current = j\.bundleRev/.test(clientSrc), true)
+  check('⭐⭐ v2 rev 变了才重载', /loadedBundleRev\.current === j\.bundleRev\) return/.test(clientSrc), true)
+  check('⭐⭐ client 收到变化才重载', /window\.location\.reload\(\)/.test(clientSrc), true)
   /** ⚠️ 有任务在跑时不能重载（会打断生成中的回复）。 */
   check(
     '⭐⭐ 有任务在跑时不重载',
     /if \(pendingJobRef\.current !== undefined\) \{[\s\S]{0,200}?return/.test(clientSrc),
     true,
   )
-  check('⭐ 用安全读取器拿构建时刻', /currentVersion\(\)\.builtAt/.test(clientSrc), true)
 
+  check('⭐⭐ host 每次心跳都带 bundleRev', /bundleRev,/.test(hostSrc), true)
+  check('⭐⭐ host 用与 DSH 相同的 rev 算法', /plugin-artifact/.test(hostSrc), true)
   check('⭐⭐ host 算产物路径', /function clientBundlePath\(\)/.test(hostSrc), true)
-  check('⭐⭐ host 比构建时间与 mtime', /st\.mtimeMs - mine > 5_000/.test(hostSrc), true)
-  check('⭐⭐ 落后时回 reload:true', /reload \? \{ reload: true, bundleMtimeMs \}/.test(hostSrc), true)
-  /** 5 秒容差必须有 —— 否则一挂载就判定过期 ⇒ 无限重载。 */
-  check('⭐⭐ 有 5 秒容差（防无限重载）', /5_000/.test(hostSrc), true)
 
   /** 产物里也要在。 */
   const hb = readFileSync(join(ROOT, 'lib', 'index.js'), 'utf8')
   const cb = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8')
-  check('⭐⭐ 产物 host 有 clientBundlePath', /function clientBundlePath/.test(hb), true)
-  check('⭐⭐ 产物 client 有自动重载', /自动重载页面/.test(cb), true)
+  check('⭐⭐ 产物 host 带 bundleRev', /bundleRev/.test(hb), true)
+  check('⭐⭐ 产物 client 有 loadedBundleRev', /loadedBundleRev/.test(cb), true)
+  check('⭐⭐ 产物 client 无 v1 上报', cb.includes('clientBuiltAt:'), false)
 }
 
 
@@ -546,3 +552,5 @@ console.log('\n[14] ⭐⭐ 虚拟列表滚动适配 + 页面健康度')
 
 console.log(`\n=== 静态检查：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

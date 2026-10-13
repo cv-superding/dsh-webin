@@ -315,3 +315,5 @@ console.log('\n[9] 版本模块不依赖 node:fs（client 要能用）')
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1
+/** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
+process.exit(process.exitCode)

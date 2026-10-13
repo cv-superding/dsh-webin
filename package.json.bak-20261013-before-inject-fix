@@ -1,0 +1,108 @@
+{
+  "name": "dsh-webin",
+  "version": "0.2.0",
+  "description": "Unofficial DSH plugin: drive chat.deepseek.com in a REAL browser (DSH's own Chromium webview guest) — real login, real typing, real send, reply captured by observing the page's own SSE. Structurally a port of cuckoo-code's approach.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "provider.example.json",
+    "CHANGELOG.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cv-superding/dsh-webin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cv-superding/dsh-webin/issues"
+  },
+  "homepage": "https://github.com/cv-superding/dsh-webin#readme",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "deepseek",
+    "webview"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify.mjs",
+    "verify:host": "node scripts/verify-host.mjs",
+    "verify:snapshot": "node scripts/verify-snapshot.mjs",
+    "verify:diff": "node scripts/verify-diff.mjs",
+    "verify:restore": "node scripts/verify-restore.mjs",
+    "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
+    "verify:extract": "node scripts/verify-extract.mjs",
+    "verify:session-route": "node scripts/verify-session-route.mjs",
+    "verify:tools": "node scripts/verify-tools.mjs",
+    "verify:tool-chunks": "node scripts/verify-tool-chunks.mjs",
+    "verify:persist": "node scripts/verify-persist.mjs",
+    "verify:settings": "node scripts/verify-settings.mjs",
+    "verify:config": "node scripts/verify-config.mjs",
+    "verify:thinking": "node scripts/verify-thinking.mjs",
+    "verify:fence": "node scripts/verify-fence.mjs",
+    "verify:login-gate": "node scripts/verify-login-gate.mjs",
+    "verify:version": "node scripts/verify-version.mjs",
+    "verify:fill": "node scripts/verify-fill.mjs",
+    "verify:send-confirm": "node scripts/verify-send-confirm.mjs",
+    "verify:send-reliable": "node scripts/verify-send-reliable.mjs",
+    "verify:session-isolation": "node scripts/verify-session-isolation.mjs",
+    "verify:session-behavior": "node scripts/verify-session-behavior.mjs",
+    "verify:live": "node scripts/verify-live.mjs",
+    "verify:watchdog": "node scripts/verify-watchdog.mjs",
+    "verify:scrape": "node scripts/verify-scrape.mjs",
+    "verify:audit": "node scripts/verify-audit.mjs",
+    "verify:sequence": "node scripts/verify-sequence.mjs",
+    "verify:update": "node scripts/verify-update.mjs",
+    "verify:cookie": "node scripts/verify-cookie.mjs",
+    "verify:update-live": "node scripts/verify-update-live.mjs",
+    "verify:version-scheme": "node scripts/verify-version-scheme.mjs",
+    "verify:skills-mcp": "node scripts/verify-skills-mcp.mjs",
+    "verify:stuck": "node scripts/verify-stuck.mjs",
+    "probe:thinking": "node scripts/probe-thinking.mjs",
+    "probe:frames": "node scripts/probe-frames.mjs",
+    "preflight": "node scripts/preflight.mjs",
+    "check": "node scripts/build.mjs && node scripts/verify.mjs && node scripts/verify-snapshot.mjs && node scripts/verify-diff.mjs && node scripts/verify-restore.mjs && node scripts/verify-lifecycle.mjs && node scripts/verify-extract.mjs && node scripts/verify-session-route.mjs && node scripts/verify-tools.mjs && node scripts/verify-tool-chunks.mjs && node scripts/verify-persist.mjs && node scripts/verify-settings.mjs && node scripts/verify-config.mjs && node scripts/verify-thinking.mjs && node scripts/verify-fence.mjs && node scripts/verify-login-gate.mjs && node scripts/verify-version.mjs && node scripts/verify-fill.mjs && node scripts/verify-send-confirm.mjs && node scripts/verify-send-reliable.mjs && node scripts/verify-session-isolation.mjs && node scripts/verify-session-behavior.mjs && node scripts/verify-scrape.mjs && node scripts/verify-audit.mjs && node scripts/verify-sequence.mjs && node scripts/verify-update.mjs && node scripts/verify-cookie.mjs && node scripts/verify-version-scheme.mjs && node scripts/verify-live.mjs && node scripts/verify-watchdog.mjs && node scripts/verify-skills-mcp.mjs && node scripts/verify-stuck.mjs && node scripts/verify-host.mjs && node scripts/preflight.mjs",
+    "probe:dom": "node scripts/probe-dom.mjs",
+    "probe:send": "node scripts/probe-send.mjs",
+    "probe:chain": "node scripts/probe-chain.mjs",
+    "probe:login": "node scripts/probe-login.mjs",
+    "probe:origin": "node scripts/probe-origin.mjs",
+    "probe:stop": "node scripts/probe-stop.mjs",
+    "probe:done": "node scripts/probe-done.mjs",
+    "verify:e2e": "node scripts/verify-e2e.mjs",
+    "verify:coldstart": "node scripts/verify-coldstart.mjs",
+    "verify:session-e2e": "node scripts/verify-session-e2e.mjs"
+  },
+  "engines": {
+    "node": "^22.18.0 || >=24.11.0"
+  },
+  "devDependencies": {
+    "tsdown": "0.22.14",
+    "typescript": "5.9.3"
+  }
+}
