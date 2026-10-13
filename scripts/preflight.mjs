@@ -157,7 +157,7 @@ if (existsSync(libClient)) {
    * 所以这里用 node --check 逐个验证语法。
    */
   const { execSync } = await import('node:child_process')
-  for (const f of [libClient, join(ROOT, 'lib', 'index.js')]) {
+  for (const f of [libClient, join(SRC, 'lib', 'index.js')]) {
     let ok = false
     let detail = ''
     try {
