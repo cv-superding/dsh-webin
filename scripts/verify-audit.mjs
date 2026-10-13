@@ -88,7 +88,12 @@ console.log('\n[C] ⭐ 依赖数组不能含「每轮都变」的值（否则反
    *
    * 判据：心跳 / 轮询类 effect 的依赖里不能有随消息变化的状态。
    */
-  const hb = /useEffect\(\(\) => \{[\s\S]{0,2200}?client\/heartbeat[\s\S]{0,1200}?\}, \[([^\]]*)\]/.exec(clientSrc)
+  /**
+   * ⚠️ 窗口从 2200/1200 放宽到 4000/3500 —— 心跳 effect 里后来加了
+   * 抓取诊断上报与**自动重载**逻辑，原来的窗口不够长会误报
+   * （断言窗口太小是这类静态检查的常见误报源，踩过多次）。
+   */
+  const hb = /useEffect\(\(\) => \{[\s\S]{0,4000}?client\/heartbeat[\s\S]{0,3500}?\}, \[([^\]]*)\]/.exec(clientSrc)
   check('找到心跳 effect', hb !== null, true)
   if (hb !== null) {
     const deps = hb[1]

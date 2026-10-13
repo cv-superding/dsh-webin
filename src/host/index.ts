@@ -31,8 +31,9 @@
  * 不同 cookie / localStorage ⇒ **登录态天然隔离**，且不需要改 DSH 一行。
  */
 import { mkdir, readFile, writeFile, rename, readdir, unlink } from 'node:fs/promises'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdapter, JobQueue, routeFor, ROUTE_PREFIX } from './adapter'
@@ -319,6 +320,8 @@ interface ClientBeat {
   loggedIn: boolean
   hasGuest: boolean
   replyCount: number
+  /** ⭐ client 半的构建时刻 —— 判断面板是否落后于最新构建。 */
+  clientBuiltAt?: string
   /**
    * ⭐ 抓取诊断 —— 页面上到底抓到了什么（selector / count / 内容前 60 字）。
    *
@@ -365,6 +368,22 @@ interface ClientBeat {
  * 又能在一个面板真的关掉后 45 秒内反映出来。
  */
 const CLIENT_STALE_MS = 45_000
+
+/**
+ * client 产物的绝对路径 —— 用来判断面板跑的是不是最新构建。
+ *
+ * 插件从 `lib/index.js` 跑，所以 client 产物在**同目录**的 `client.js`。
+ * 用 `import.meta.url` 定位，而不是 cwd（DSH 的 cwd 是用户工作区，
+ * 不是插件目录）。
+ */
+function clientBundlePath(): string {
+  try {
+    const here = fileURLToPath(import.meta.url)
+    return join(dirname(here), 'client.js')
+  } catch {
+    return join(process.cwd(), 'lib', 'client.js')
+  }
+}
 
 /**
  * 安全取一个命名 logger。
@@ -1040,6 +1059,8 @@ export async function apply(ctx: {
           }
           /** ⭐ 页面结构报告。 */
           dom?: Record<string, unknown>
+          /** ⭐ client 半的构建时刻 —— 用来判断面板是否落后于最新构建。 */
+          clientBuiltAt?: string
         }
         try {
           payload = JSON.parse(body) as typeof payload
@@ -1069,8 +1090,49 @@ export async function apply(ctx: {
            */
           ...(payload.scrape === undefined ? {} : { scrape: payload.scrape }),
           ...(payload.dom === undefined ? {} : { dom: payload.dom }),
+          ...(payload.clientBuiltAt === undefined ? {} : { clientBuiltAt: payload.clientBuiltAt }),
         })
-        sendJson(res, 200, { ok: true, clients: liveClients().length })
+        /**
+         * ## ⭐⭐ 告诉面板「你落后了」—— 让它自己重载
+         *
+         * ## 为什么需要（用户：「老是让我重启啥意思」）
+         *
+         * 实测查清了 DSH 的 `client-hmr` **只做了一半**：
+         *
+         *   ✅ host 每 500ms stat 轮询 `lib/client.js`
+         *   ✅ 变化时算新 rev 并通过 `/plugins/events` SSE 推 graph 帧
+         *   ✅ 服务器按新 rev 提供新 bundle（实测拉到的新内容正确）
+         *   ❌ **浏览器端不应用** —— `clientId` 不变、新代码不生效
+         *
+         * 证据（三次独立验证）：
+         *   - touch 文件后 rev `c98f6f92` → `ddff8634`，SSE 立刻报新 rev
+         *   - 服务器返回的 bundle 里 `domReportRef` 在（= 新代码）
+         *   - 但面板心跳里的 `dom` 始终没有 ⇒ 跑的还是旧代码
+         *
+         * 所以每次改代码都要用户手动重启 —— 现在由面板**自己**重载。
+         *
+         * ## 判据：client 的构建时间 vs 产物的 mtime
+         *
+         * 面板上报烘进去的 `clientBuiltAt`（构建时刻），这里比
+         * `lib/client.js` 的 mtime。**晚 5 秒以上**才算新构建 ——
+         * 容差是为了避开「builtAt 在写入前算、mtime 在写入后产生」
+         * 的固有偏差（否则一挂载就判定过期 → 无限重载）。
+         */
+        let reload = false
+        let bundleMtimeMs = 0
+        try {
+          const st = statSync(clientBundlePath())
+          bundleMtimeMs = st.mtimeMs
+          const mine = typeof payload.clientBuiltAt === 'string' ? Date.parse(payload.clientBuiltAt) : NaN
+          if (Number.isFinite(mine) && st.mtimeMs - mine > 5_000) reload = true
+        } catch {
+          /** 读不到产物就不折腾 —— 宁可让用户手动重启。 */
+        }
+        sendJson(res, 200, {
+          ok: true,
+          clients: liveClients().length,
+          ...(reload ? { reload: true, bundleMtimeMs } : {}),
+        })
         return
       }
 

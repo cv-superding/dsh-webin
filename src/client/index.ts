@@ -39,7 +39,7 @@ import {
 import { DEFAULT_PROVIDER_ID, ProviderRegistry, type Provider } from '../shared/providers'
 import { DEFAULT_CONFIG, describeConfig, LIMITS, type WebinConfig } from '../shared/config'
 import { snapshotLooksLoggedIn } from '../shared/auth-snapshot'
-import { formatBuiltAt } from '../shared/version'
+import { currentVersion, formatBuiltAt } from '../shared/version'
 
 /**
  * 平台注册表（模块级单例）。
@@ -760,6 +760,27 @@ let propsLogged = false
  * 只抓一次 —— 不给页面加持续负担。
  */
 const domReportRef: { current: Record<string, unknown> | undefined } = { current: undefined }
+
+/**
+ * 本 client 半的**构建时刻** —— 跟着心跳上报，让 host 判断面板是否落后。
+ *
+ * ## 为什么用时间而不是内容哈希
+ *
+ * 内容哈希在构建期算的是**上一次**的产物（构建会重写文件）
+ * ⇒ 烘进去的值永远等于旧产物 ⇒ 永远判定自己过期 ⇒ **无限重载**（踩过）。
+ *
+ * 构建时间 + host 侧比文件 mtime，没有这个循环依赖。
+ *
+ * ⚠️ 用 `currentVersion()`（带 try/catch 的安全读取器），不直接引用
+ * 构建期常量 —— 别的工具链编译源码时会 ReferenceError。
+ */
+const CLIENT_BUILT_AT = (() => {
+  try {
+    return currentVersion().builtAt
+  } catch {
+    return ''
+  }
+})()
 
 const scrapeDiagRef: {
   current: {
@@ -1654,6 +1675,16 @@ export function LdwHost(): unknown {
         lastReplyAt: lastReplyAtRef.current,
         replyCount: replyCountRef.current,
         /**
+         * ⭐ 本 client 半的**构建时刻** —— 让 host 判断面板是否落后。
+         *
+         * 用构建时间而不是「内容哈希」：内容哈希在构建期算的是
+         * **上一次**的产物（构建会重写文件）⇒ 永远判定自己过期
+         * ⇒ 无限重载（踩过）。
+         *
+         * 构建时间 + host 侧比文件 mtime，就没有这个循环依赖。
+         */
+        clientBuiltAt: CLIENT_BUILT_AT,
+        /**
          * ## ⭐ 抓取诊断 —— 让「页面上到底抓到了什么」可见
          *
          * ## 为什么加（用户：「不要猜」）
@@ -1672,7 +1703,51 @@ export function LdwHost(): unknown {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
-      }).catch(() => undefined)
+      })
+        .then((res) => (res.ok ? res.json() : undefined))
+        .then((j: { reload?: boolean; bundleMtimeMs?: number } | undefined) => {
+          if (stopped || j === undefined || j.reload !== true) return
+          /**
+           * ## ⭐⭐ 自动重载 —— 让「改完代码要重启 DSH」这件事消失
+           *
+           * ## 为什么需要（实测查清的 HMR 缺陷）
+           *
+           * DSH 的 `client-hmr` 插件**只做了一半**：
+           *
+           *   ✅ host 每 500ms stat 轮询 `lib/client.js`
+           *   ✅ 变化时算新 rev，通过 `/plugins/events` SSE 推 graph 帧
+           *   ✅ 服务器按新 rev 提供新 bundle（实测拉到的新内容正确）
+           *   ❌ **浏览器端不应用** —— `clientId` 不变、新代码不生效
+           *
+           * 实测证据（三次独立验证）：
+           *   - touch 文件后 rev 从 `c98f6f92` → `ddff8634`，SSE 立刻报新 rev
+           *   - 服务器返回的 bundle 里 `domReportRef` 存在（= 新代码）
+           *   - 但面板心跳里的 `dom` 字段始终没有 ⇒ 跑的还是旧代码
+           *
+           * 于是每次改代码都要用户手动重启 DSH —— 用户已经为此抱怨
+           * （「老是让我重启啥意思」）。
+           *
+           * ## 做法
+           *
+           * host 在心跳响应里告诉面板「你落后了」（带上最新 rev）。
+           * 面板收到就 `location.reload()` —— **自己刷新自己**。
+           *
+           * 这样以后改完代码，只要面板在跑，几秒内自动生效，不需要用户做任何事。
+           *
+           * ⚠️ 只在**没有任务在跑**时重载 —— 否则会把正在生成的回复打断。
+           * ⚠️ 重载后 `clientId` 会变（新挂载），这是正常的。
+           */
+          if (pendingJobRef.current !== undefined) {
+            console.log('[dsh-webin] 发现新版本，但当前有任务在跑 —— 等它结束再重载')
+            return
+          }
+          console.log('[dsh-webin] 发现新版本，自动重载页面', {
+            mine: CLIENT_BUILT_AT,
+            bundleMtime: j.bundleMtimeMs,
+          })
+          window.location.reload()
+        })
+        .catch(() => undefined)
     }
     beat()
     const timer = window.setInterval(beat, 5_000)
