@@ -49,6 +49,22 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
+/**
+ * Electron `session` 的最小结构（只声明我们用到的那几项）。
+ *
+ * 抽成类型是因为 `tryElectronSession()` 现在要**多种策略依次尝试** ——
+ * 每种的返回值都要用同一个判据检查。
+ */
+interface ElectronSession {
+  fromPartition: (name: string) => {
+    cookies: {
+      get: (filter: Record<string, unknown>) => Promise<CookieArchive['cookies']>
+      set: (details: Record<string, unknown>) => Promise<void>
+      remove: (url: string, name: string) => Promise<void>
+    }
+  }
+}
+
 /** 一个平台的 cookie 存档。 */
 export interface CookieArchive {
   platform: string
@@ -108,45 +124,38 @@ function cookieFile(stateRoot: string, platform: string): string {
  * 拿不到就返回 undefined，调用方走降级路径。
  * **绝不能因为拿不到就抛错** —— 那会让整个插件加载失败。
  */
-function tryElectronSession(): {
-  fromPartition: (name: string) => {
-    cookies: {
-      get: (filter: Record<string, unknown>) => Promise<CookieArchive['cookies']>
-      set: (details: Record<string, unknown>) => Promise<void>
-      remove: (url: string, name: string) => Promise<void>
+function tryElectronSession(): ElectronSession | undefined {
+  /** 判据统一：拿到 `session.fromPartition` 才算成功。 */
+  const strategies: (() => unknown)[] = [
+    () => {
+      const meta = import.meta as unknown as { url?: string }
+      return typeof meta.url === 'string' ? createRequire(meta.url)('electron') : undefined
+    },
+    /** ⭐ 以 Electron 可执行文件为基准 —— 它的 node_modules 里有 electron。 */
+    () => createRequire(String(process.execPath))('electron'),
+    () => {
+      const mm = (process as unknown as { mainModule?: { require?: (m: string) => unknown } }).mainModule
+      return typeof mm?.require === 'function' ? mm.require('electron') : undefined
+    },
+    () => {
+      const g = globalThis as unknown as { require?: (m: string) => unknown }
+      return typeof g.require === 'function' ? g.require('electron') : undefined
+    },
+    () => {
+      const eb = (process as unknown as { electronBinding?: (n: string) => unknown }).electronBinding
+      return typeof eb === 'function' ? eb('electron_module') : undefined
+    },
+  ]
+
+  for (const get of strategies) {
+    try {
+      const electron = get() as { session?: ElectronSession } | undefined
+      if (electron?.session?.fromPartition !== undefined) return electron.session
+    } catch {
+      /** 这条不行就试下一条 —— 不抛。 */
     }
   }
-} | undefined {
-  try {
-    /**
-     * ESM 里拿 require 的标准方式。
-     *
-     * ⚠️ 用 `typeof` 探测 `import.meta.url` —— CJS 产物里它不存在，
-     * 直接读会抛（插件可能被不同加载器加载）。
-     */
-    const meta = import.meta as unknown as { url?: string }
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const req: ((m: string) => unknown) | undefined =
-      typeof meta.url === 'string'
-        ? (createRequire(meta.url) as (m: string) => unknown)
-        : (globalThis as unknown as { require?: (m: string) => unknown }).require
-    if (typeof req !== 'function') return undefined
-    const electron = req('electron') as {
-      session?: {
-        fromPartition: (name: string) => {
-          cookies: {
-            get: (filter: Record<string, unknown>) => Promise<CookieArchive['cookies']>
-            set: (details: Record<string, unknown>) => Promise<void>
-            remove: (url: string, name: string) => Promise<void>
-          }
-        }
-      }
-    }
-    if (electron?.session?.fromPartition === undefined) return undefined
-    return electron.session
-  } catch {
-    return undefined
-  }
+  return undefined
 }
 
 /**
@@ -154,72 +163,122 @@ function tryElectronSession(): {
  *
  * ## 为什么要这个（用户要求「不要猜」）
  *
- * 实测 `cookieApi: false`，但光看这一个布尔值**分不清原因**：
- *   - `import.meta.url` 拿不到？
- *   - `require('electron')` 抛 MODULE_NOT_FOUND（模块解析路径不对）？
- *   - electron 拿到了但 `session` 是空壳（在渲染进程里）？
+ * 实测 `cookieApi: false`，光看这一个布尔值**分不清原因**。
+ * 加了诊断路由后拿到确切答案：
  *
- * 所以这里把**每一步的结果和错误原文**都返回出来 —— 一眼看出卡在哪。
+ *     hasImportMetaUrl: true            ← createRequire 可用
+ *     requireKind: "function"           ← 同上
+ *     error: "Cannot find module 'electron'"
+ *     electronVersion: "44.0.0"         ← 确实在 Electron 里
+ *     processType: "(none)"             ← process.type 不是 'browser'
+ *
+ * 所以是**模块解析**问题（插件从自己目录加载，那里没有 electron 包），
+ * 而且进程类型可疑。
+ *
+ * ## 做法：**把所有可能的获取方式都试一遍，列出哪个成功**
+ *
+ * 不猜「哪种能行」—— 全部实测，把结果列出来。拿到 `session.fromPartition`
+ * 的算成功。
  */
 export function diagnoseElectron(): {
   hasImportMetaUrl: boolean
   importMetaUrl: string
-  requireKind: string
   error?: string
-  electronKind: string
-  electronKeys?: string[]
-  hasSession: boolean
-  hasFromPartition: boolean
   processType: string
   electronVersion: string
   nodeVersion: string
+  argv0: string
+  execPath: string
+  resourcePath: string
+  hasElectronBinding: boolean
+  hasMainModule: boolean
+  /** 逐个策略的结果 —— 哪个成功一眼可见。 */
+  strategies: { name: string; ok: boolean; detail: string }[]
 } {
   const out = {
     hasImportMetaUrl: false,
     importMetaUrl: '',
-    requireKind: 'none',
     error: undefined as string | undefined,
-    electronKind: 'none',
-    electronKeys: undefined as string[] | undefined,
-    hasSession: false,
-    hasFromPartition: false,
     processType: String((process as unknown as { type?: string }).type ?? '(none)'),
     electronVersion: String((process.versions as unknown as { electron?: string }).electron ?? '(none)'),
     nodeVersion: process.version,
+    argv0: String(process.argv0 ?? '').slice(0, 160),
+    execPath: String(process.execPath ?? '').slice(0, 160),
+    resourcePath: String((process as unknown as { resourcesPath?: string }).resourcesPath ?? '(none)'),
+    hasElectronBinding:
+      typeof (process as unknown as { electronBinding?: unknown }).electronBinding === 'function',
+    hasMainModule: (process as unknown as { mainModule?: unknown }).mainModule !== undefined,
+    strategies: [] as { name: string; ok: boolean; detail: string }[],
   }
 
   const meta = import.meta as unknown as { url?: string }
   out.hasImportMetaUrl = typeof meta.url === 'string'
   out.importMetaUrl = typeof meta.url === 'string' ? meta.url.slice(0, 200) : ''
 
-  let req: ((m: string) => unknown) | undefined
-  try {
-    req =
-      typeof meta.url === 'string'
-        ? (createRequire(meta.url) as (m: string) => unknown)
-        : (globalThis as unknown as { require?: (m: string) => unknown }).require
-    out.requireKind = typeof req
-  } catch (e) {
-    out.requireKind = 'throw'
-    out.error = 'createRequire 抛错: ' + ((e as Error)?.message ?? String(e))
-    return out
-  }
-  if (typeof req !== 'function') {
-    out.error = 'req 不是函数（ESM 里没有 require，且 import.meta.url 不可用）'
-    return out
+  /**
+   * ## 逐个试所有获取方式
+   *
+   * 判据统一：**拿到 `session.fromPartition` 才算成功**。
+   * 拿到一个空壳 electron（渲染进程里就是）不算。
+   */
+  const strategies: { name: string; get: () => unknown }[] = [
+    {
+      name: 'createRequire(import.meta.url)("electron")',
+      get: () => (typeof meta.url === 'string' ? createRequire(meta.url)('electron') : undefined),
+    },
+    {
+      name: 'createRequire(execPath)("electron")',
+      get: () => createRequire(String(process.execPath))('electron'),
+    },
+    {
+      name: 'process.mainModule.require("electron")',
+      get: () => {
+        const mm = (process as unknown as { mainModule?: { require?: (m: string) => unknown } })
+          .mainModule
+        return typeof mm?.require === 'function' ? mm.require('electron') : undefined
+      },
+    },
+    {
+      name: 'globalThis.require("electron")',
+      get: () => {
+        const g = globalThis as unknown as { require?: (m: string) => unknown }
+        return typeof g.require === 'function' ? g.require('electron') : undefined
+      },
+    },
+    {
+      name: 'process.electronBinding("electron_module")',
+      get: () => {
+        const eb = (process as unknown as { electronBinding?: (n: string) => unknown }).electronBinding
+        return typeof eb === 'function' ? eb('electron_module') : undefined
+      },
+    },
+  ]
+
+  for (const s of strategies) {
+    try {
+      const got = s.get() as { session?: { fromPartition?: unknown } } | undefined
+      const hasSession = got?.session !== undefined && got?.session !== null
+      const hasFromPartition = typeof got?.session?.fromPartition === 'function'
+      out.strategies.push({
+        name: s.name,
+        ok: hasFromPartition,
+        detail: hasFromPartition
+          ? '✅ 拿到 session.fromPartition'
+          : got === undefined
+            ? '返回 undefined'
+            : '拿到 ' + typeof got + '，session=' + String(hasSession),
+      })
+    } catch (e) {
+      out.strategies.push({ name: s.name, ok: false, detail: (e as Error)?.message ?? String(e) })
+    }
   }
 
-  try {
-    const electron = req('electron') as Record<string, unknown> | undefined
-    out.electronKind = typeof electron
-    out.electronKeys = electron === undefined || electron === null ? [] : Object.keys(electron).slice(0, 30)
-    out.hasSession = electron?.session !== undefined && electron?.session !== null
-    const ses = electron?.session as { fromPartition?: unknown } | undefined
-    out.hasFromPartition = typeof ses?.fromPartition === 'function'
-  } catch (e) {
-    out.electronKind = 'throw'
-    out.error = "require('electron') 抛错: " + ((e as Error)?.message ?? String(e))
+  /** 全都失败时，把第一条的错误原文当主因（最可能是它）。 */
+  if (!out.strategies.some((s) => s.ok)) {
+    const first = out.strategies[0]
+    if (first !== undefined) out.error = first.detail
   }
+
   return out
 }
 

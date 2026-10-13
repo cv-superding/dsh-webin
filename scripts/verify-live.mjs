@@ -79,9 +79,25 @@ console.log('[1] ⭐⭐⭐ ESM 里必须用 createRequire（旧代码死在这�
 
 console.log('\n[2] ⭐⭐ 拿不到 electron 时必须优雅降级')
 {
-  check('⭐ try/catch 包住', /try \{[\s\S]{0,900}?req\('electron'\)[\s\S]{0,900}?\} catch/.test(jarSrc), true)
-  check('⭐ 拿不到返回 undefined', /catch \{\s*return undefined\s*\}/.test(jarSrc), true)
-  check('⭐ 探测 req 是不是函数', /if \(typeof req !== 'function'\) return undefined/.test(jarSrc), true)
+  /**
+   * ⚠️ 断言改过：原来是「单个 req('electron') 在 try 内」。
+   *
+   * 实测发现**单策略不够** —— `createRequire(import.meta.url)` 在 DSH 里
+   * 抛 `Cannot find module 'electron'`（插件 host 跑在 utility 进程，
+   * 没有主进程专属的 session API）。改成多策略后判据也变了。
+   */
+  check(
+    '⭐⭐ 每个策略单独 try（失败试下一条）',
+    /for \(const get of strategies\) \{\s*try \{/.test(jarSrc),
+    true,
+  )
+  check(
+    '⭐⭐ 判据是 session.fromPartition',
+    /fromPartition !== undefined\) return electron\.session/.test(jarSrc),
+    true,
+  )
+  check('⭐ 多条策略', (jarSrc.match(/createRequire\(/g) ?? []).length >= 2, true)
+  check('⭐ 拿不到返回 undefined', /return undefined\s*\n\}/.test(jarSrc), true)
 }
 
 console.log('\n[3] ⭐⭐⭐ 领活过滤方向：以「窗口是否上报」为准')

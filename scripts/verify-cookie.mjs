@@ -61,25 +61,29 @@ console.log('\n[2] ⭐⭐ 拿不到 electron 时必须优雅降级（不能抛�
    * 单元测试 / 纯 node 环境下 `require('electron')` 会 MODULE_NOT_FOUND。
    * 那时必须返回 undefined 让调用方走降级路径 —— **绝不能抛错**，
    * 否则整个插件加载失败。
+   *
+   * ## ⚠️ 断言改过（原来是「单个 req('electron') 在 try 内」）
+   *
+   * 实测发现单策略不够：`createRequire(import.meta.url)` 在 DSH 里
+   * 抛 `Cannot find module 'electron'`（插件 host 跑在 utility 进程，
+   * 没有主进程专属的 session API）。
+   *
+   * 现在改成**多种策略依次尝试**，所以断言要验的是：
+   *   1. 每个策略都在 try 里（失败不抛，试下一条）
+   *   2. 拿到 session.fromPartition 才算成功
    */
-  {
-    /**
-     * 语义断言：require('electron') 必须处在 try 块内。
-     * 直接数括号：找 require 前最近的 try，确认它之后到 require 之间
-     * 没有配平的 `}`（即确实还在 try 里面）。
-     */
-    const ri = jarSrc.indexOf("req('electron')")
-    const ti = jarSrc.lastIndexOf('try {', ri)
-    const between = jarSrc.slice(ti + 5, ri)
-    /** 统计未配平的花括号 —— try 块内部允许有 { }，只要净深度 >= 0。 */
-    let depth = 0
-    for (const ch of between) {
-      if (ch === '{') depth += 1
-      else if (ch === '}') depth -= 1
-    }
-    check('⭐ require 处在 try 块内（净深度 >= 0）', ti > 0 && depth >= 0, true)
-  }
-  check('⭐ 拿不到就返回 undefined', /catch \{\s*return undefined\s*\}/.test(jarSrc), true)
+  check(
+    '⭐⭐ 每个策略都单独 try 包住',
+    /for \(const get of strategies\) \{\s*try \{/.test(jarSrc),
+    true,
+  )
+  check(
+    '⭐⭐ 判据是 session.fromPartition',
+    /electron\?\.session\?\.fromPartition !== undefined\) return electron\.session/.test(jarSrc),
+    true,
+  )
+  check('⭐ 多条策略（不只一种）', (jarSrc.match(/createRequire\(/g) ?? []).length >= 2, true)
+  check('⭐ 拿不到就返回 undefined', /return undefined\s*\n\}/.test(jarSrc), true)
   check('grabCookies 失败返回 undefined', /async function grabCookies[\s\S]{0,900}return undefined/.test(jarSrc), true)
   check('restoreCookies 失败返回 0', /if \(ses === undefined\) return 0/.test(jarSrc), true)
   /** 有 cookieApiAvailable() 让 UI 能告诉用户走哪条路。 */

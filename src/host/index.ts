@@ -471,6 +471,28 @@ export async function apply(ctx: {
   const registry = new ProviderRegistry()
   const queue = new JobQueue()
   /**
+   * ## 端到端自测：直接往队列塞一个任务，看 client 能不能跑完整条链路
+   *
+   * ## 为什么需要（用户的话：「你自己测试吧！到目前为止，一次都没成功！」）
+   *
+   * 我之前的测试全是**离线单测** —— 只能证明「代码里写了什么」，
+   * 证明不了「真跑起来能不能回显」。
+   *
+   * 而真正的端到端需要 DSH 调 LLM 接口派发任务 —— 我在测试脚本里
+   * 做不到那一步。**但队列是同一个实例**（这个 `queue` 就是
+   * `adapter` 用的那个），所以可以直接塞任务进去，让真实的 client
+   * 去领、去发、去抓回复。
+   *
+   * 于是 `POST /selftest/echo` 能验证**除 DSH 派发之外的全部链路**：
+   *
+   *     塞任务 → client 领活 → 填输入框 → 点发送 → 网页版生成
+   *            → 抓 DOM → 交结果 → 这里读结果
+   *
+   * 这是我能做到的最接近「真跑一遍」的验证。
+   */
+  const selfTests = new Map<string, { prompt: string; at: number }>()
+
+  /**
    * 游标落盘 —— **重启后接回原对话的关键**。
    *
    * 不落盘的话重启后：`chatUrl` 丢失 ⇒ 任务不带 `expectUrl` ⇒
@@ -656,6 +678,99 @@ export async function apply(ctx: {
           restored: n,
           total: archive.cookies.length,
           ...(n === 0 ? { reason: '写回失败（可能拿不到 Electron session API）' } : {}),
+        })
+        return
+      }
+
+      /**
+       * ## POST /selftest/echo —— 端到端自测：真的发一条消息，等真的回复
+       *
+       * ## 为什么需要（用户：「你自己测试吧！到目前为止，一次都没成功！」）
+       *
+       * 真正的端到端要 DSH 调 LLM 派发任务，测试脚本做不到。
+       * **但队列是同一个实例** —— 直接塞进去，真实 client 会领走、
+       * 填输入框、点发送、抓 DOM、交结果。
+       *
+       * 所以这个路由能验证除「DSH 派发」外的**全部链路**。
+       *
+       * 用法：
+       *     POST /selftest/echo  {"prompt":"1+1=?","platform":"deepseek"}
+       *     → {"ok":true,"jobId":"job-..."}
+       *     然后 GET /selftest/echo/<jobId> 读结果
+       */
+      if (method === 'POST' && pathname === `${API_PREFIX}/selftest/echo`) {
+        const body = await readBody(req)
+        let payload: { prompt?: string; platform?: string; session?: string; timeoutMs?: number }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const prompt = String(payload.prompt ?? '').trim()
+        if (prompt === '') {
+          sendJson(res, 400, { ok: false, reason: 'prompt 不能为空' })
+          return
+        }
+        const platform = String(payload.platform ?? 'deepseek')
+        const known = registry.all().find((p) => p.id === platform)
+        if (known === undefined) {
+          sendJson(res, 400, {
+            ok: false,
+            reason: `未知平台 ${platform}`,
+            platforms: registry.all().map((p) => p.id),
+          })
+          return
+        }
+        /**
+         * ⚠️ **不带 sessionId** —— 这样任何窗口都能领走（`hasIdentity`
+         * 那侧的兼容路径），避免自测因为窗口没上报身份而领不到。
+         */
+        const job = queue.enqueue(prompt, false, platform)
+        selfTests.set(job.id, { prompt, at: Date.now() })
+        sendJson(res, 200, {
+          ok: true,
+          jobId: job.id,
+          prompt,
+          platform,
+          hint: `GET ${API_PREFIX}/selftest/echo/${job.id} 读结果`,
+        })
+        return
+      }
+
+      /**
+       * GET /selftest/echo/<jobId> —— 读自测结果
+       *
+       * 返回任务的**完整状态**（pending / claimed / done / failed），
+       * 以及拿到的回复正文。这样「到底跑到哪一步」一眼可见。
+       */
+      if (method === 'GET' && pathname.startsWith(`${API_PREFIX}/selftest/echo/`)) {
+        const jobId = decodeURIComponent(pathname.slice(`${API_PREFIX}/selftest/echo/`.length))
+        const job = queue.get(jobId)
+        if (job === undefined) {
+          sendJson(res, 404, { ok: false, reason: '没有这个任务', jobId })
+          return
+        }
+        const mine = selfTests.get(jobId)
+        sendJson(res, 200, {
+          ok: true,
+          jobId,
+          prompt: mine?.prompt ?? job.prompt,
+          elapsedMs: Date.now() - (mine?.at ?? job.createdAt),
+          state:
+            job.done !== undefined
+              ? 'done'
+              : job.failed !== undefined
+                ? job.cancelled === true
+                  ? 'cancelled'
+                  : 'failed'
+                : job.claimedAt !== undefined
+                  ? 'claimed'
+                  : 'pending',
+          claimedBy: job.claimedBy ?? '(未领)',
+          /** 拿到的回复正文（这就是「回显」的内容）。 */
+          ...(job.done === undefined ? {} : { text: job.done.text, think: job.done.think }),
+          ...(job.failed === undefined ? {} : { error: job.failed }),
         })
         return
       }
