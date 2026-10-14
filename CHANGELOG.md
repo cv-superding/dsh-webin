@@ -5,6 +5,58 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.14
+
+### 结合 DSH 官方源码的发现：失败码不合规 ⇒ 官方重试机制**从未启动**
+
+**背景**：用户要求结合三方（DSH 官方源码 / cuckoo / dsh-deepseek-web-login）做系统分析。
+从 DSH 的 `app.asar` 里提取到了官方契约。
+
+#### 官方契约（`dsh-llm/lib/typert.host.js`）
+
+```ts
+export interface LlmFailure {
+    readonly message: string
+    readonly code: string
+    readonly status?: number
+    readonly providerRetryAfterMs?: number
+}
+```
+
+#### 官方重试插件（`dsh-llm-retry` 的 README）
+
+> 省略 `retryPolicy` 时使用 **normal mode**：对 `EMPTY_RESPONSE`、`RATE_LIMIT`、
+> `SERVER`、`TIMEOUT` 与 `TRANSPORT` 最多重试**五次**，退避 500ms→10s 带抖动。
+> 提供方给出的有效 **`Retry-After`** 会**替换**本地退避。
+
+**⇒ DSH 自带重试机制，插件不该自己实现重试，而应上报正确的失败码。**
+
+#### 原来的问题
+
+插件所有失败都发 `code: 'WEBIN_FAILED'` —— 一个**自定义码**，
+官方重试策略认不出来 ⇒ **一次都不会重试**。
+这正是用户实测「服务器暂时不可用从不重试」的根因。
+
+#### 修法
+
+新增 `classifyFailure(message)`，把客户端失败文案映射到官方码：
+
+| 失败文案 | 官方码 | 退避 |
+|---|---|---|
+| 服务器暂时不可用 / 请求过于频繁 | `RATE_LIMIT` | 120s（或页面给的「N 秒后」） |
+| 心跳 / 失联 / 超时 / 面板未连接 | `TIMEOUT` | 策略默认 |
+| 没发出去 / 输入框丢失 | `TRANSPORT` | 策略默认 |
+| 空回复 | `EMPTY_RESPONSE` | 策略默认 |
+| 其它 | `WEBIN_FAILED`（自定义） | 不触发自动重试 |
+
+**映射是保守的**：认不出的一律回退自定义码 —— 不让没把握的判断触发五次自动重试
+（每次都是真实请求、真实计费）。
+
+### 测试
+
+`verify-host` 新增 8 条：映射函数存在、发射时使用、四个官方码都能映射、
+带 `providerRetryAfterMs`、认不出时回退。
+
 ## v0.2.13
 
 ### 真根因（照参考实现移植）：无 fragment 时思考被无条件当正文

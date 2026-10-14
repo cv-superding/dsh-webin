@@ -727,6 +727,67 @@ export interface AdapterDeps {
   isLoggedIn?: (platform: string) => boolean
 }
 /** 构造 adapter（鸭子类型对象；不继承 LlmAdapter 基类，所以方法要齐）。 */
+/**
+ * ## ⭐⭐⭐ 把客户端失败映射到 DSH 的**官方失败码**（否则重试机制不会启动）
+ *
+ * ## 官方契约（从 DSH 的 app.asar 提取，dsh-llm/lib/typert.host.js）
+ *
+ *     export interface LlmFailure {
+ *         readonly message: string
+ *         readonly code: string
+ *         readonly status?: number
+ *         readonly providerRetryAfterMs?: number
+ *     }
+ *
+ * ## dsh-llm-retry 的 README（官方重试插件）
+ *
+ * > 省略 retryPolicy 时使用 normal mode：对 EMPTY_RESPONSE、RATE_LIMIT、SERVER、
+ * > TIMEOUT 与 TRANSPORT 最多重试五次，退避 500ms→10s 带抖动。
+ * > 提供方给出且符合策略边界的有效 Retry-After 会替换本地退避。
+ *
+ * ## 本插件原来的问题（用户实测：「服务器暂时不可用」从不重试）
+ *
+ * 所有失败都只发 `code: 'WEBIN_FAILED'` —— 一个**自定义码**，官方重试策略
+ * 认不出来 ⇒ **一次都不会重试**。
+ *
+ * ## 修法
+ *
+ * 把客户端上报的失败文案映射到官方码，并把页面给出的「稍后重试」提示转成
+ * `providerRetryAfterMs`（DSH 会用它替换本地退避）。
+ *
+ * ⚠️ 映射是**保守**的：认不出的一律回退 `WEBIN_FAILED`（自定义码），
+ * 不让一个没把握的判断触发五次自动重试（每次都是真实请求、真实计费）。
+ */
+function classifyFailure(message: string): { code: string; providerRetryAfterMs?: number } {
+  const m = message ?? ''
+  /**
+   * ⭐ 限流 / 服务端暂时不可用 —— 这是用户最常遇到、也最该自动重试的一类。
+   * 网页版会插「服务器暂时不可用」「请求过于频繁」这类提示。
+   */
+  if (/服务器暂时不可用|服务暂时不可用|服务器繁忙|服务繁忙|请求过于频繁|系统繁忙|Server is busy|Service Unavailable|Too Many Requests/i.test(m)) {
+    return { code: 'RATE_LIMIT', providerRetryAfterMs: 120_000 }
+  }
+  /** 网页版明说「稍后重试 / N 秒后再试」⇒ 按它给的时长退避。 */
+  const sec = /(\d+)\s*秒(?:后|再)/.exec(m)
+  if (sec !== null) {
+    return { code: 'RATE_LIMIT', providerRetryAfterMs: Math.min(600_000, Number(sec[1]) * 1000) }
+  }
+  /** 面板/页面失联、等不到结果 ⇒ 超时（可重试）。 */
+  if (/心跳|失联|超时|timeout|面板未连接|无人领取/i.test(m)) {
+    return { code: 'TIMEOUT' }
+  }
+  /** 发送链路问题（没发出去、输入框丢了）⇒ 传输类（可重试）。 */
+  if (/没发出去|send-failed|输入框|发送失败|触发发送/i.test(m)) {
+    return { code: 'TRANSPORT' }
+  }
+  /** 拿到空回复 ⇒ 官方有专门的 EMPTY_RESPONSE 码。 */
+  if (/空回复|回复为空|EMPTY_RESPONSE/i.test(m)) {
+    return { code: 'EMPTY_RESPONSE' }
+  }
+  /** 认不出 ⇒ 保持自定义码，不冒险触发自动重试。 */
+  return { code: 'WEBIN_FAILED' }
+}
+
 export function createAdapter(deps: AdapterDeps) {
   const { queue } = deps
   const registry = deps.registry ?? new ProviderRegistry()
@@ -1073,7 +1134,14 @@ export function createAdapter(deps: AdapterDeps) {
         type: 'finish',
         reason: {
           kind: 'error',
-          failure: { code: 'WEBIN_FAILED', message: (error as Error)?.message ?? String(error) },
+          failure: {
+            message: (error as Error)?.message ?? String(error),
+            /**
+             * ⭐ 用**官方失败码**（不是自定义 WEBIN_FAILED）—— 否则 dsh-llm-retry
+             * 认不出来，一次都不会重试。见 classifyFailure 的说明。
+             */
+            ...classifyFailure((error as Error)?.message ?? String(error)),
+          },
         },
       }
       return

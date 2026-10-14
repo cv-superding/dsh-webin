@@ -13,7 +13,7 @@
  *   5. 心跳路由必须存在，且 /status 反映在线客户端
  */
 import { createRequire } from 'node:module'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
@@ -263,7 +263,14 @@ console.log('\n[4] 无人领活 → 快速失败（不干等满超时）')
   const elapsed = Date.now() - t0
   const failure = finish?.reason?.failure
   check('流以 error 结束', finish?.reason?.kind === 'error', JSON.stringify(finish?.reason))
-  check('错误码 WEBIN_FAILED', failure?.code === 'WEBIN_FAILED', String(failure?.code))
+  /**
+   * ⚠️ 断言已改：**必须用 DSH 的官方失败码**，不能用自定义码。
+   *
+   * 原来断言 code === 'WEBIN_FAILED' —— 而自定义码官方重试策略认不出来，
+   * 结果是「服务器暂时不可用」**一次都不会重试**（用户实测）。
+   * 「面板未连接」属于可重试的超时 ⇒ 现在正确映射成官方码 TIMEOUT。
+   */
+  check('错误码为官方码 TIMEOUT', failure?.code === 'TIMEOUT', String(failure?.code))
   check(
     `在宽限期内失败（${elapsed}ms，远小于 10 分钟）`,
     elapsed < 40_000,
@@ -421,6 +428,44 @@ console.log('\n[9] logger 畸形形态不得让插件加载失败')
     const registered = [...C.routes.values()].some((r) => r.path === '/dsh-webin/api')
     check(`logger=${label} → 仍能加载并注册路由`, threw === undefined && registered, String(threw?.message ?? ''))
   }
+}
+
+console.log('\n[?] ⭐⭐⭐ 失败必须用 DSH 的**官方失败码**（否则重试机制不启动）')
+{
+  /**
+   * ## 官方契约（从 DSH 的 app.asar 提取）
+   *
+   *     export interface LlmFailure {
+   *         readonly message: string
+   *         readonly code: string
+   *         readonly status?: number
+   *         readonly providerRetryAfterMs?: number
+   *     }
+   *
+   * ## dsh-llm-retry 的 README
+   *
+   * > 省略 retryPolicy 时使用 normal mode：对 EMPTY_RESPONSE、RATE_LIMIT、
+   * > SERVER、TIMEOUT 与 TRANSPORT 最多重试五次。
+   * > 提供方给出的有效 Retry-After 会替换本地退避。
+   *
+   * ## 原来的问题
+   *
+   * 所有失败都发自定义码 `WEBIN_FAILED` ⇒ 官方重试策略认不出来 ⇒
+   * **一次都不会重试**（用户实测：「服务器暂时不可用」从不重试）。
+   */
+  const adapterSrc = readFileSync(join(ROOT, 'src', 'host', 'adapter.ts'), 'utf8')
+
+  check('⭐⭐⭐ 有 classifyFailure 映射', /function classifyFailure\(/.test(adapterSrc), true)
+  check('⭐⭐ 失败发射时用它', /\.\.\.classifyFailure\(/.test(adapterSrc), true)
+  /** 四个官方可重试码都要能映射到。 */
+  check('⭐⭐ 服务端不可用 ⇒ RATE_LIMIT', /RATE_LIMIT/.test(adapterSrc), true)
+  check('⭐⭐ 超时/失联 ⇒ TIMEOUT', /'TIMEOUT'/.test(adapterSrc), true)
+  check('⭐⭐ 发送链路 ⇒ TRANSPORT', /'TRANSPORT'/.test(adapterSrc), true)
+  check('⭐⭐ 空回复 ⇒ EMPTY_RESPONSE', /'EMPTY_RESPONSE'/.test(adapterSrc), true)
+  /** Retry-After 要带上（DSH 用它替换本地退避）。 */
+  check('⭐⭐ 带 providerRetryAfterMs', /providerRetryAfterMs/.test(adapterSrc), true)
+  /** 认不出时回退自定义码，不冒险触发自动重试。 */
+  check('⭐ 认不出回退 WEBIN_FAILED', /code: 'WEBIN_FAILED'/.test(adapterSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
