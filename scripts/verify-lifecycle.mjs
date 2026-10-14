@@ -399,6 +399,51 @@ console.log('\n[4] 静态：停止脚本的定位规则（实测校准）')
   check('排除开关与附件', src.includes('附件|attach|上传|upload'))
 }
 
+console.log('\n[?] ⭐⭐⭐ markLive() 必须置 ready（否则插件静默失效）')
+{
+  /**
+   * ## 群友定位、我逐行验证过的真 bug
+   *
+   * 症状链（**一个 setReady 缺失同时造成三个症状**）：
+   *
+   *     markLive() 不置 ready
+   *       ↓
+   *     心跳循环 if (!ready) return   => clients.online 恒为 0
+   *     发送循环 if (!ready) return   => 领不到任务
+   *     快照循环 if (!ready) return   => ~/.dsh/webin 永不创建
+   *       ↓
+   *     无快照 => host 侧 loggedIn(platform) = false
+   *       ↓
+   *     listModels() 返回 [] => 模型选择器里没有 LDW
+   *
+   * ## 为什么会漏
+   *
+   * setReady(true) 原来只跟在**第三条** markLive() 调用点后面（输入框检查之后）。
+   * 而另外**两条**调用点都会 return：
+   *   - 「没有快照也要继续走就绪流程」分支
+   *   - 「回写无需 reload」分支
+   * => 那两条路径永远走不到 setReady => 插件静默失效。
+   *
+   * ## 修法（收口）
+   *
+   * 把置位放进 markLive() —— **一处覆盖三个调用点**，不会漏。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+
+  /** markLive() 函数体内必须有 setReady(true)。 */
+  const i = clientSrc.indexOf('const markLive = (): void => {')
+  const seg = i < 0 ? '' : clientSrc.slice(i, i + 3000)
+  const j = seg.indexOf('setReady(true)')
+  check('⭐⭐⭐ markLive 内置位 ready', i >= 0 && j > 0 && j < 1200, true)
+
+  /** 三条调用点都存在（前两条会 return，所以必须靠 markLive 兜住）。 */
+  const calls = (clientSrc.match(/\n\s+markLive\(\)/g) || []).length
+  check(`markLive 调用点 >= 3（实际 ${calls}）`, calls >= 3, true)
+
+  /** 输入框检查那处**保留**（现在只细化状态文案，不承担置位职责）。 */
+  check('⭐ 输入框检查仍在', /输入框就绪检查/.test(clientSrc), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1

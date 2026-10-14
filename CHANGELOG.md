@@ -5,6 +5,45 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.18
+
+### 修复：`markLive()` 不置 `ready` ⇒ 插件静默失效（群友定位，我逐行验证）
+
+**群友报告的症状链，我对照代码逐条验证后确认成立**：
+
+```
+markLive() 不置 ready
+  ↓
+心跳循环 if (!ready) return   ⇒ clients.online 恒为 0
+发送循环 if (!ready) return   ⇒ 领不到任务
+快照循环 if (!ready) return   ⇒ ~/.dsh/webin 永不创建
+  ↓
+无快照 ⇒ host 侧 loggedIn(platform) = false
+  ↓
+listModels() 返回 [] ⇒ 模型选择器里没有 LDW
+```
+
+**一个 `setReady` 缺失，同时造成三个症状。**
+
+**代码证据**：`setReady(true)` 原来只跟在**第三条** `markLive()` 调用点后面
+（输入框就绪检查之后）。而另外**两条**调用点都会 `return`：
+
+| 行 | 分支 | 结果 |
+|---|---|---|
+| 1287-1288 | 「没有快照也要继续走就绪流程」 | `markLive()` → `return` ❌ |
+| 1314-1317 | 「回写无需 reload」 | `markLive()` → 落到 `return` ❌ |
+
+⇒ 那两条路径永远走不到 `setReady` ⇒ **插件静默失效**。
+
+**修法**：把 `setReady(true)` 放进 `markLive()` —— **一处覆盖三个调用点**。
+输入框就绪检查**保留**，但它现在只用来**细化状态文案**，不再承担置位职责。
+（`markLive()` 的三个调用点都在真实目标域，boot 分支不调用它，所以在此置位是安全的。）
+
+### 测试
+
+`verify-lifecycle` 新增 3 条：`markLive` 函数体内必须含 `setReady(true)`、
+调用点数量 ≥ 3、输入框检查仍在。
+
 ## v0.2.17
 
 ### 修复 1：孤儿文本的兜底归属（**F25 修复里我自己留下的漏洞**）
