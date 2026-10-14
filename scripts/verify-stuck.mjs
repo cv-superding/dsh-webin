@@ -402,6 +402,45 @@ console.log('\n[11] ⭐ DOM 抓取脚本本身（从产物里真跑一遍）')
   check('⭐ 内部 try/catch 兜底', /catch \(e\) \{[\s\S]{0,80}return JSON\.stringify\(\{ ok: false/.test(script), true)
 }
 
+console.log('\n[?] ⭐⭐⭐ 页面在生成时**绝不能**判「没发出去」（真实事故）')
+{
+  /**
+   * ## 用户实测
+   *
+   * 网页版正在**思考阶段**（还没开始渲染正文）时，插件的 DOM 读取什么都看不到：
+   * `.ds-markdown` 还没出现 ⇒ 条数没增长、内容没变化、思考区也没读到。
+   * 三个条件同时成立 ⇒ 发出后 30 秒就报「消息似乎没有发出去」并**判本轮失败**
+   * —— 而网页版其实在正常生成。用户看到的是「DSH 直接停了，网页版还在转」。
+   *
+   * ## 修法：`generating` 一票否决
+   *
+   * 页面在生成（停止按钮在）就**证明消息送到了** —— 比「DOM 有没有变化」
+   * 可靠得多。所以 `generating === true` 时绝不放弃。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+
+  check('⭐⭐⭐ 早期放弃带 generating 否决', /generating !== true/.test(clientSrc), true)
+  check(
+    '⭐⭐ 否决确实在早期放弃的同一条件里',
+    /think\.trim\(\) === ''[\s\S]{0,200}?generating !== true/.test(clientSrc),
+    true,
+  )
+  check(
+    '⭐ 放弃时的诊断日志带上 generating',
+    /lastChars: last\.length,[\s\S]{0,120}?generating,/.test(clientSrc),
+    true,
+  )
+  /**
+   * 交付 body 里不能有重复的对象键 —— 重复键虽然「后者覆盖前者」能跑，
+   * 但读代码的人会以为交的是 `last` 而实际是 `deliveredText`（本轮踩到）。
+   */
+  check(
+    '⭐ 交付 body 没有重复的 text 键',
+    !/text: last,[\s\S]{0,80}?text: deliveredText,/.test(clientSrc),
+    true,
+  )
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

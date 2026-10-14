@@ -2091,6 +2091,13 @@ const clearPending = () => {
                */
               const fenceOpen = (scraped as { fenceOpen?: boolean }).fenceOpen === true
               /**
+               * ⭐ 页面是否**仍在生成**（停止按钮在）。
+               *
+               * 这是「消息到底发出去没有」最可靠的信号 —— 页面在生成就说明
+               * 消息一定送到了（见下面「早期放弃」的说明）。
+               */
+              const generating = (scraped as { generating?: boolean }).generating === true
+              /**
                * ⭐ 代码块正文是否明显没写完。围栏被网页版渲染器补过闭合时，
                * 这条是**唯一**能发现截断的信号（见 hook.ts 的
                * lastCodeBlockIncomplete）。
@@ -2454,10 +2461,6 @@ const clearPending = () => {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({
-                    text: last,
-                    think,
-                    status: 'finished',
-                    via: 'dom',
                     text: deliveredText,
                     think,
                     status: 'finished',
@@ -2469,14 +2472,25 @@ const clearPending = () => {
               }
 
               /**
-               * ## ⭐⭐ 早期放弃：发出后 30 秒页面还没动静 ⇒ 根本没发出去
+               * ## ⭐⭐⭐ 早期放弃：发出后 30 秒页面**确实没动静** ⇒ 根本没发出去
                *
-               * 见 `EARLY_GIVE_UP_MS` 的说明。这里只判「**一点动静都没有**」：
-               *   - 条数没增长
+               * ## 用户实测（真实事故：页面在生成，插件却报「没发出去」）
+               *
+               * 网页版正在**思考阶段**（还没开始渲染正文）时，插件的 DOM 读取
+               * 什么都看不到：
+               *   - `.ds-markdown`（回复容器）还没出现 ⇒ 条数没增长
                *   - 内容没变化
-               *   - 连思考区都是空的
+               *   - 思考区也没读到（选择器可能已变）
                *
-               * 三者都不成立才继续等 —— 正常生成中一定会命中至少一个。
+               * 三个条件同时成立 ⇒ 30 秒就报「消息似乎没有发出去」并**判本轮失败**，
+               * 而网页版其实正在正常生成 —— 用户看到 DSH 停了、网页版还在转。
+               *
+               * ## 修法：`generating` 一票否决
+               *
+               * 页面在生成（停止按钮在）就**证明消息送到了** —— 这是比「DOM 有没有
+               * 变化」可靠得多的信号。所以 `generating === true` 时绝不放弃。
+               *
+               * 其余条件保持不变（真要判断「没发出去」，那三条仍然是对的）。
                *
                * ⚠️ 必须放在「交付判据」**之后**：先看有没有结果可交，
                * 没有再判是不是压根没发出去。
@@ -2485,13 +2499,17 @@ const clearPending = () => {
                 waitedMs > EARLY_GIVE_UP_MS &&
                 !countGrew &&
                 !contentChanged &&
-                think.trim() === ''
+                think.trim() === '' &&
+                /** ⭐ 页面在生成 ⇒ 消息一定发出去了，绝不判失败。 */
+                generating !== true
               ) {
                 console.warn('[dsh-webin] 发出后 30 秒页面无动静，判定没发出去', {
                   waitedMs,
                   count,
                   baseline: baselineRef.current,
                   lastChars: last.length,
+                  generating,
+                  selector: scraped.selector,
                 })
                 clearPending()
                 await fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
