@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
  *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
+ *   - 客户端 `setTimeout`  延迟
  *   - `buildTriggerScript` 只点发送
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**，不在 `npm run check` 链里，
+ * 属手动诊断工具。
  */
 
 /**
@@ -22,7 +20,7 @@
  *
  * 这是插件核心价值（"把网页版当模型用"）的端到端证明：
  *   1. 注入真实 `buildDeepSeekHook()`（与面板同一条路径）
- *   2. 用真实 `buildSendScript()` 发一条消息
+ *   2. 用真实 `buildFillScript()` + `buildTriggerScript()` 发一条消息
  *   3. 轮询 `buildDrainScript()` 取 hook 累积的事件
  *   4. 断言拿到了 `done` 事件且带正文
  *
@@ -158,10 +156,11 @@ const strip = (s) => s.trim().replace(/;\s*$/, '')
 async function main() {
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
   const buildDeepSeekHook = extractFn(bundle, 'buildDeepSeekHook')
-  const buildSendScript = extractFn(bundle, 'buildSendScript')
+  const buildFillScript = extractFn(bundle, 'buildFillScript')
+  const buildTriggerScript = extractFn(bundle, 'buildTriggerScript')
   const buildDrainScript = extractFn(bundle, 'buildDrainScript')
   const buildProbeScript = extractFn(bundle, 'buildProbeScript')
-  console.log('已从产物加载：buildDeepSeekHook / buildSendScript / buildDrainScript / buildProbeScript')
+  console.log('已从产物加载：buildDeepSeekHook / buildFillScript / buildTriggerScript / buildDrainScript / buildProbeScript')
 
   const browser = findBrowser()
   const port = 9200 + Math.floor(Math.random() * 300)
@@ -242,8 +241,14 @@ async function main() {
 
     // ---- 发送 ----
     console.log(`\n[4] 发送 ${JSON.stringify(PROMPT)} …`)
+    /** 三段式：填充 → 延迟 → 触发（旧 buildSendScript 已删除，见文件头）。 */
+    const fillOutcome = await cdp.eval(
+      `Promise.resolve(${strip(buildFillScript(PROMPT))}).then(r => r).catch(e => 'ERR:' + e.message)`,
+    )
+    console.log('    fill:', String(fillOutcome).slice(0, 200))
+    await sleep(500)
     const sendOutcome = await cdp.eval(
-      `Promise.resolve(${strip(buildSendScript(PROMPT, 500))}).then(r => r).catch(e => 'ERR:' + e.message)`,
+      `Promise.resolve(${strip(buildTriggerScript(undefined, PROMPT))}).then(r => r).catch(e => 'ERR:' + e.message)`,
     )
     const parsedSend = (() => {
       try {
@@ -252,8 +257,8 @@ async function main() {
         return { raw: String(sendOutcome).slice(0, 300) }
       }
     })()
-    console.log('    stage:', parsedSend.stage, '| how:', parsedSend.how)
-    console.log('    signals:', JSON.stringify(parsedSend.signals))
+    console.log('    ok:', parsedSend.ok, '| how:', parsedSend.how, '| confirmed:', parsedSend.confirmed)
+    console.log('    message:', parsedSend.message ?? parsedSend.reason ?? '')
 
     // ---- 轮询 drain，等 done 事件 ----
     console.log('\n[5] 轮询 drain 等回复（最多 90s）…')

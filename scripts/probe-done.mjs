@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
  *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
+ *   - 客户端 `setTimeout`  延迟
  *   - `buildTriggerScript` 只点发送
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**，不在 `npm run check` 链里，
+ * 属手动诊断工具。
  */
 
 /**
@@ -127,7 +125,8 @@ const strip = (s) => s.trim().replace(/;\s*$/, '')
 async function main() {
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
   const buildDeepSeekHook = extractFn(bundle, 'buildDeepSeekHook')
-  const buildSendScript = extractFn(bundle, 'buildSendScript')
+  const buildFillScript = extractFn(bundle, 'buildFillScript')
+  const buildTriggerScript = extractFn(bundle, 'buildTriggerScript')
   const buildDrainScript = extractFn(bundle, 'buildDrainScript')
   const buildRestoreScript = extractFn(bundle, 'buildRestoreScript')
 
@@ -201,10 +200,16 @@ async function main() {
       ],
       vetoes: ['ds-toggle-button', 'ds-button--capsule'],
     }
-    const sendR = JSON.parse(
-      String(await cdp.eval(`Promise.resolve(${strip(buildSendScript(PROMPT, 500, hints))}).then(r=>r)`)),
+    /** 三段式：填充 → 延迟 → 触发（旧 buildSendScript 已删除，见文件头）。 */
+    const fillR = JSON.parse(
+      String(await cdp.eval(`Promise.resolve(${strip(buildFillScript(PROMPT, hints))}).then(r=>r)`)),
     )
-    console.log('发送结果:', sendR.stage, JSON.stringify(sendR.signals))
+    console.log('填充结果:', fillR.stage, fillR.how)
+    await sleep(500)
+    const sendR = JSON.parse(
+      String(await cdp.eval(`Promise.resolve(${strip(buildTriggerScript(hints, PROMPT))}).then(r=>r)`)),
+    )
+    console.log('触发结果: ok=' + sendR.ok, sendR.how, 'confirmed=' + sendR.confirmed)
 
     // 每 2 秒 dump 一次，持续 60 秒
     console.log('\n时间    | 事件队列摘要')

@@ -5,6 +5,50 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.1
+
+### 修复：两处模板转义吞掉反斜杠（一个让 SSE 路径从未生效，一个静默算错）
+
+插件把注入页面的 JS **当字符串生成**，写在一个个模板字符串里。模板字符串会
+**吃掉一层转义**：单写的斜杠转义退化成裸斜杠，字符类转义退化成普通字母。
+
+**① SSE 观察路径从来没工作过。** `hook.ts` 的 `fragmentIndexOf` 生成出来是
+
+    var m = /^response/fragments/(-?d+)//.exec(p);
+
+非法 JS ⇒ 注入页面的 hook 直接抛 `SyntaxError: Invalid regular expression
+flags` ⇒ 整个 hook 注入失败。而主路径（读 DOM）照常工作，所以这个故障
+**一直静默存在**，直到用 CDP 打开真页面才暴露。修复后真页面实测
+`[2] hook: installed`。
+
+**② DOM 报告静默算错。** `dom-report.ts` 的 `dc.split(/\s+/)` 同样在模板里
+⇒ 生成 `split(/s+/)`，**按字母 s 切分** ⇒ `ds-` 类名一个都提取不到，诊断输出
+莫名其妙是空的。这类比第一种更危险：没有异常、没有日志。
+
+**为什么之前没被测出来**：只看源码看不出来（那两行正则长得完全正常）；
+只测「能否编译」也测不出第二种（`/s+/` 是合法正则）。
+
+### 新增三个常驻测试（已接入 `npm run check`）
+
+- `verify-scripts-parse`：把产物里 14 个生成器逐个调用，用 `vm.Script`
+  **只编译不执行**地解析结果 —— 专治「源码看着对、生成出来非法」
+- `verify-escapes`：扫描模板字符串内的单反斜杠转义（带**扫描器自检**，
+  避免它静默退化成空操作）
+- `verify-hook-behavior`：沙箱里喂合成 SSE 帧，断言「帧 → 事件」映射。
+  这条路径刚被启用、此前从未执行过，必须补行为覆盖
+
+### 测试套件修复
+
+- `verify-audit` / `verify-sequence`：位置断言误报 —— `indexOf` 命中了
+  「催继续」路径那次触发调用；字符窗口也随功能增长失效。改成锚到主路径
+  与顺序断言
+- `verify-coldstart` / `verify-e2e` / `verify-session-e2e` / `probe-*`：
+  适配三段式发送（`buildSendScript` 已删除），改用 `confirmed` 判据
+- `verify-extract` / `verify-fence`：抠出的是模板源码、比生成脚本多一层
+  转义，补一次反转义
+- `verify-live` / `preflight`：`execSync` 会经 `cmd.exe`，改 `spawnSync`
+  免掉 shell；子进程不可用时降级为进程内解析并**如实报 SKIP**（不假装通过）
+
 ## v0.2.0
 
 ### 版本号回到手动 bump

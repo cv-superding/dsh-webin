@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
  *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
+ *   - 客户端 `setTimeout`  延迟
  *   - `buildTriggerScript` 只点发送
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**，不在 `npm run check` 链里，
+ * 属手动诊断工具。
  */
 
 /**
@@ -92,15 +90,20 @@ class Cdp {
 
 async function main() {
   /**
-   * 从**构建产物**里取出真实的 `buildSendScript` 源码，而不是在这里复刻一份。
+   * 从**构建产物**里取出真实的 `buildFillScript` / `buildTriggerScript` 源码，
+   * 而不是在这里复刻一份。
    *
    * 为什么：复刻的评分逻辑会跟 `chat.ts` 漂移 —— 那样测过了也不代表插件是对的。
    * `lib/client.js` 是 CJS bundle，直接 import 拿不到具名导出，
-   * 所以用正则把 `buildSendScript` 的函数体抠出来 eval 成可调用函数。
+   * 所以用正则把函数体抠出来 eval 成可调用函数。
+   *
+   * ⚠️ 2026-10-13 重构后 `buildSendScript` 已删除（它把填充→等待→校验→重试
+   * 塞进一次 executeJavaScript，页面一导航就整体死掉）。现在拆成两段，
+   * 本探针的 dry-run 也相应改成「先填充，再触发」。
    */
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
-  const fnMatch = bundle.match(/function buildSendScript\(([^)]*)\)\s*\{/)
-  if (fnMatch === null) throw new Error('在 lib/client.js 里找不到 buildSendScript —— 先跑 npm run build')
+  const fnMatch = bundle.match(/function buildTriggerScript\(([^)]*)\)\s*\{/)
+  if (fnMatch === null) throw new Error('在 lib/client.js 里找不到 buildTriggerScript —— 先跑 npm run build')
   // 从函数起点做花括号配对，取出完整函数体
   const start = fnMatch.index
   let depth = 0
@@ -115,11 +118,35 @@ async function main() {
       }
     }
   }
-  if (end < 0) throw new Error('buildSendScript 函数体配对失败')
+  if (end < 0) throw new Error('buildTriggerScript 函数体配对失败')
   const fnSource = bundle.slice(start, end)
   // eslint-disable-next-line no-new-func
-  const buildSendScript = new Function(`${fnSource}; return buildSendScript;`)()
-  console.log('已从产物加载 buildSendScript（真实实现，非复刻）')
+  const buildTriggerScript = new Function(`${fnSource}; return buildTriggerScript;`)()
+  /** 填充脚本同样从产物取（trigger 依赖它先把内容写进去）。 */
+  const fillMatch = bundle.match(/function buildFillScript\(([^)]*)\)\s*\{/)
+  if (fillMatch === null) throw new Error('在 lib/client.js 里找不到 buildFillScript')
+  {
+    const s0 = fillMatch.index
+    let d0 = 0
+    let e0 = -1
+    for (let i = bundle.indexOf('{', s0); i < bundle.length; i += 1) {
+      if (bundle[i] === '{') d0 += 1
+      else if (bundle[i] === '}') {
+        d0 -= 1
+        if (d0 === 0) {
+          e0 = i + 1
+          break
+        }
+      }
+    }
+    if (e0 < 0) throw new Error('buildFillScript 函数体配对失败')
+    // eslint-disable-next-line no-new-func
+    globalThis.__buildFillScript = new Function(
+      `${bundle.slice(s0, e0)}; return buildFillScript;`,
+    )()
+  }
+  const buildFillScript = globalThis.__buildFillScript
+  console.log('已从产物加载 buildFillScript / buildTriggerScript（真实实现，非复刻）')
 
   const browser = findBrowser()
   const port = 9800 + Math.floor(Math.random() * 150)
@@ -193,8 +220,18 @@ async function main() {
     // 做法：注入一段「先给 Element.prototype.click 打桩」的前导脚本，
     // 记录被点的元素而不真正触发。这样能验证**候选选择**是否正确，
     // 又不会真的发消息、不会弹文件选择框。
-    console.log('\n[1] 真实 buildSendScript() dry-run（点击被拦截）')
-    const script = buildSendScript('__dsh_webin_dry_run__', 0)
+    console.log('\n[1] 真实 buildFillScript() + buildTriggerScript() dry-run（点击被拦截）')
+    /**
+     * ⚠️ 必须先填充再触发 —— `buildTriggerScript` 会核对输入框里确实是这段
+     * 内容才点火（fill 与 trigger 之间页面可能重渲染换掉输入框节点）。
+     * 输入框空着时它会直接返回 `already-sent`，dry-run 就失去意义了。
+     */
+    const fillRaw = buildFillScript('__dsh_webin_dry_run__').trim().replace(/;\s*$/, '')
+    const fillOut = await cdp.eval(
+      `Promise.resolve(${fillRaw}).then(r => r).catch(e => 'ERR:' + e.message)`,
+    )
+    console.log('    fill:', String(fillOut).slice(0, 200))
+    const script = buildTriggerScript(undefined, '__dsh_webin_dry_run__')
     const guarded = `(() => {
       window.__dsh_clicked = null;
       const orig = Element.prototype.click;
@@ -226,12 +263,12 @@ async function main() {
       }
     })()
 
-    console.log('    buildSendScript 结果:')
+    console.log('    buildTriggerScript 结果:')
     console.log('      stage  :', parsed.stage)
     console.log('      ok     :', parsed.ok)
     console.log('      how    :', parsed.how)
-    console.log('      message:', parsed.message)
-    if (parsed.signals !== undefined) console.log('      signals:', JSON.stringify(parsed.signals))
+    console.log('      method :', parsed.method)
+    console.log('      message:', parsed.message ?? parsed.reason)
     console.log('    被拦截的点击:', JSON.stringify(clicked))
     if (parsed.candidates !== undefined) {
       console.log('    候选清单（前 6）:')
@@ -335,7 +372,14 @@ async function main() {
     // ---- 5) LIVE 模式：真的发送 ----
     if (LIVE) {
       console.log('\n[5] ⚠️ LIVE：真的发送 "ping" …')
-      const liveScript = buildSendScript('ping', 500).trim().replace(/;\s*$/, '')
+      /** 三段式：先填充，再触发。 */
+      const liveFill = buildFillScript('ping').trim().replace(/;\s*$/, '')
+      const liveFillOut = await cdp.eval(
+        `Promise.resolve(${liveFill}).then(r => r).catch(e => 'ERR:' + e.message)`,
+      )
+      console.log('    填充结果:', String(liveFillOut).slice(0, 300))
+      await sleep(500)
+      const liveScript = buildTriggerScript(undefined, 'ping').trim().replace(/;\s*$/, '')
       const liveResult = await cdp.eval(`Promise.resolve(${liveScript}).then(r => r).catch(e => 'ERR:' + e.message)`)
       console.log('    发送结果:', String(liveResult).slice(0, 600))
       await sleep(6000)
@@ -356,7 +400,7 @@ async function main() {
       console.log(`  ${isSendKey ? '✓' : '✗'} 首选候选 score=${top.score} <${top.tag}> cls=${top.cls}`)
       console.log(`      分差（#1 − #2）= ${top.score - (scored.top[1]?.score ?? 0)}`)
     }
-    console.log(`  ${parsed.stage === 'sent' ? '✓' : '✗'} buildSendScript stage=${parsed.stage}（dry-run 下点击被拦，sent 即"选中了正确的键"）`)
+    console.log(`  ${parsed.ok === true ? '✓' : '✗'} buildTriggerScript ok=${parsed.ok}（dry-run 下点击被拦，ok 即"选中了正确的键"）`)
     console.log(`  ${fillResult.ok ? '✓' : '✗'} 填框（原生 setter）`)
     console.log(LIVE ? '\n（LIVE 模式：已真实发送）' : '\n（dry-run：未发送任何消息）')
   } finally {
