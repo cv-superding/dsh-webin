@@ -741,6 +741,15 @@ export interface AdapterDeps {
    * 真门禁由 host 注入（它才知道快照在哪）。
    */
   isLoggedIn?: (platform: string) => boolean
+  /**
+   * ⭐ 宿主能力（host 注入）——用来把“无人领活”说到底。
+   *
+   * 返回 'no-desktop-bridge' 表示：面板在线，但宿主根本没有桌面浏览器通道
+   * —— 这种环境下等多久都不会有人来领活，报“标签没打开”是把用户带偏。
+   *
+   * 未注入时不做任何额外判断（保持旧行为，测试与降级路径不受影响）。
+   */
+  hostCapability?: () => string | undefined
 }
 /** 构造 adapter（鸭子类型对象；不继承 LlmAdapter 基类，所以方法要齐）。 */
 /**
@@ -978,12 +987,32 @@ export function createAdapter(deps: AdapterDeps) {
       if (current.claimedAt !== undefined) claimedOnce = true
 
       if (!claimedOnce && Date.now() > job.createdAt + claimGraceMs) {
-        queue.settle(job.id, { error: 'LDW 面板未连接：没有 client 领取这个任务。' })
+        /**
+         * ⭐ 区分两种“无人领活”——它们的修复方向完全不同。
+         *
+         *   A. 宿主根本没有桌面浏览器通道（非官方 Desktop）
+         *      ⇒ 等多久都不会有人来领活。必须直接说清楚，
+         *        否则用户会去反复切标签、重登录，白折腾。
+         *   B. 面板没开 / 被切走 / 未登录 ⇒ 原文案（可操作）。
+         *
+         * 判据取自面板主动上报的能力字段（无桥时会先发一次心跳）。
+         */
+        const noBridge = deps.hostCapability?.() === 'no-desktop-bridge'
+        const reason = noBridge
+          ? '宿主无桌面浏览器通道：当前环境下 LDW 无法工作。'
+          : 'LDW 面板未连接：没有 client 领取这个任务。'
+        queue.settle(job.id, { error: reason })
         throw new Error(
-          'LDW 面板未连接 —— 没有任何客户端领取这个任务（' +
-            `${Math.round(claimGraceMs / 1000)}s 内无人领取）。\n` +
-            '原因通常是：LDW 标签没打开、面板被切走卸载了、或页面还没登录。\n' +
-            '请切到 LDW 标签并确认显示「真实浏览器已就绪」。',
+          noBridge
+            ? '当前宿主没有桌面浏览器通道 —— LDW 只能在带 Electron 通道的官方 Desktop 版 DSH 里使用。\n' +
+              '现在这个环境（例如 DSH-X 启动器 + 浏览器 Web GUI、或第三方 Electron 壳）\n' +
+              '不会提供 globalThis.dshDesktop，因此面板拿不到浏览器。\n' +
+              '这不是“标签没打开”，切标签或重登录都不会好。\n' +
+              '解法：换用官方 Desktop 版 DSH（它会注入该通道）。'
+            : 'LDW 面板未连接 —— 没有任何客户端领取这个任务（' +
+              `${Math.round(claimGraceMs / 1000)}s 内无人领取）。\n` +
+              '原因通常是：LDW 标签没打开、面板被切走卸载了、或页面还没登录。\n' +
+              '请切到 LDW 标签并确认显示「真实浏览器已就绪」。',
         )
       }
 

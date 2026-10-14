@@ -63,6 +63,40 @@
 这个端点（早期会话加的）能验证**除 DSH 派发之外的全部链路** ——
 之前的测试全是离线单测，只能证明「代码里写了什么」，证明不了「真跑起来能不能回显」。
 
+## 未发布
+
+### 修复：非 Desktop 宿主上「静默降级」，报错指向错误方向
+
+**用户实测**：在非官方 Desktop 宿主（DSH-X 启动器 + 浏览器 Web GUI、或普通 Electron 壳）里装上插件后：
+
+- 安装**成功**、host 半**正常加载**、模型选择器里**出现 LDW**；
+- 但发任何消息都只能等到 `claimGraceMs` 宽限到期，然后返回 `WEBIN_FAILED`；
+- 而错误文案写的是「LDW 面板未连接 —— 标签没打开 / 被切走 / 未登录」，
+  **把用户引向完全错误的方向**（切标签、重登录都无用）。
+
+**根因**：插件依赖官方 Desktop 注入的 `globalThis.dshDesktop.browser`（Electron `<webview>` 通道）。
+非官方 Desktop 宿主不提供该桥，client 半 `desktopBrowser()` 返回 `undefined` 后**直接 `return`** ——
+**一个字节都不上报**。于是 host 侧只能看到「没有面板来领活」，无法区分：
+
+| 情况 | 真实原因 | 修复方向 |
+|---|---|---|
+| A | 宿主没有桌面浏览器通道 | 只能用官方 Desktop 版 |
+| B | 面板没打开 / 被切走 / 未登录 | 切到 LDW 标签 |
+
+这两种情况的**修复动作完全不同**，以前却报同一句话。
+
+**修法**（不改 Desktop 下任何行为）：
+
+1. `src/client/index.ts`：无桥时**先发一次**既有心跳端点，带 `capability: 'no-desktop-bridge'`，
+   再显示状态（不新增协议）；并在文案里给出可操作指引。
+2. `src/host/index.ts`：heartbeat handler **显式**挑入 `capability`（该 handler 是手工挑字段写法，
+   漏挑就丢；此前 `scrape` 已经踩过同一个坑），新增 `/status.hostCapability`
+   （`unknown` / `no-desktop-bridge` / `desktop-bridge`，多面板时**报最坏的**）。
+3. `src/host/adapter.ts`：无人领活分支改为按 `hostCapability()` 区分两种原因，
+   情况 A 明确说「这不是标签没打开，换官方 Desktop 版」；情况 B 保持原文案不变。
+
+回归保护：`npm run verify` 65/65 通过；Desktop 路径的周期性心跳 payload **不含** `capability`，行为不变。
+
 ## v0.2.21
 
 ### 修复：登录页的文字被当成模型回复交付
@@ -1017,14 +1051,3 @@ cookie；而 DeepSeek 登录态主要靠 **httpOnly cookie**，页面 JS 看不�
 ### 工具调用
 
 - 模型输出 ` ```ldw ` 代码块 → 解析成 DSH 的 `tool-call` → 执行 → 结果回填。
-- 斜杠命令 / Skill / MCP 均可通过工具调用触达。
-
-### 测试
-
-**1081 项离线测试**（`npm run check`，不需要浏览器、不消耗网页版额度）。
-
-### 已知取舍
-
-流式输出若中途停顿超过 3 秒再继续，会被判定为「已结束」而交付半截内容。
-要根治需要「流是否真的结束」的信号，而 DSH 的 webview 门禁（删掉 `preload`）
-让 hook 拿不到它。当前行为已被测试钉住，不是未知行为。
