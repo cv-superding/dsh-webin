@@ -114,7 +114,20 @@ console.log('\n[3] ⭐⭐⭐ 领活过滤方向：以「窗口是否上报」为
    */
   const adapterSrc = readFileSync(join(ROOT, 'src', 'host', 'adapter.ts'), 'utf8')
   check('⭐⭐ 有 hasIdentity 判据', /const hasIdentity = sessionId !== undefined && sessionId !== ''/.test(adapterSrc), true)
-  check('⭐⭐ 只有上报了才要求匹配', /if \(hasIdentity && job\.sessionId !== undefined && job\.sessionId !== sessionId\) continue/.test(adapterSrc), true)
+  /**
+   * ## ⚠️ 判据升级：从「严格匹配」改成「**优先匹配 + 匹配不上就回退**」
+   *
+   * 原判据（严格匹配）本身造成了**真实事故**：常驻宿主全局只有一个
+   * （挂 shell.overlay、root scope、永不卸载），而 sessionId 来自各会话的
+   * 占位符、写进同一个模块级 ref —— 最后一个挂载的覆盖它。于是唯一那个
+   * 领活循环只拿得到一个 sessionId，其余会话的任务**永远匹配不上** ⇒
+   * 20 秒无人领 ⇒「LDW 面板未连接」。
+   *
+   * 实测证据：新会话连发两条 `claimedBy: (未领)` / `state: failed`。
+   * 见 adapter.ts 的 claimNext 说明。
+   */
+  check('⭐⭐ 本会话优先', /pending\.find\(\(j\) => j\.sessionId === sessionId\)/.test(adapterSrc), true)
+  check('⭐⭐ 匹配不上要回退（不能卡死）', /const job = mine \?\? pending\[0\]/.test(adapterSrc), true)
   /** 旧写法（恒真 ⇒ 卡死）必须消失。 */
   /** ⚠️ 同样要排除注释。 */
   check(

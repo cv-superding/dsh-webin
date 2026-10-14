@@ -62,36 +62,54 @@ const JobQueue = new Function(`${extractClass('JobQueue')}\nreturn JobQueue`)()
 
 console.log('=== 会话隔离（行为验证）===\n')
 
-console.log('[1] ⭐⭐ 窗口 A 领不走属于窗口 B 的任务')
+console.log('[1] ⭐⭐⭐ 本会话优先，但**绝不因为对不上就让任务没人领**')
 {
+  /**
+   * ## ⚠️ 这一组原来断言「A 领不到 B 的任务」—— 那个方向**造成了真实事故**
+   *
+   * 用户实测：新开一个 DSH 会话，连发两条都 `state: failed`，
+   * `claimedBy: (未领)`，界面报「LDW 面板未连接（20s 内无人领取）」。第三条
+   * 才成功 —— 因为那时占位符才把新的 sessionId 写进 ref。
+   *
+   * 根因：**常驻宿主全局只有一个**（挂 `shell.overlay`、root scope、永不卸载），
+   * 所以整个窗口只有一个领活循环；而 sessionId 来自每个会话各自的占位符，
+   * 写进**同一个模块级 ref** —— 最后一个挂载的覆盖它。于是唯一那个循环只拿得到
+   * 一个 sessionId，其余会话的任务**永远匹配不上**。
+   *
+   * 这和 [5] 里记录的是**同一类问题的剩余部分**：上次修了「完全没身份」，
+   * 没修「身份是错的」。原则一样 —— 宁可放行，也不能把功能卡死。
+   *
+   * 放行是安全的：client 拿到任务后会按 `expectUrl` / `freshChat` **自己导航**
+   * 到该会话绑定的网页对话，所以不会串台。
+   */
   const q = new JobQueue()
-  /** 给「窗口 B 的会话」派一个任务。 */
   q.enqueue('B 的提示词', false, 'deepseek', undefined, false, 'session-B')
 
-  /** 窗口 A 来领 —— 必须领不到。 */
+  /** A 来领 —— 本会话没有任务，**回退领走**（否则这条任务没人领）。 */
   const gotA = q.claimNext('deepseek', 'session-A')
-  check('⭐⭐ A 领不到 B 的任务', gotA, undefined)
+  check('⭐⭐ A 回退领到了（不再无人领）', gotA?.prompt, 'B 的提示词')
+  check('⭐ 标成 fallback（可诊断）', gotA?.claimedVia, 'fallback')
+  check('⭐ 任务归属仍是 B（client 据此导航）', gotA?.sessionId, 'session-B')
 
-  /** 窗口 B 来领 —— 必须领到。 */
-  const gotB = q.claimNext('deepseek', 'session-B')
-  check('⭐⭐ B 能领到自己的任务', gotB?.prompt, 'B 的提示词')
-  check('⭐ 任务记着归属会话', gotB?.sessionId, 'session-B')
-  check('⭐ 记录被谁领走', gotB?.claimedBy, 'session-B')
+  /** 已经领走了，B 再来就没有了。 */
+  check('领完就没了', q.claimNext('deepseek', 'session-B'), undefined)
 }
 
-console.log('\n[2] ⭐⭐ 两个窗口各有任务时不会互相领走')
+console.log('\n[2] ⭐⭐ 各有任务时**优先拿自己的**（优先级仍然生效）')
 {
   const q = new JobQueue()
   q.enqueue('给 A 的', false, 'deepseek', undefined, false, 'session-A')
   q.enqueue('给 B 的', false, 'deepseek', undefined, false, 'session-B')
 
-  /** B 先来领 —— 应该拿到「给 B 的」（不是「给 A 的」）。 */
+  /** B 先来领 —— 必须拿到「给 B 的」（不是「给 A 的」）。 */
   const gotB = q.claimNext('deepseek', 'session-B')
-  check('⭐⭐ B 拿到自己的那条', gotB?.prompt, '给 B 的')
+  check('⭐⭐ B 优先拿到自己的那条', gotB?.prompt, '给 B 的')
+  check('⭐ 标成 session（不是回退）', gotB?.claimedVia, 'session')
 
-  /** A 再来领 —— 应该拿到「给 A 的」。 */
+  /** A 再来领 —— 必须拿到「给 A 的」。 */
   const gotA = q.claimNext('deepseek', 'session-A')
-  check('⭐⭐ A 拿到自己的那条', gotA?.prompt, '给 A 的')
+  check('⭐⭐ A 优先拿到自己的那条', gotA?.prompt, '给 A 的')
+  check('⭐ 标成 session', gotA?.claimedVia, 'session')
 
   /** 都没了。 */
   check('领完了', q.claimNext('deepseek', 'session-A'), undefined)
@@ -218,13 +236,32 @@ console.log('\n[9] ⭐⭐⭐ 回归：窗口没上报身份时**不能**把任�
   check('⭐⭐ 空串也算未上报', q2.claimNext('deepseek', '')?.prompt, '任务2')
 }
 
-console.log('\n[10] ⭐⭐ 隔离在双方都有身份时仍然生效')
+console.log('\n[10] ⭐⭐⭐ 双方都有身份、且**对不上**时：优先自己的，没有就回退')
 {
+  /**
+   * ## ⚠️ 这一组原来断言「A 严格领不到 B 的」—— 那个方向**造成了真实事故**
+   *
+   * 与 [1] 同一个根因：常驻宿主只有一个，sessionId ref 被各会话的占位符
+   * 轮流覆盖 ⇒ 唯一那个领活循环只拿得到一个 sessionId ⇒ 其余会话的任务
+   * 永远匹配不上 ⇒ 20 秒无人领 ⇒「LDW 面板未连接」。
+   *
+   * 现在：**本会话有任务就优先拿自己的**（[2] 覆盖），本会话没有才回退。
+   */
   const q = new JobQueue()
   q.enqueue('给 B 的', false, 'deepseek', undefined, false, 'session-B')
-  /** 窗口 A **上报了**身份 ⇒ 严格匹配 ⇒ 领不到 B 的。 */
-  check('⭐⭐ A 领不到 B 的（隔离生效）', q.claimNext('deepseek', 'session-A'), undefined)
-  check('⭐⭐ B 能领到', q.claimNext('deepseek', 'session-B')?.prompt, '给 B 的')
+  /** 窗口 A 上报了身份，但本会话没有任务 ⇒ 回退领走（否则这条永远没人领）。 */
+  const gotA = q.claimNext('deepseek', 'session-A')
+  check('⭐⭐ A 回退领到了', gotA?.prompt, '给 B 的')
+  check('⭐ 标成 fallback', gotA?.claimedVia, 'fallback')
+  check('⭐ 归属仍是 B（client 据此导航）', gotA?.sessionId, 'session-B')
+
+  /** 本会话**有**任务时，必须先拿自己的 —— 不能被别的会话抢走。 */
+  const q2 = new JobQueue()
+  q2.enqueue('给 A 的', false, 'deepseek', undefined, false, 'session-A')
+  q2.enqueue('给 B 的', false, 'deepseek', undefined, false, 'session-B')
+  const mineA = q2.claimNext('deepseek', 'session-A')
+  check('⭐⭐ 本会话有活时优先拿自己的', mineA?.prompt, '给 A 的')
+  check('⭐ 标成 session', mineA?.claimedVia, 'session')
 }
 
 console.log('\n[11] ⭐ 未上报时 claimedBy 记为「(未上报)」')

@@ -1586,6 +1586,76 @@ export function buildScrapeScript(): string {
     }
 
     /**
+     * ## ⭐⭐⭐ 最后一个代码块的正文是否**明显没写完**
+     *
+     * ## 为什么不能只看围栏闭合（实测踩到）
+     *
+     * 网页版的 markdown 渲染器会给**未闭合的围栏自动补上闭合** —— 所以从
+     * 渲染后的 DOM 里读出来的文本，围栏**永远是成对的**。
+     *
+     * 实测：页面显示的是半截工具调用（以左花括号结尾），而 DOM 里读到的文本
+     * 围栏已经闭合（渲染器补的）。于是 isFenceOpen 判为「完整」，闸门不触发，
+     * 半截工具调用照样交付。
+     *
+     * ## 判据：代码块正文以**不可能自然收尾**的 token 结尾
+     *
+     * 代码写完了必然以标识符 / 闭括号 / 分号 / 字符串结尾。以这些结尾 ⇒ 没写完：
+     * 左花括号、左圆括号、左方括号、逗号、箭头、逻辑与、逻辑或、
+     * 点号、等号、冒号、加减乘除、尖括号。
+     *
+     * ⚠️ **只在代码块内部判** —— 普通正文里以冒号、加号结尾都很常见
+     * （「步骤如下：」），拿它判会大量误报。
+     *
+     * ⚠️ 本注释也在模板字符串里，**不能出现反引号** —— 那会提前终止模板
+     * （本文件已被这个坑坑过一次）。所以上面的 token 只用中文描述。
+     */
+    function lastCodeBlockIncomplete(txt) {
+      if (!txt) return false;
+      var fence = String.fromCharCode(96, 96, 96);
+      var s = String(txt);
+      /** 取最后一个闭合代码块的正文。 */
+      var lastOpen = -1;
+      var i = 0;
+      var prevOpen = -1;
+      while (true) {
+        var k = s.indexOf(fence, i);
+        if (k === -1) break;
+        if (prevOpen === -1) prevOpen = k;
+        else { lastOpen = prevOpen; prevOpen = -1; }
+        i = k + fence.length;
+      }
+      if (lastOpen === -1) return false;
+      /** 正文 = 首个换行之后到下一个围栏之前（跳过语言标记那行）。 */
+      var afterFence = s.indexOf(String.fromCharCode(10), lastOpen);
+      if (afterFence === -1) return false;
+      var close = s.indexOf(fence, afterFence);
+      var body = close === -1 ? s.slice(afterFence) : s.slice(afterFence, close);
+      body = body.replace(/[ \\t\\r\\n]+$/, '');
+      if (body.length === 0) return false;
+      var tail = body.slice(-2);
+      var one = body.slice(-1);
+      /** 两字符的收尾 token 先判（否则箭头会被当成单个大于号）。 */
+      if (tail === '=>' || tail === '&&' || tail === '||') return true;
+      /**
+       * ⚠️ 收尾 token 表用 **String.fromCharCode 拼**，源码里不出现字面括号。
+       *
+       * 两个原因，都是实测踩到的：
+       *
+       *   1. 本函数位于模板字符串内，而多个测试脚本用「朴素花括号配对」从产物里
+       *      抠它 —— 源码里出现不平衡的字面括号会把配对带偏（实测：
+       *      verify-lang / verify-scrape / verify-tool-e2e 直接崩在「括号不配对」）。
+       *   2. 用反斜杠-u 这类转义**没用** —— 打包器会把模板里的转义归一化成
+       *      字面字符，产物里照样出现括号（实测确认）。
+       *
+       * 123=左花括号 40=左圆括号 91=左方括号；其余为逗号 点号 冒号 等号
+       * 加 减 乘 除 小于 大于。
+       */
+      var TAIL_TOKENS = String.fromCharCode(123, 40, 91) + ',.:=+-*/<>';
+      if (TAIL_TOKENS.indexOf(one) !== -1) return true;
+      return false;
+    }
+
+    /**
      * ## ⭐⭐⭐ 读页面上的**服务端错误提示**（「服务器暂时不可用」等）
      *
      * ## 为什么需要
@@ -1671,6 +1741,11 @@ export function buildScrapeScript(): string {
        * ⭐ 回复是否停在未闭合围栏里（= 没写完）。交付闸门用它挡住半截工具调用。
        */
       fenceOpen: isFenceOpen(list.length > 0 ? list[list.length - 1] : ''),
+      /**
+       * ⭐ 代码块正文是否明显没写完 —— 围栏被渲染器补过闭合时，这条才是
+       * 唯一能发现截断的信号（见 lastCodeBlockIncomplete 的说明）。
+       */
+      codeTrailingIncomplete: lastCodeBlockIncomplete(list.length > 0 ? list[list.length - 1] : ''),
       /**
        * ⭐ 页面上的服务端错误提示（空串 = 没有）。非空 ⇒ 生成是被服务端掐断的，
        * 必须提醒用户并重试，而不是把半截内容当成功交付。

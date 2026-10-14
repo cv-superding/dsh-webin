@@ -2091,6 +2091,13 @@ const clearPending = () => {
                */
               const fenceOpen = (scraped as { fenceOpen?: boolean }).fenceOpen === true
               /**
+               * ⭐ 代码块正文是否明显没写完。围栏被网页版渲染器补过闭合时，
+               * 这条是**唯一**能发现截断的信号（见 hook.ts 的
+               * lastCodeBlockIncomplete）。
+               */
+              const codeTrailingIncomplete =
+                (scraped as { codeTrailingIncomplete?: boolean }).codeTrailingIncomplete === true
+              /**
                * ⭐ 页面上的服务端错误提示（「服务器暂时不可用」等，空串 = 没有）。
                * 非空 ⇒ 生成是被服务端掐断的，不能当成功交付。
                */
@@ -2231,17 +2238,30 @@ const clearPending = () => {
                  * 成功、实际半截的结果。
                  */
                 const RETRY_MAX = 3
+                /**
+                 * ⚠️ 三个判据都要判 —— 它们覆盖**不同的截断形态**：
+                 *
+                 *   - `serverError`：页面明确写了服务端错误（最直接）
+                 *   - `fenceOpen`：围栏计数为奇数（渲染前的截断）
+                 *   - `codeTrailingIncomplete`：围栏成对但**代码块正文没写完**
+                 *
+                 * 第三条是实测补上的：网页版的 markdown 渲染器会给未闭合的围栏
+                 * **自动补闭合**，所以从 DOM 读出来的围栏永远成对 —— 只靠前两条
+                 * 会漏判，半截工具调用照样交付（实测 `const r = await tools.write({`）。
+                 */
                 const incompleteReason =
                   serverError !== ''
                     ? `服务端提示「${serverError}」`
                     : fenceOpen === true
                       ? '回复停在未闭合的代码围栏里（工具调用被截断）'
-                      : ''
+                      : codeTrailingIncomplete === true
+                        ? '代码块正文没写完（工具调用被截断，围栏由页面自动补全）'
+                        : ''
                 if (incompleteReason !== '' && retryCountRef.current < RETRY_MAX) {
                   retryCountRef.current += 1
                   console.warn(
                     `[dsh-webin] 本轮回复不完整：${incompleteReason} —— 第 ${retryCountRef.current}/${RETRY_MAX} 次重试`,
-                    { serverError, fenceOpen, chars: last.length },
+                    { serverError, fenceOpen, codeTrailingIncomplete, chars: last.length },
                   )
                   /** ⭐ 提醒用户（面板状态栏）。 */
                   setStatus(

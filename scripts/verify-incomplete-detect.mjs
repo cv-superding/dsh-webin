@@ -47,6 +47,23 @@ const check = function (name, actual, expected) {
 
 const src = readFileSync(BUNDLE, 'utf8')
 
+/**
+ * ⚠️ **模板层反转义** —— 抠出来的源码比真正的注入脚本多一层转义。
+ *
+ * 这些函数位于 `buildScrapeScript` 的**模板字符串内部**，产物里存的是模板的
+ * **源码**：生成脚本里的一个反斜杠，在这里写作两个。
+ *
+ * 不反转义的话，函数体里的正则会被解释错 —— 实测踩到：
+ * `/[ \\t\\r\\n]+$/` 直接求值后变成「匹配空格 / 反斜杠 / 字母 t r n」，
+ * 于是尾部真换行修剪不掉，`lastCodeBlockIncomplete` 恒返回 false，
+ * 测试全红而代码其实是对的。
+ *
+ * （同一坑在 `verify-extract` / `verify-fence` 也踩过。）
+ */
+function unescapeTemplateLayer(text) {
+  return text.replace(/\\\\/g, '\\')
+}
+
 /** 提取函数源码（跳过字符串 / 模板 / 注释，避免花括号被内容带偏）。 */
 function extractFn(name) {
   const re = new RegExp(`function ${name}\\(([^)]*)\\)\\s*\\{`)
@@ -73,7 +90,7 @@ function extractFn(name) {
       } else if (c === '{') depth += 1
       else if (c === '}') {
         depth -= 1
-        if (depth === 0) return src.slice(m.index, i + 1)
+        if (depth === 0) return unescapeTemplateLayer(src.slice(m.index, i + 1))
       }
       continue
     }
@@ -102,6 +119,9 @@ const scrapeScript = new Function(`return (${extractFn('buildScrapeScript')})`)(
 
 const isFenceOpen = new Function(`${extractFn('isFenceOpen')}; return isFenceOpen`)()
 const readServerError = new Function(`${extractFn('readServerError')}; return readServerError`)()
+const lastCodeBlockIncomplete = new Function(
+  `${extractFn('lastCodeBlockIncomplete')}; return lastCodeBlockIncomplete`,
+)()
 
 const FENCE = '```'
 
@@ -157,7 +177,55 @@ console.log('\n[3] readServerError：识别服务端提示')
   check('空页面 ⇒ 空串', run([]), '')
 }
 
-console.log('\n[4] 生成器可解析（防模板转义把脚本弄坏）')
+console.log('\n[4] ⭐⭐⭐ lastCodeBlockIncomplete：围栏被页面补闭合后的唯一信号')
+{
+  /**
+   * ## 为什么这条判据必须存在（实测踩到）
+   *
+   * 网页版的 markdown 渲染器会给**未闭合的围栏自动补上闭合**，所以从 DOM
+   * 读出来的文本围栏永远成对 —— isFenceOpen 判为「完整」，闸门不触发。
+   *
+   * 用户实测交付过这样的回复（DSH 里显示「已完成」）：
+   *
+   *     ldw
+   *
+   *     ```ldw
+   *     const r = await tools.write({
+   *     ```            ← 这一行是渲染器补的，不是模型写的
+   */
+  const realTruncated = `${FENCE}ldw\nconst r = await tools.write({\n${FENCE}`
+  check('实测的半截工具调用（围栏已补）⇒ 判为没写完', lastCodeBlockIncomplete(realTruncated), true)
+  check('同一段文本的 isFenceOpen 反而是 false（说明为何需要新判据）', isFenceOpen(realTruncated), false)
+
+  const complete = `${FENCE}ldw\nconst r = await tools.write({ path: 'a.txt' })\n${FENCE}\n\n已创建`
+  check('完整工具调用 ⇒ 判为写完', lastCodeBlockIncomplete(complete), false)
+
+  const cases = [
+    ['以左花括号结尾', `${FENCE}js\nconst r = foo({\n${FENCE}`, true],
+    ['以左圆括号结尾', `${FENCE}js\nfoo(\n${FENCE}`, true],
+    ['以逗号结尾', `${FENCE}js\nfoo(a,\n${FENCE}`, true],
+    ['以箭头结尾', `${FENCE}js\nconst f = () =>\n${FENCE}`, true],
+    ['以逻辑与结尾', `${FENCE}js\na &&\n${FENCE}`, true],
+    ['以点号结尾', `${FENCE}js\nfoo.\n${FENCE}`, true],
+    ['以分号结尾（完整）', `${FENCE}js\nfoo();\n${FENCE}`, false],
+    ['以右花括号结尾（完整）', `${FENCE}js\nfoo({ a: 1 })\n${FENCE}`, false],
+    ['以标识符结尾（完整）', `${FENCE}js\nreturn result\n${FENCE}`, false],
+    ['没有代码块', '普通回复，没有围栏', false],
+    ['空串', '', false],
+  ]
+  for (const [label, text, want] of cases) {
+    check(`${label} ⇒ ${want ? '没写完' : '完整'}`, lastCodeBlockIncomplete(text), want)
+  }
+
+  /**
+   * ⚠️ 只在代码块**内部**判 —— 正文以冒号结尾极常见
+   * （「步骤如下：」），拿它判会大量误报。
+   */
+  check('正文以冒号结尾不算（不误报）', lastCodeBlockIncomplete('步骤如下：'), false)
+  check('正文以加号结尾不算（不误报）', lastCodeBlockIncomplete('1 + 2 +'), false)
+}
+
+console.log('\n[5] 生成器可解析（防模板转义把脚本弄坏）')
 {
   try {
     new vm.Script(scrapeScript, { filename: 'scrape.js' })

@@ -91,6 +91,15 @@ interface Job {
    */
   sessionId?: string
   /**
+   * 这一条是**怎么被领走**的（诊断用，`/status` 可见）。
+   *
+   *   - `session`  —— 领活窗口的会话与任务归属一致（正常）
+   *   - `fallback` —— 不一致，但为了不让任务没人领而回退领走
+   *
+   * 频繁出现 `fallback` ⇒ 会话身份长期对不上（见 claimNext 的说明）。
+   */
+  claimedVia?: 'session' | 'fallback'
+  /**
    * 发送前必须先导航到这个 URL —— 该任务所属 DSH 会话绑定的网页对话。
    *
    * ## 为什么必须有这个（用户实测发现的封号级缺陷）
@@ -252,21 +261,58 @@ class JobQueue {
   claimNext(platform?: string, sessionId?: string): Job | undefined {
     /** 窗口上报了身份吗？没上报就不做会话过滤。 */
     const hasIdentity = sessionId !== undefined && sessionId !== ''
-    for (const job of this.jobs.values()) {
-      if (job.done !== undefined || job.failed !== undefined || job.claimedAt !== undefined) continue
-      if (platform !== undefined && job.platform !== platform) continue
-      /**
-       * ⭐ 只有**窗口上报了身份**且**任务有归属**时才要求一致。
-       *
-       * 任一方缺信息 ⇒ 放行。见方法头的说明：宁可退化成旧行为，
-       * 也不能让任务没人领。
-       */
-      if (hasIdentity && job.sessionId !== undefined && job.sessionId !== sessionId) continue
-      job.claimedAt = Date.now()
-      job.claimedBy = hasIdentity ? sessionId : '(未上报)'
-      return job
-    }
-    return undefined
+    const pending = [...this.jobs.values()].filter(
+      (j) =>
+        j.done === undefined &&
+        j.failed === undefined &&
+        j.claimedAt === undefined &&
+        (platform === undefined || j.platform === platform),
+    )
+    if (pending.length === 0) return undefined
+
+    /**
+     * ## ⭐⭐⭐ 两轮领活：先本会话，再回退到任意 —— 否则新会话的任务全失败
+     *
+     * ## 用户实测（新开会话连发两条都 `state: failed`）
+     *
+     *     job-4  session-8b3f72ef  claimedBy=(未领)  failed
+     *     job-5  session-8b3f72ef  claimedBy=(未领)  failed
+     *     job-6  session-8b3f72ef  claimedBy=已领     done   ← 这条才成功
+     *
+     * ## 根因：常驻宿主**全局只有一个**，但 sessionId 有多个
+     *
+     * 宿主挂 `shell.overlay`（`scope: 'root'` + 不传 `only` ⇒ 永不卸载），
+     * 所以**整个窗口只有一个领活循环**。而 `sessionId` 来自每个 DSH 会话各自的
+     * 占位符（`conversation.view`），它们写进**同一个模块级 ref** ——
+     * **最后一个挂载的覆盖它**。
+     *
+     * 于是唯一那个循环只拿得到一个 sessionId，其余会话的任务**永远匹配不上**
+     * ⇒ 20 秒无人领 ⇒ `WEBIN_FAILED`。上面那两条失败正是这么来的。
+     *
+     * ## 为什么回退是安全的
+     *
+     * client 拿到任务后会**按任务字段自己导航**：
+     *   - `expectUrl` ⇒ 导航到该会话绑定的网页对话
+     *   - `freshChat` ⇒ 显式开新对话
+     *
+     * 所以「领到了别的会话的任务」不会串台 —— 页面会被导航到正确的那条对话。
+     * 这比「任务没人领、直接失败」好得多。
+     *
+     * ## 原过滤保留为**优先级**而不是硬门槛
+     *
+     * 「所有窗口都生效」那条老问题在**多窗口**（多个渲染进程、各自有宿主）
+     * 场景下仍成立，所以本会话的任务依然**优先**被本窗口领走；只是不再死等。
+     */
+    const mine = hasIdentity ? pending.find((j) => j.sessionId === sessionId) : undefined
+    const job = mine ?? pending[0]
+    job.claimedAt = Date.now()
+    job.claimedBy = hasIdentity ? sessionId : '(未上报)'
+    /**
+     * 记录领活方式 —— `/status` 直接可见。
+     * 频繁出现 `fallback` 说明「会话身份」长期对不上，值得查。
+     */
+    job.claimedVia = mine === undefined && hasIdentity ? 'fallback' : 'session'
+    return job
   }
 
   /**
@@ -280,6 +326,8 @@ class JobQueue {
     platform: string
     sessionId: string
     claimedBy: string
+    /** 领活方式：session = 会话匹配；fallback = 回退领走（见 claimNext）。 */
+    claimedVia: string
     state: string
     ageMs: number
   }[] {
@@ -289,6 +337,7 @@ class JobQueue {
       platform: j.platform,
       sessionId: j.sessionId ?? '(无)',
       claimedBy: j.claimedBy ?? '(未领)',
+      claimedVia: j.claimedVia ?? '(未上报)',
       state:
         j.done !== undefined
           ? 'done'

@@ -459,8 +459,13 @@ console.log('\n[S] ⭐ 队列淘汰只删已了结的（否则要么爆内存要
 
 console.log('\n[T] ⭐ 领活不能重复领同一个任务')
 {
-  check('⭐ claimNext 跳过已领的', /job\.claimedAt !== undefined\) continue/.test(adapterSrc), true)
-  check('⭐ claimNext 按平台过滤', /platform !== undefined && job\.platform !== platform/.test(adapterSrc), true)
+  /**
+   * ⚠️ 形态变了（改成先筛出 pending 再两轮挑选），但**不变量没变**：
+   * 已领/已完成的不再派发、平台必须匹配。断言跟着新形态走 ——
+   * 盯的是不变量，不是某一行怎么写。
+   */
+  check('⭐ claimNext 跳过已领的', /j\.claimedAt === undefined/.test(adapterSrc), true)
+  check('⭐ claimNext 按平台过滤', /platform === undefined \|\| j\.platform === platform/.test(adapterSrc), true)
 }
 
 console.log('\n[U] ⭐⭐ 交付判据：内容不再增长 + 静默够久（防交半截回复）')

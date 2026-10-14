@@ -138,13 +138,17 @@ console.log('\n[7] ⭐ 向后兼容：老任务不能被卡住')
    * 老 client 派发的任务没有 sessionId。若严格匹配，它们会**永远没人领**
    * —— 比派错更糟。所以必须放行。
    */
+  /**
+   * ⚠️ 形态变了（严格匹配 → 优先+回退），但「老任务不能被卡住」这个**不变量
+   * 更强了**：现在连「会话对不上」的任务也会被回退领走，不可能没人领。
+   */
   check(
     '⭐ 无 sessionId 的任务放行',
-    /job\.sessionId !== undefined && job\.sessionId !== sessionId/.test(adapterSrc),
+    /const job = mine \?\? pending\[0\]/.test(adapterSrc),
     true,
   )
-  /** 注释里要写明这个取舍。 */
-  check('⭐ 注释说明了取舍', /任一方缺信息.*放行/.test(adapterSrc), true)
+  /** 注释里要写明这个取舍（回退的理由与代价）。 */
+  check('⭐ 注释说明了取舍', /回退.*安全|任务没人领/.test(adapterSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
