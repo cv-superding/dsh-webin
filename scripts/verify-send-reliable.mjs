@@ -96,11 +96,22 @@ console.log('\n[3] ⭐⭐⭐ 早期放弃：发出后 30 秒页面没动静就�
    *
    * 三者都不成立才继续等 —— 正常生成中一定会命中至少一个。
    */
-  check('⭐ 有 EARLY_GIVE_UP_MS 常量', /const EARLY_GIVE_UP_MS = 30_000/.test(clientSrc), true)
+  /**
+   * ⚠️ **不要钉死数值** —— 原来断言 `= 30_000`，而用户连续三轮被这个 30 秒误报，
+   * 已放宽到 120 秒。断言改成「常量存在 + 数值够保守」，跟着设计意图走。
+   */
+  const m = /const EARLY_GIVE_UP_MS = ([\d_]+)/.exec(clientSrc)
+  const ms = m === null ? 0 : Number(m[1].replace(/_/g, ''))
+  check('⭐ 有 EARLY_GIVE_UP_MS 常量', m !== null, true)
+  /** cuckoo 唯一的超时是 300 秒；我们保留这道判据，但至少不能比 60 秒更激进。 */
+  check(`⭐ 窗口够保守（${ms}ms >= 60000）`, ms >= 60_000, true)
   check('⭐ 判据含「条数没增长」', /!countGrew &&/.test(clientSrc), true)
   check('⭐ 判据含「内容没变化」', /!contentChanged &&/.test(clientSrc), true)
   check('⭐ 判据含「思考区为空」', /think\.trim\(\) === ''/.test(clientSrc), true)
-  check('⭐ 三个条件同时成立才放弃', /waitedMs > EARLY_GIVE_UP_MS &&[\s\S]{0,200}?!countGrew &&[\s\S]{0,100}?!contentChanged &&[\s\S]{0,100}?think\.trim\(\) === ''/.test(clientSrc), true)
+  /** ⭐ 两条「不许下结论」的否决 —— 用户三轮误报换来的。 */
+  check('⭐⭐ 页面在生成时不许判失败', /generating !== true/.test(clientSrc), true)
+  check('⭐⭐ 抓取看不见页面时不许判失败', /scrapedOk === true/.test(clientSrc), true)
+  check('⭐ 条件同时成立才放弃', /waitedMs > EARLY_GIVE_UP_MS &&[\s\S]{0,600}?!countGrew &&[\s\S]{0,200}?think\.trim\(\) === ''/.test(clientSrc), true)
   check('⭐ 放弃时交可照做的错误', /消息似乎没有发出去/.test(clientSrc), true)
   check('⭐ 放弃时清 pending', /clearPending\(\)[\s\S]{0,400}?消息似乎没有发出去/.test(clientSrc), true)
 

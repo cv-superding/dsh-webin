@@ -404,12 +404,63 @@ function positionalToObject(schema: ToolSchema | undefined, body: string): strin
  * @param reply - 模型回复的**完整文本**（含可能的代码块）
  * @param tools - 本轮下发的工具清单（用于校验名字、位置参数兜底）
  */
+/**
+ * ## ⭐⭐⭐ 剥离 DSML 工具调用标记
+ *
+ * ## 用户实测
+ *
+ * 「DSML 怎么也出来了？」—— 回复里整段漏出了网页版的**原生工具调用语法**。
+ *
+ * ## 背景
+ *
+ * 网页版的模型自带一套工具调用标记（DSML），形如
+ *
+ *     <｜tool_calls｜> ... <｜/tool_calls｜>
+ *
+ * 标签名用全角竖线 ｜ (U+FF5C) 包裹。
+ *
+ * 插件用的是**自己的** ```ldw 围栏协议，但模型有时会改用网页版原生的 DSML ——
+ * 而插件此前完全不认识它 ⇒ 整段标记原样进入 text ⇒ 漏进 DSH 对话。
+ *
+ * ## 处理
+ *
+ * - 整块 DSML 调用**删掉**：它描述的是模型想调用的工具，插件执行不了
+ *   （工具由 DSH 执行，插件只负责把 ```ldw 围栏交给 DSH 解析）
+ * - 散落的单个 DSML 标签也删掉
+ * - 返回剥离计数，便于在诊断里观察出现频率
+ */
+function stripDsml(reply: string): { text: string; stripped: number } {
+  let stripped = 0
+  let out = reply
+  /** 整块：<｜…tool_calls…｜> … <｜/…tool_calls…｜> */
+  const block = /<｜[^｜\n]*tool_calls[^｜\n]*｜>[\s\S]*?<｜\/[^｜\n]*tool_calls[^｜\n]*｜>/gi
+  out = out.replace(block, () => {
+    stripped += 1
+    return ''
+  })
+  /** 散落的单个标签：<｜任意｜> */
+  const tag = /<｜[^｜\n]{1,40}｜>/g
+  out = out.replace(tag, () => {
+    stripped += 1
+    return ''
+  })
+  return { text: out, stripped }
+}
+
 export function parseToolCalls(reply: string, tools: ToolSchema[]): ParseResult {
   const byName = new Map(tools.map((t) => [t.name, t]))
   const calls: ParsedCall[] = []
   const failed: string[] = []
   let text = ''
-  let rest = reply
+  /**
+   * ⭐ 先剥离 DSML —— 模型有时会用网页版原生的工具调用语法而不是我们的
+   * ```ldw 围栏。不剥的话整段标记会漏进可见回复（用户实测报过）。
+   */
+  const dsml = stripDsml(reply)
+  if (dsml.stripped > 0) {
+    failed.push(`（已剥离 ${dsml.stripped} 处 DSML 工具标记 —— 模型用了网页版原生语法，插件无法执行）`)
+  }
+  let rest = dsml.text
 
   for (;;) {
     // 找 ```ldw 开围栏

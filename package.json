@@ -1,6 +1,6 @@
 {
   "name": "dsh-webin",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Unofficial DSH plugin: drive chat.deepseek.com in a REAL browser (DSH webview guest) — real login, real typing, real send, reply captured from the page. Works as a DSH model provider (LDW).",
   "type": "module",
   "main": "./lib/index.js",

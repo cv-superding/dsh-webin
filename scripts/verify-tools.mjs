@@ -408,7 +408,48 @@ console.log('\n[13] 序列化往返：工具调用历史 → 文本 → 模型�
   check('含工具结果', s.includes('【工具结果】') && s.includes('文件内容在这里'), true)
 }
 
-console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
+console.log('\n[?] ⭐⭐⭐ DSML 标记必须被剥离（用户实测：DSML 漏进对话）')
+{
+  /**
+   * ## 用户实测
+   *
+   * 「DSML 怎么也出来了？」—— 回复里整段漏出了网页版的**原生工具调用语法**
+   * （标签名用全角竖线 ｜ (U+FF5C) 包裹）。
+   *
+   * 插件用的是自己的 ```ldw 围栏协议，但模型有时会改用网页版原生的 DSML，
+   * 而插件此前完全不认识它 ⇒ 整段标记原样进入可见回复。
+   *
+   * 判据：整块调用删掉、散落标签删掉、**正文必须保留**。
+   */
+  const BAR = '\uFF5C'
+  const open = `<${BAR}tool_calls${BAR}>`
+  const close = `<${BAR}/tool_calls${BAR}>`
+  const invoke = `<${BAR}invoke name="write"${BAR}>x<${BAR}/invoke${BAR}>`
+
+  /** 整块调用 ⇒ 整块消失，前后正文保留。 */
+  const r1 = parseToolCalls(`开头\n${open}\n${invoke}\n${close}\n结尾`, TOOLS)
+  check('⭐⭐ 整块 DSML 被删掉', r1.text.includes('tool_calls'), false)
+  check('⭐⭐ 正文开头保留', r1.text.startsWith('开头'), true)
+  check('⭐⭐ 正文结尾保留', r1.text.endsWith('结尾'), true)
+
+  /** 散落标签也删。 */
+  const r2 = parseToolCalls(`结果：${open}`, TOOLS)
+  check('⭐ 散落标签被删掉', r2.text.includes('tool_calls'), false)
+
+  /** 正常文本**不许**被改动。 */
+  const r3 = parseToolCalls('没有任何标记的普通回复', TOOLS)
+  check('⭐⭐ 正常文本不被改动', r3.text, '没有任何标记的普通回复')
+
+  /** 剥离时要留下诊断，便于观察出现频率。 */
+  const r4 = parseToolCalls(`${open}\n${close}\n正文`, TOOLS)
+  check('⭐ 剥离时留诊断', r4.failed.some((f) => f.includes('DSML')), true)
+
+  /** 围栏协议不受影响（两条路径互不干扰）。 */
+  const r5 = parseToolCalls('```ldw\nawait read({path: "a.ts"});\n```', TOOLS)
+  check('⭐⭐ 围栏协议不受影响', r5.calls.length, 1)
+}
+
+
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
 process.exit(process.exitCode)

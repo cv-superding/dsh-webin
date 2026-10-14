@@ -259,9 +259,15 @@ console.log('\n[11] ⭐ 交付路径一定带 jobId 与 via=dom')
    */
   const jobIdAt = clientSrc.search(/const jobId = pendingJobRef\.current!/)
   const resultAt = jobIdAt < 0 ? -1 : clientSrc.indexOf('api/job/${jobId}/result', jobIdAt)
+  /**
+   * ⚠️ 上界再放宽到 60000 —— 这个窗口已经因为功能增长被迫放宽三次
+   * （4000 → 9000 → 20000 → 本次）。注释自己都写了「固定窗口是这类断言的
+   * 固有脆弱点」。真正要保的是**顺序**（POST 用的必须是刚读到的那个 jobId），
+   * 上界只用来防「匹配到别的 result 调用」，给足余量即可。
+   */
   check(
     `交付前先取 jobId（jobId@${jobIdAt} → result@${resultAt}，距离 ${resultAt - jobIdAt}）`,
-    jobIdAt >= 0 && resultAt > jobIdAt && resultAt - jobIdAt < 20_000,
+    jobIdAt >= 0 && resultAt > jobIdAt && resultAt - jobIdAt < 60_000,
     true,
   )
   /** 交付时要带上页面 URL（host 靠它绑定会话↔对话）。 */
