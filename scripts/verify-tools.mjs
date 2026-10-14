@@ -227,8 +227,20 @@ console.log('\n[2] 协议指令（核心：不做转义）')
   check('含 ```ldw 围栏', TOOL_PROTOCOL.includes('```ldw'), true)
   check('明确要求 JSON 对象参数', TOOL_PROTOCOL.includes('JSON 对象'), true)
   check('⭐ 明确禁止转义', /不要做任何转义/.test(TOOL_PROTOCOL), true)
-  check('明确禁止 JSON 格式调用', TOOL_PROTOCOL.includes('不要输出 JSON 格式的工具调用'), true)
+  /**
+   * ## ⚠️ 这条断言原来钉的是旧文案，而且**钉得太松**
+   *
+   * 原来只要求出现「不要输出 JSON 格式的工具调用」和「XML/HTML」——
+   * 而**没要求点名 DSML**，所以模型照旧吐 DSML 标记、整段漏进对话。
+   *
+   * 读 cuckoo 后发现：它**根本没有剥离 DSML 的代码**，靠的是**提示词从源头禁止**。
+   * 所以这里改为要求**点名 DSML** —— 这是真正的防线，剥离只是安全网。
+   */
+  check('⭐⭐ 明确禁止 JSON 格式调用', TOOL_PROTOCOL.includes('JSON 形式的工具调用'), true)
+  check('⭐⭐ 点名禁止 DSML 标记', TOOL_PROTOCOL.includes('DSML'), true)
   check('禁止 XML/HTML 标记', TOOL_PROTOCOL.includes('XML/HTML'), true)
+  /** 要说清「不会被识别、只会原样显示」，模型才会当回事。 */
+  check('⭐ 说明后果（不会被识别）', TOOL_PROTOCOL.includes('不会被识别'), true)
   check('一次只调一个', TOOL_PROTOCOL.includes('一次只调一个工具'), true)
   /**
    * 围栏名必须保持中性的 `ldw`。
@@ -421,10 +433,16 @@ console.log('\n[?] ⭐⭐⭐ DSML 标记必须被剥离（用户实测：DSML �
    *
    * 判据：整块调用删掉、散落标签删掉、**正文必须保留**。
    */
+  /**
+   * ⚠️ 真实格式是「**双**竖线 + DSML 字样」—— 第一版按单竖线写正则**匹配不上**，
+   * 标记照旧漏出（用户第二次截图才看清）。所以两种形态都要覆盖。
+   */
   const BAR = '\uFF5C'
-  const open = `<${BAR}tool_calls${BAR}>`
-  const close = `<${BAR}/tool_calls${BAR}>`
-  const invoke = `<${BAR}invoke name="write"${BAR}>x<${BAR}/invoke${BAR}>`
+  const DBL = `<${BAR}${BAR}DSML${BAR}${BAR}`
+  const SGL = `<${BAR}`
+  const open = `${DBL}tool_calls>`
+  const close = `${DBL}/tool_calls>`
+  const invoke = `${DBL}invoke name="write">x${DBL}/invoke>`
 
   /** 整块调用 ⇒ 整块消失，前后正文保留。 */
   const r1 = parseToolCalls(`开头\n${open}\n${invoke}\n${close}\n结尾`, TOOLS)
@@ -447,6 +465,16 @@ console.log('\n[?] ⭐⭐⭐ DSML 标记必须被剥离（用户实测：DSML �
   /** 围栏协议不受影响（两条路径互不干扰）。 */
   const r5 = parseToolCalls('```ldw\nawait read({path: "a.ts"});\n```', TOOLS)
   check('⭐⭐ 围栏协议不受影响', r5.calls.length, 1)
+
+  /** ⭐ 单竖线形态也要剥（第一版就是漏了它）。 */
+  const r6 = parseToolCalls(`x\n${SGL}tool_calls${BAR}>\n${SGL}/tool_calls${BAR}>\ny`, TOOLS)
+  check('⭐⭐ 单竖线形态也剥掉', r6.text.includes('tool_calls'), false)
+
+  /** ⭐⭐ 不许误伤普通 HTML / 尖括号 —— 剥离判据最危险的方向。 */
+  const r7 = parseToolCalls('<div>内容</div> <p>段落</p>', TOOLS)
+  check('⭐⭐ HTML 标签不误伤', r7.text, '<div>内容</div> <p>段落</p>')
+  const r8 = parseToolCalls('a < b 且 c > d', TOOLS)
+  check('⭐⭐ 普通尖括号不误伤', r8.text, 'a < b 且 c > d')
 }
 
 

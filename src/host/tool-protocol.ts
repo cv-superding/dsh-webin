@@ -120,7 +120,19 @@ export const TOOL_PROTOCOL = [
   '规则：',
   '1. 参数写成 **JSON 对象**：`await 工具名({"参数名": 值})`。',
   '2. **多行文本用反引号模板字符串，直接换行，不要做任何转义**（不要写 \\n）。',
-  '3. 不要输出 JSON 格式的工具调用，不要用 XML/HTML 标记包裹。',
+  /**
+   * ⚠️ 这条按 **cuckoo 的提示词**加固过。
+   *
+   * cuckoo 在 system prompt 里写得很明确：「不要输出 JSON 格式的工具调用，
+   * 也不要对字符串做 JSON 转义」，并且给了「输出前自查清单」。
+   * 而本插件原来只写「不要用 XML/HTML 标记包裹」—— **太笼统**，
+   * 模型照样吐网页版原生的 DSML 标记（用户实测整段漏进对话）。
+   *
+   * 所以这里点名 DSML：**在源头禁止**，比事后剥离可靠。
+   */
+  '3. **只用上面这一种格式**。不要输出 DSML 标记、XML/HTML 标签、或 JSON 形式的工具调用',
+  '   —— 那些形式**不会被识别**，只会原样显示给用户（看起来像乱码）。',
+  '   也不要对字符串做 JSON 转义。',
   '4. 一次只调一个工具；等结果回来再决定下一步。',
   '5. 不要编造工具名或参数名；不确定就先用 `read` 或 `pwsh` 查。',
   '6. 不需要工具时，直接用普通文字回答，**不要**输出代码块。',
@@ -432,18 +444,42 @@ function positionalToObject(schema: ToolSchema | undefined, body: string): strin
 function stripDsml(reply: string): { text: string; stripped: number } {
   let stripped = 0
   let out = reply
-  /** 整块：<｜…tool_calls…｜> … <｜/…tool_calls…｜> */
-  const block = /<｜[^｜\n]*tool_calls[^｜\n]*｜>[\s\S]*?<｜\/[^｜\n]*tool_calls[^｜\n]*｜>/gi
+  /**
+   * ## Real DSML format: DOUBLE full-width bar + the literal token DSML
+   *
+   * The first version matched `<|<|tool_calls>`-style markup with a SINGLE bar
+   * and no DSML token -- so it never matched and the markup kept leaking into
+   * the conversation (only the user's second screenshot revealed the real shape):
+   *
+   *     <||DSML||tool_calls>
+   *     <||DSML||invoke name="write">
+   *     <||DSML||parameter name="path">...</||DSML||parameter>
+   *
+   * So the pattern is: an opening angle bracket, 1-3 bars, optional DSML token,
+   * 1-3 bars, then a tag name, then a closing angle bracket.
+   */
+  const BAR = String.fromCharCode(0xff5c);
+  /**
+   * 形态容错：`<` 之后允许「任意数量的竖线 / DSML 字样」，但**至少要有一个竖线**。
+   *
+   * 上一版写成「两组竖线夹一个可选 DSML」—— 那样只匹配双竖线形态，
+   * **单竖线形态（`<|tool_calls|>`）匹配不上**（实测确认）。
+   *
+   * 同时「至少一个竖线」这个约束不能丢：否则 `<div>` 也会被当成 DSML 吃掉。
+   */
+  const OPEN = '<(?:DSML|[' + BAR + '|])*[' + BAR + '|](?:DSML|[' + BAR + '|])*';
+  /** Whole tool-call block: from <..calls..> through <../..calls..>. */
+  const block = new RegExp(OPEN + '[^>]*tool_calls[^>]*>[\\s\\S]*?' + OPEN + '\\/[^>]*tool_calls[^>]*>', 'gi');
   out = out.replace(block, () => {
-    stripped += 1
-    return ''
-  })
-  /** 散落的单个标签：<｜任意｜> */
-  const tag = /<｜[^｜\n]{1,40}｜>/g
+    stripped += 1;
+    return '';
+  });
+  /** Stray single tags: <..anything..>. */
+  const tag = new RegExp(OPEN + '[^>]{0,60}>', 'g');
   out = out.replace(tag, () => {
-    stripped += 1
-    return ''
-  })
+    stripped += 1;
+    return '';
+  });
   return { text: out, stripped }
 }
 
