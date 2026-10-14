@@ -342,9 +342,34 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
        * 宁可把「疑似思考」放进 think（显示在思考区，不污染正文），
        * 也不要反过来 —— 正文里混进思考是用户反复报过的症状。
        */
-      var kind = thinkingEnabled === true ? 'think' : 'text';
-      if (kind === 'think') think += piece;
-      else text += piece;
+      /**
+       * ## 必须按围栏切开，不能整段归 think（我上一版就是这么错的）
+       *
+       * 上一版把孤儿整段归给 think —— 用户实测：思考完整了，但正文空了。
+       * 因为孤儿里**同时**装着思考和一个工具调用（ldw 围栏），整段归 think
+       * 就把围栏一起吞了，正文与工具调用全丢。
+       *
+       * 归属规则：
+       *   - 围栏**之前**的部分（若有）归 think（开了思考时）
+       *   - 围栏**起始**处及其后一律归 text（那里是工具调用 / 正文）
+       *   - 没有围栏时才整段按 thinkingEnabled 归属
+       *
+       * 注意：本注释在模板字符串内部，不能出现反引号。
+       */
+      /** 反引号用 fromCharCode 拼 —— 本代码在模板内部，字面反引号会终止模板。 */
+      var TICK = String.fromCharCode(96);
+      var fenceAt = piece.search(new RegExp(TICK + '{3}[ \\t]*ldw[ \\t]*\\r?\\n', 'i'));
+      if (fenceAt > 0 && thinkingEnabled === true) {
+        think += piece.slice(0, fenceAt);
+        text += piece.slice(fenceAt);
+      } else if (fenceAt === 0) {
+        /** 开头就是围栏 —— 纯工具调用，全部归正文。 */
+        text += piece;
+      } else {
+        var kind = thinkingEnabled === true ? 'think' : 'text';
+        if (kind === 'think') think += piece;
+        else text += piece;
+      }
     }
 
     /** 把一段文本按当前 fragment 类型分流。 */

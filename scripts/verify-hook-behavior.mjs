@@ -371,5 +371,56 @@ console.log('\n[6] ⭐⭐⭐ 孤儿文本的**兜底归属**（本轮修掉的�
   }
 }
 
+console.log('\n[7] ⭐⭐⭐ 孤儿含工具调用时，必须**按围栏切开**（我上一版引入的回归）')
+{
+  /**
+   * ## 用户实测
+   *
+   * 「这次啥也没输出，就只有思考的内容」—— 思考完整了，**正文空了**。
+   *
+   * ## 根因（我 v0.2.17 引入的回归）
+   *
+   * v0.2.17 把孤儿文本**整段**归给 think。而那个孤儿里**同时**装着思考和一个
+   * 工具调用（ldw 围栏）—— 整段归 think 就把围栏一起吞了，**正文与工具调用全丢**。
+   *
+   * ## 正确归属
+   *
+   *   - 围栏**之前**的部分（若有）归 think
+   *   - 围栏**起始**处及其后一律归 text
+   *   - 没有围栏时才整段按 thinkingEnabled 归属
+   */
+  const frame = (obj) => `data: ${JSON.stringify(obj)}\n\n`
+  const F = String.fromCharCode(96).repeat(3)
+
+  /** ① 孤儿 = 思考 + 围栏工具调用 ⇒ 必须切开。 */
+  {
+    const sse =
+      frame({ v: '先想一下怎么写。\n' + F + 'ldw\nawait write({path:"a.html",content:"x"});\n' + F }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+    const h = bootHook(() => makeResponse(sse))
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":true}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    const text = done?.detail?.text ?? ''
+    const think = done?.detail?.think ?? ''
+    check('⭐⭐⭐ 围栏部分进了正文', text.includes('await write'), true)
+    check('⭐⭐⭐ 围栏前的话进了思考', think.includes('先想一下'), true)
+    check('⭐⭐⭐ 围栏没被吞进思考', think.includes('await write'), false)
+  }
+
+  /** ② 孤儿全是思考（无围栏）⇒ 归 think。 */
+  {
+    const sse =
+      frame({ v: '纯思考，没有工具调用' }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+    const h = bootHook(() => makeResponse(sse))
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":true}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    check('⭐⭐ 无围栏 ⇒ 整段归思考', (done?.detail?.think ?? '').includes('纯思考'), true)
+    check('⭐⭐ 无围栏 ⇒ 正文为空', (done?.detail?.text ?? ''), '')
+  }
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
