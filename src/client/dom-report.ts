@@ -183,7 +183,7 @@ export function buildDomReportScript(needle: string): string {
         var dc = '';
         try { dc = String(allDs[di].className || ''); } catch (e) { dc = ''; }
         if (typeof dc !== 'string') continue;
-        var parts2 = dc.split(/\s+/);
+        var parts2 = dc.split(/\\s+/);
         for (var pi = 0; pi < parts2.length; pi++) {
           if (parts2[pi].indexOf('ds-') !== 0) continue;
           seenDs[parts2[pi]] = (seenDs[parts2[pi]] || 0) + 1;

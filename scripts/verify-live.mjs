@@ -167,11 +167,26 @@ console.log('\n[6] 活体检查：对运行中的 host 打真实请求（只报�
     console.log('  ⚠️  host 不可达（DSH 没在跑？）:', ver.error)
   } else {
     console.log(`  运行中的版本: v${ver.body.version} · ${ver.body.commit} · 构建于 ${ver.body.builtAt}`)
-    const { execSync } = await import('node:child_process')
-    const head = execSync('git rev-parse --short HEAD', { encoding: 'utf8', cwd: ROOT }).trim()
-    console.log(`  当前 HEAD  : ${head}`)
-    if (ver.body.commit !== head) {
-      console.log(`  ⚠️  运行中的提交与 HEAD 不一致 —— **host 半需要重启 DSH 才生效**`)
+    /**
+     * ⚠️ 用 `spawnSync('git', [...])` 而**不是** `execSync('git ...')`。
+     *
+     * `execSync` 在 Windows 上会经 `cmd.exe` 解析执行（Node 的 shell 层），
+     * 于是平白多出一个 `cmd.exe` 依赖：受限环境（沙箱 / 组策略拉黑 cmd.exe）
+     * 会直接抛 `spawnSync cmd.exe EBUSY`，而这个脚本只是想读一个提交号。
+     *
+     * 参数固定时本来就不需要 shell —— 免掉它更快，也没有引号转义问题。
+     * 顺带把「git 不可用」处理成跳过比对，而不是整个脚本崩掉。
+     */
+    const { spawnSync } = await import('node:child_process')
+    const git = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8', cwd: ROOT })
+    const head = git.status === 0 ? String(git.stdout).trim() : ''
+    if (head === '') {
+      console.log('  当前 HEAD  : (读不到 —— 跳过一致性比对)')
+    } else {
+      console.log(`  当前 HEAD  : ${head}`)
+      if (ver.body.commit !== head) {
+        console.log(`  ⚠️  运行中的提交与 HEAD 不一致 —— **host 半需要重启 DSH 才生效**`)
+      }
     }
 
     const st = await api('/dsh-webin/api/status')

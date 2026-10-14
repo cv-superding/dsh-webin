@@ -248,12 +248,20 @@ console.log('\n[11] ⭐ 交付路径一定带 jobId 与 via=dom')
   check('交结果带 via=dom', /via: 'dom'/.test(clientSrc), true)
   check('交结果用当前 jobId', /api\/job\/\$\{jobId\}\/result/.test(clientSrc), true)
   /**
-   * ⚠️ 窗口从 4000 放宽到 9000 —— 中间加了抓取诊断（决策轨迹）后
-   * 两处距离变远，原窗口会误报（断言窗口太小是常见误报源，踩过）。
+   * ⚠️ 判据是**顺序**，不是字符距离。
+   *
+   * 这个窗口已经因为功能增长被迫放宽两次（4000 → 9000 → 本次 20000）：
+   * 中间夹着抓取诊断（决策轨迹）等大段代码，距离只会继续涨 ——
+   * 固定窗口是这类断言的固有脆弱点。
+   *
+   * 改成「先读 jobId，再 POST 结果」的顺序断言 + 一个宽松上界：
+   * 保住原意（POST 用的必须是刚读到的那个 jobId），又不再随代码增长误报。
    */
+  const jobIdAt = clientSrc.search(/const jobId = pendingJobRef\.current!/)
+  const resultAt = jobIdAt < 0 ? -1 : clientSrc.indexOf('api/job/${jobId}/result', jobIdAt)
   check(
-    '交付前先取 jobId',
-    /const jobId = pendingJobRef\.current![\s\S]{0,9000}?api\/job\/\$\{jobId\}\/result/.test(clientSrc),
+    `交付前先取 jobId（jobId@${jobIdAt} → result@${resultAt}，距离 ${resultAt - jobIdAt}）`,
+    jobIdAt >= 0 && resultAt > jobIdAt && resultAt - jobIdAt < 20_000,
     true,
   )
   /** 交付时要带上页面 URL（host 靠它绑定会话↔对话）。 */

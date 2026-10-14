@@ -39,6 +39,22 @@ const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
  * ⚠️ 边界不能只靠花括号配对（函数体里有含花括号的字符串字面量），
  * 用「编译验证」找第一个能编译的结束点。
  */
+/**
+ * ⚠️ **模板层反转义** —— 抠出来的源码比真正的注入脚本多一层转义。
+ *
+ * `createExtractor` 这些函数位于 `buildDeepSeekHook` 的**模板字符串内部**，
+ * 产物里存的是模板的**源码**：生成脚本里的一个反斜杠，在这里写作两个。
+ * 直接 `new Function` 求值会把两个反斜杠当成「转义反斜杠」，
+ * 于是正则提前结束 ⇒ `Invalid regular expression flags`
+ * （真实事故：hook.ts 里把转义修对之后，本测试反而红了）。
+ *
+ * 所以求值前先反转义一层：两个反斜杠 ⇒ 一个。
+ * 这对字符串里的反斜杠同样正确 —— 模板源码总是比生成代码多一层。
+ */
+function unescapeTemplateLayer(text) {
+  return text.replace(/\\\\/g, '\\')
+}
+
 function extractCreateExtractor(bundle) {
   const m = bundle.match(/function createExtractor\(\)\s*\{/)
   if (m === null) throw new Error('产物里找不到 createExtractor —— 先跑 npm run build')
@@ -69,7 +85,7 @@ function extractCreateExtractor(bundle) {
       if (bundle[i] === '{') d += 1
       else if (bundle[i] === '}') {
         d -= 1
-        if (d === 0) return bundle.slice(from, i + 1)
+        if (d === 0) return unescapeTemplateLayer(bundle.slice(from, i + 1))
       }
     }
     throw new Error('cut 失败')

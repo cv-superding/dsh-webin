@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
- *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
- *   - `buildTriggerScript` 只点发送
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
+ *   - `buildFillScript`    只填输入框  → 断言 `stage === 'filled'`
+ *   - 客户端 `setTimeout`  延迟        → 本脚本用固定 400ms
+ *   - `buildTriggerScript` 只点发送    → 断言 `ok === true`
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**，不在 `npm run check` 链里，
+ * 属手动集成测试。
  */
 
 /**
@@ -157,7 +155,8 @@ async function main() {
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
   const buildRestoreScript = load(bundle, /function buildRestoreScript\(/, 'buildRestoreScript')
   const buildDeepSeekHook = load(bundle, /function buildDeepSeekHook\(/, 'buildDeepSeekHook')
-  const buildSendScript = load(bundle, /function buildSendScript\(/, 'buildSendScript')
+  const buildFillScript = load(bundle, /function buildFillScript\(/, 'buildFillScript')
+  const buildTriggerScript = load(bundle, /function buildTriggerScript\(/, 'buildTriggerScript')
   const buildDrainScript = load(bundle, /function buildDrainScript\(/, 'buildDrainScript')
 
   const hints = {
@@ -233,10 +232,19 @@ async function main() {
     const sendAndWait = async (prompt) => {
       await cdp.eval(strip(buildDeepSeekHook('/api/v0/chat/completion', '/api/v0/chat/stop_stream')))
       const before = Date.now()
-      const sent = JSON.parse(
-        String(await cdp.eval(`Promise.resolve(${strip(buildSendScript(prompt, 400, hints))}).then(r=>r)`)),
+      /** 三段式：填充 → 延迟 → 触发（旧 buildSendScript 已删除，见文件头）。 */
+      const filled = JSON.parse(
+        String(await cdp.eval(`Promise.resolve(${strip(buildFillScript(prompt, hints))}).then(r=>r)`)),
       )
-      if (sent.stage !== 'sent') return { url: '', text: `send-failed: ${sent.stage}` }
+      if (filled.stage !== 'filled') return { url: '', text: `fill-failed: ${filled.stage}` }
+      /** 客户端延迟 —— 真插件里是随机区间（避免被风控），这里固定 400ms 足够。 */
+      await sleep(400)
+      const trig = JSON.parse(
+        String(await cdp.eval(`Promise.resolve(${strip(buildTriggerScript(hints, prompt))}).then(r=>r)`)),
+      )
+      if (trig.ok !== true) {
+        return { url: '', text: `send-failed: ${trig.reason ?? trig.message ?? 'unknown'}` }
+      }
       const dl = Date.now() + 120_000
       while (Date.now() < dl) {
         const raw = String(await cdp.eval(strip(buildDrainScript())))

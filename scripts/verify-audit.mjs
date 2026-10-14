@@ -373,11 +373,19 @@ console.log('\n[Q] ⭐⭐ 点火前必须复查（填完字到按发送之间隔
   /** ⚠️ 复查必须在触发**之前**。 */
   const iProbe = clientSrc.indexOf('点火前发现任务已取消')
   /**
-   * ⚠️ 现在 trigger 调用是**多行**的（多了 expectText 参数）——
-   * 用只匹配函数名的前缀，别把参数写死（踩过：加了参数后匹配不到）。
+   * ⚠️ 必须锚到**主发送路径**的那次触发调用。
+   *
+   * 只用 `buildTriggerScript(sendHintsFor(provider)` 这个前缀会命中最前面的
+   * **「催继续」路径**（它在源码里出现得更早），于是 `iProbe < iTrig`
+   * 恒为 false —— 纯误报（真实事故：断言看着红，主路径时序其实是对的）。
+   * 带上 `, prompt` 参数才能锚到主路径。
    */
-  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider)')
-  check('⭐ 复查在触发之前', iProbe > 0 && iTrig > 0 && iProbe < iTrig, true)
+  const iTrig = clientSrc.indexOf('buildTriggerScript(sendHintsFor(provider), prompt)')
+  check(
+    `⭐ 复查在触发之前（复查@${iProbe} 触发@${iTrig}）`,
+    iProbe > 0 && iTrig > 0 && iProbe < iTrig,
+    true,
+  )
 }
 
 console.log('\n[R] ⭐⭐ host 侧：已取消的任务不能被结果「复活」')

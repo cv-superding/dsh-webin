@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
- *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
- *   - `buildTriggerScript` 只点发送
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
+ *   - `buildFillScript`    只填输入框  → 断言 `stage === 'filled'`
+ *   - 客户端 `setTimeout`  延迟        → 本脚本用固定 500ms
+ *   - `buildTriggerScript` 只点发送    → 断言 `ok === true`
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**，不在 `npm run check` 链里，
+ * 属手动集成测试。
  */
 
 /**
@@ -189,7 +187,8 @@ async function main() {
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
   const buildRestoreScript = loadFn(bundle, /function buildRestoreScript\(/, 'buildRestoreScript')
   const buildDeepSeekHook = loadFn(bundle, /function buildDeepSeekHook\(/, 'buildDeepSeekHook')
-  const buildSendScript = loadFn(bundle, /function buildSendScript\(/, 'buildSendScript')
+  const buildFillScript = loadFn(bundle, /function buildFillScript\(/, 'buildFillScript')
+  const buildTriggerScript = loadFn(bundle, /function buildTriggerScript\(/, 'buildTriggerScript')
   const buildDrainScript = loadFn(bundle, /function buildDrainScript\(/, 'buildDrainScript')
 
   const browser = findBrowser()
@@ -327,12 +326,27 @@ async function main() {
       ],
       vetoes: ['ds-toggle-button', 'ds-button--capsule'],
     }
-    const sent = JSON.parse(
-      String(await cdp.eval(`Promise.resolve(${strip(buildSendScript(PROMPT, 500, hints))}).then(r=>r)`)),
+    /** 三段式：填充 → 延迟 → 触发（旧 buildSendScript 已删除，见文件头）。 */
+    const filled = JSON.parse(
+      String(await cdp.eval(`Promise.resolve(${strip(buildFillScript(PROMPT, hints))}).then(r=>r)`)),
     )
-    check('发送成功（stage=sent）', sent.stage, 'sent')
-    check('requestSent 铁证', sent.signals?.requestSent, true)
-    console.log(`       stage=${sent.stage} how=${sent.how} signals=${JSON.stringify(sent.signals)}`)
+    check('填充成功（stage=filled）', filled.stage, 'filled')
+    console.log(`       stage=${filled.stage} how=${filled.how} selector=${filled.selector}`)
+    /** 客户端延迟 —— 真插件里是随机区间（避免被风控），这里固定 500ms 足够。 */
+    await sleep(500)
+    const trig = JSON.parse(
+      String(await cdp.eval(`Promise.resolve(${strip(buildTriggerScript(hints, PROMPT))}).then(r=>r)`)),
+    )
+    check('触发成功（ok=true）', trig.ok, true)
+    /**
+     * ⚠️ 判据从 `signals.requestSent` 改成 `confirmed`。
+     * 「页面真的发出了 completion 请求」这个自证已被插件**主动废弃**
+     * —— 见 README「发送确认判据不可靠 → 改成不确认」。
+     */
+    check('触发被确认（输入框已清空）', trig.confirmed, true)
+    console.log(
+      `       ok=${trig.ok} how=${trig.how} method=${trig.method} confirmed=${trig.confirmed}`,
+    )
 
     console.log('\n[阶段 6] 等回复')
     let done = null

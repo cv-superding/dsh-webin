@@ -235,7 +235,20 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
      */
     function fragmentIndexOf(p) {
       if (typeof p !== 'string') return null;
-      var m = /^response\/fragments\/(-?\d+)\//.exec(p);
+      /**
+       * 正则必须双写反斜杠。
+       *
+       * 这段代码整体位于一个模板字符串里（函数开头那个 return 后面跟的反引号），
+       * 而模板字符串会吃掉一层转义：单写的斜杠转义会退化成裸斜杠，字符类转义
+       * 会退化成普通字母。注入到页面的脚本于是变成非法 JS，页面抛
+       * SyntaxError: Invalid regular expression flags，整个 hook 注入失败
+       * —— SSE 观察这条路径从来没生效过（实测踩到）。
+       *
+       * 本文件里 onAuthRoute 那处就是正确写法的样板（双写反斜杠）。
+       * 注意：本注释本身也在模板字符串里，所以这里不能出现反引号，也不能写
+       * 单反斜杠示例 —— 它们会被模板字符串提前终止或吃掉。
+       */
+      var m = /^response\\/fragments\\/(-?\\d+)\\//.exec(p);
       if (m === null) return null;
       var i = Number(m[1]);
       if (i < 0) {

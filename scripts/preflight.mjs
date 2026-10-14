@@ -26,6 +26,8 @@ const LINKED = join(PROFILE, 'node_modules', 'dsh-webin')
 
 let pass = 0
 let fail = 0
+/** 无法在本环境验证的项（环境限制，既不算通过也不算失败）。 */
+let skip = 0
 const check = (name, ok, detail) => {
   if (ok) {
     pass += 1
@@ -156,22 +158,58 @@ if (existsSync(libClient)) {
    * 构建被中断的来源：npm run check 跑到一半被打断（构建是第一环）。
    * 所以这里用 node --check 逐个验证语法。
    */
-  const { execSync } = await import('node:child_process')
+  /**
+   * ⚠️ 用 `spawnSync(process.execPath, [...])` 而**不是** `execSync('node --check ...')`。
+   *
+   * `execSync` 在 Windows 上会经 `cmd.exe` 解析执行，于是平白多出一个
+   * `cmd.exe` 依赖：受限环境（沙箱 / 组策略拉黑 cmd.exe）会直接抛
+   * `spawnSync cmd.exe EBUSY`，而这里只是想验一个文件的语法。
+   *
+   * 参数固定时不需要 shell；用 `process.execPath` 还免掉了 PATH 查找 ——
+   * 校验的是「当前这个 node」能否解析产物，语义也更准确。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const vm = await import('node:vm')
   for (const f of [libClient, join(SRC, 'lib', 'index.js')]) {
-    let ok = false
-    let detail = ''
-    try {
-      execSync(`node --check "${f}"`, { stdio: 'pipe' })
-      ok = true
-    } catch (e) {
-      detail = String(e.stderr ?? e.message).slice(0, 120)
+    const name = f.split(/[\\/]/).pop()
+    const r = spawnSync(process.execPath, ['--check', f], { encoding: 'utf8' })
+    if (r.status === 0) {
+      check(`语法完整 ${name}`, true, true)
+      continue
     }
-    check(`语法完整 ${f.split(/[\\/]/).pop()}`, ok, true)
-    if (!ok) console.log(`       ${detail}`)
+    if (r.error === undefined) {
+      check(`语法完整 ${name}`, false, `--check 报错：${String(r.stderr ?? '').slice(0, 110)}`)
+      continue
+    }
+    /**
+     * ## 子进程起不来 = 环境问题，不是产物问题
+     *
+     * 受限环境（沙箱 / 组策略禁止创建进程）里 `spawnSync` 直接抛
+     * `EBUSY` / `EPERM`。这种情况**不能报 FAIL** —— 产物可能是好的，
+     * 报红只会让人去查一个不存在的构建缺陷。
+     *
+     * 退回**进程内解析**：`vm.Script` 只编译、不执行，足以验语法。
+     * ESM 形态没法在进程内只解析（`vm.SourceTextModule` 需要
+     * `--experimental-vm-modules`），那种情况如实报 **SKIP**，不假装通过。
+     */
+    try {
+      new vm.Script(readFileSync(f, 'utf8'), { filename: f })
+      pass += 1
+      console.log(`  OK   ${name}（进程内解析 —— 子进程不可用：${r.error.code}）`)
+    } catch (e) {
+      if (String(e?.message ?? '').includes('Cannot use import statement')) {
+        skip += 1
+        console.log(`  SKIP ${name}（ESM 无法进程内只解析，且子进程不可用：${r.error.code}）`)
+      } else {
+        check(`语法完整 ${name}`, false, String(e?.message ?? '').slice(0, 110))
+      }
+    }
   }
 }
 
-console.log(`\n=== 装配预检：${pass} 通过 / ${fail} 失败 ===`)
+console.log(
+  `\n=== 装配预检：${pass} 通过 / ${fail} 失败${skip > 0 ? ` / ${skip} 跳过（环境限制）` : ''} ===`,
+)
 if (fail === 0) {
   console.log('\nprofile 侧已就绪 —— 重启 DSH 后新 host 半会直接生效。')
 }

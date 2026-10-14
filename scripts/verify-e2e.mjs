@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * ⚠️ **本脚本尚未适配发送流程重构（2026-10-13）**
+ * ✅ **已适配三段式发送（2026-10-13 重构）**
  *
- * 它引用的 `buildSendScript()` **已被删除** —— 那个函数把
- * 「填充 → 等 2.4s → 校验 → 重试」全塞进一次 executeJavaScript，
- * 是跨进程调用，页面一导航就整体死掉（宿主永远等）。
+ * 原先的 `buildSendScript()` 已删除 —— 它把「填充 → 等 2.4s → 校验 → 重试」
+ * 全塞进一次 executeJavaScript，是跨进程调用，页面一导航就整体死掉（宿主永远等）。
  *
- * 现在拆成三段（见 `src/client/chat.ts`）：
- *   - `buildFillScript`    只填输入框
- *   - 客户端 `setTimeout`  随机延迟
- *   - `buildTriggerScript` 只点发送
+ * 现在按真实链路走三段（见 `src/client/chat.ts`）：
+ *   - `buildFillScript`    只填输入框  → 断言 `stage === 'filled'`
+ *   - 客户端 `setTimeout`  延迟        → 本脚本用固定 500ms
+ *   - `buildTriggerScript` 只点发送    → 断言 `ok === true`
  *
- * 要跑本探针，请先把里面的 `buildSendScript(...)` 换成
- * `buildTriggerScript(...)`（参数也变了：不再收 text / delayMs）。
- * 替换后行为需要**真浏览器**验证，所以没有自动改动。
+ * ⚠️ 本脚本需要**真浏览器 + 联网 + 已登录**（CDP 驱动平台首页），
+ * 因此不在 `npm run check` 链里，属手动集成测试。
  */
 
 /**
@@ -137,7 +135,14 @@ class Cdp {
   async eval(expression) {
     const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
     if (r.exceptionDetails !== undefined) {
-      throw new Error(`页面异常: ${r.exceptionDetails.text}`)
+      /**
+       * ⚠️ 别只取 `exceptionDetails.text` —— 那**只有一个 "Uncaught"**，
+       * 没有类型、没有消息、没有堆栈，页面里任何异常都长得一模一样。
+       * 真正的信息在 `exception.description`（`Error: xxx\n at ...`）。
+       */
+      const d = r.exceptionDetails
+      const detail = d.exception?.description ?? d.exception?.value ?? d.text
+      throw new Error(`页面异常: ${String(detail).split('\n').slice(0, 8).join(' ⏎ ')}`)
     }
     return r.result.value
   }
@@ -161,7 +166,8 @@ async function api(path, init) {
 async function main() {
   const bundle = readFileSync(join(SRC, 'lib', 'client.js'), 'utf8')
   const buildDeepSeekHook = extractFn(bundle, 'buildDeepSeekHook')
-  const buildSendScript = extractFn(bundle, 'buildSendScript')
+  const buildFillScript = extractFn(bundle, 'buildFillScript')
+  const buildTriggerScript = extractFn(bundle, 'buildTriggerScript')
   const buildDrainScript = extractFn(bundle, 'buildDrainScript')
   const buildRestoreScript = extractFn(bundle, 'buildRestoreScript')
 
@@ -316,13 +322,29 @@ async function main() {
     }
     console.log(`    领到任务 ${job.id}（${job.prompt.length} 字符）`)
 
-    // ---- 4) 用真实发送脚本发送 ----
-    const sendR = await cdp.eval(
-      `Promise.resolve(${strip(buildSendScript(job.prompt, 500, hints))}).then(r => r).catch(e => 'ERR:' + e.message)`,
+    // ---- 4) 用真实发送脚本发送（三段式：填充 → 延迟 → 触发）----
+    const fillR = await cdp.eval(
+      `Promise.resolve(${strip(buildFillScript(job.prompt, hints))}).then(r => r).catch(e => 'ERR:' + e.message)`,
     )
-    const sent = JSON.parse(String(sendR))
-    console.log(`[4] 发送: stage=${sent.stage} how=${sent.how}`)
-    console.log(`    signals: ${JSON.stringify(sent.signals)}`)
+    const filled = JSON.parse(String(fillR))
+    console.log(`[4a] 填充: stage=${filled.stage} how=${filled.how}`)
+    if (filled.stage !== 'filled') {
+      console.log(`     填充失败，终止：${String(filled.message ?? '')}`)
+      return
+    }
+    /** 客户端延迟 —— 真插件里是随机区间（避免被风控），这里固定 500ms 足够。 */
+    await sleep(500)
+    const trigR = await cdp.eval(
+      `Promise.resolve(${strip(buildTriggerScript(hints, job.prompt))}).then(r => r).catch(e => 'ERR:' + e.message)`,
+    )
+    const trig = JSON.parse(String(trigR))
+    console.log(
+      `[4b] 触发: ok=${trig.ok} how=${trig.how} method=${trig.method} confirmed=${trig.confirmed}`,
+    )
+    if (trig.ok !== true) {
+      console.log(`     触发失败，终止：${String(trig.message ?? trig.reason ?? '')}`)
+      return
+    }
 
     // ---- 5) 等 hook 抓回复 ----
     console.log('[5] 等回复（最多 150s）…')
@@ -386,7 +408,12 @@ async function main() {
     console.log('\n=== 端到端结论 ===')
     const checks = [
       ['hook 注入成功', hookR === 'installed' || hookR === 'already-installed'],
-      ['发送被确认', sent.stage === 'sent'],
+      /**
+       * ⚠️ 判据从 `sent.stage === 'sent'` 改成 `trig.ok === true`。
+       * 旧的 `sent.signals.requestSent`（「页面真的发出了 completion 请求」）
+       * 已被插件**主动废弃** —— 见 README「发送确认判据不可靠 → 改成不确认」。
+       */
+      ['发送被确认', trig.ok === true],
       ['收到 stream 增量', streams > 0],
       ['收到 done 事件', done !== null],
       ['done 带正文', done !== null && String(done.text ?? '').trim() !== ''],
