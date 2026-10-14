@@ -1648,7 +1648,16 @@ export function LdwHost(): unknown {
             if (at !== 0 && at < sentAtRef.current) continue
 
             if (ev.name === 'done') {
-              const reply = String(ev.detail?.text ?? '')
+              /**
+               * ⭐⭐⭐ **这条路径才是思考泄漏的真凶**（实测：DOM 侧读到的是干净的
+               * 23 字符工具调用，而用户收到的是长思考）。
+               *
+               * hook 的 `done` 事件带 `{text, think}` —— text 里可能混着思考，
+               * 而它先触发、清掉 pending、把 text **原样**交付。所以必须在这里
+               * 也过一遍剔除（与 DOM 路径同一道兜底）。
+               */
+              const replyRaw = String(ev.detail?.text ?? '')
+              const reply = stripThinkFromText(replyRaw, String(ev.detail?.think ?? ''), 'hook')
               if (reply === '') continue
               setLastReply(reply)
               setReplyCount((n) => n + 1)
@@ -1887,6 +1896,57 @@ async function scrapeWithScroll(el: WebviewElement, timeoutMs: number): Promise<
   return execJs<string>(el, buildScrapeScript(), timeoutMs)
 }
 
+/**
+ * ## ⭐⭐⭐ 剔除混进正文的思考（**两条交付路径共用**）
+ *
+ * ## 为什么必须有，而且必须在两处都调
+ *
+ * 真实页面上 `ds-think-content` **嵌套在 `ds-markdown` 内部**（思考是回复的一部分，
+ * 只是折叠显示），所以「正文」里天然可能带着思考。
+ *
+ * ## 用户实测（我前四轮改错了地方）
+ *
+ * 我一直在改 **DOM 抓取**侧的排除（`render` / `readThink`），但 `/status` 的
+ * 抓取诊断显示 DOM 侧读到的是**干净的** 23 字符工具调用 —— 而用户收到的却是
+ * 长长的思考。⇒ **泄漏在 hook 路径上**：hook 的 `done` 事件带着 `{text, think}`，
+ * 它先触发、清掉 pending、把 `text` **原样**交付，而那个 text 里混着思考。
+ *
+ * 所以这道兜底必须**两条路径都调**。
+ *
+ * ## 判据（与页面特征无关）
+ *
+ * `think` 是单独读出来的。若它出现在正文里，说明正文把思考也读进去了 ⇒ 删掉那段。
+ * 先试直接子串；不中再按「逐行」定位（应对换行/缩进差异）。
+ * 只处理足够长的思考（≥ 20 字），避免把正常正文里的短句误删。
+ *
+ * @param text  - 待清洗的正文
+ * @param think - 单独读出来的思考（可能为空）
+ * @param tag   - 日志用的来源标记（`dom` / `hook`）
+ */
+const stripThinkFromText = (text: string, think: string, tag: string): string => {
+  const t = think.trim()
+  if (t.length < 20) return text
+  const at = text.indexOf(t)
+  if (at >= 0) {
+    console.warn(`[dsh-webin] 正文里混进了思考（${tag}），已剔除（直接命中）`, { removed: t.length })
+    return (text.slice(0, at) + text.slice(at + t.length)).trim()
+  }
+  /** 逐行兜底：思考的首行与末行都在正文里 ⇒ 删掉它们之间的区间。 */
+  const tLines = t.split('\n').map((s) => s.trim()).filter((s) => s !== '')
+  const head = tLines[0]
+  const tail = tLines[tLines.length - 1]
+  if (tLines.length >= 2 && head !== undefined && tail !== undefined) {
+    const lLines = text.split('\n')
+    const hi = lLines.findIndex((s) => s.trim() === head)
+    const ti = lLines.findIndex((s, i) => i > hi && s.trim() === tail)
+    if (hi >= 0 && ti > hi) {
+      console.warn(`[dsh-webin] 正文里混进了思考（${tag}），已剔除（逐行命中）`, { from: hi, to: ti })
+      return [...lLines.slice(0, hi), ...lLines.slice(ti + 1)].join('\n').trim()
+    }
+  }
+  return text
+}
+
 const clearPending = () => {
         pendingJobRef.current = undefined
         pendingSinceRef.current = 0
@@ -2096,53 +2156,19 @@ const EARLY_GIVE_UP_MS = 120_000
               const think = typeof scraped.think === 'string' ? scraped.think : ''
 
               /**
-               * ## ⭐⭐⭐ 安全网：正文里混进了思考 ⇒ 剔掉（与类名无关）
+               * ## ⭐⭐⭐ 安全网：正文里混进了思考 ⇒ 剔掉（与页面特征无关）
                *
-               * ## 真实页面结构（hook.ts 里已有注释）
+               * ⚠️ 实现已**收口**到模块级的 `stripThinkFromText`，两条交付路径共用。
                *
-               * `ds-think-content` **嵌套在 `ds-markdown` 内部** —— 思考是回复的
-               * 一部分，只是折叠显示。所以递归渲染正文时很容易把思考一起读进去。
+               * ## 为什么必须收口（本轮最贵的教训）
                *
-               * hook 侧有两层排除（`isThinkNode` 按类名 + 「已思考（用时」折叠条），
-               * 但**都依赖页面特征** —— 类名或文案一变就失效。用户实测：
-               * 思考被当成正文交付到 DSH 对话里。
+               * 「什么算思考 / 怎么剔除」这套判据原来散落在**四处**
+               * （`render` 排除 / `readThink` 定位 / 前缀清理 / 这里的 DOM 兜底），
+               * 每轮只改到一两处 ⇒ 用户连续三轮看到同一个症状。
                *
-               * ## 这里做一道与页面特征无关的兜底
-               *
-               * `think` 是**单独读出来的**（`readThink()`）。若它出现在正文里，
-               * 说明正文把思考也读进去了 ⇒ 直接删掉那段。
-               *
-               * 先试直接子串；不中再按「逐行」定位（应对换行/缩进差异）。
-               * 只处理足够长的思考（≥ 20 字），避免把正常正文里的短句误删。
+               * 现在：hook 路径与 DOM 路径都调**同一个** `stripThinkFromText`。
                */
-              const thinkTrim = think.trim()
-              let lastClean = last
-              if (thinkTrim.length >= 20) {
-                const at = last.indexOf(thinkTrim)
-                if (at >= 0) {
-                  lastClean = (last.slice(0, at) + last.slice(at + thinkTrim.length)).trim()
-                  console.warn('[dsh-webin] 正文里混进了思考，已剔除（直接命中）', {
-                    removed: thinkTrim.length,
-                  })
-                } else {
-                  /** 逐行兜底：思考的首行与末行都在正文里 ⇒ 删掉它们之间的区间。 */
-                  const tLines = thinkTrim.split('\n').map((s) => s.trim()).filter((s) => s !== '')
-                  const head = tLines[0]
-                  const tail = tLines[tLines.length - 1]
-                  if (tLines.length >= 2 && head !== undefined && tail !== undefined) {
-                    const lLines = last.split('\n')
-                    const hi = lLines.findIndex((s) => s.trim() === head)
-                    const ti = lLines.findIndex((s, i) => i > hi && s.trim() === tail)
-                    if (hi >= 0 && ti > hi) {
-                      lastClean = [...lLines.slice(0, hi), ...lLines.slice(ti + 1)].join('\n').trim()
-                      console.warn('[dsh-webin] 正文里混进了思考，已剔除（逐行命中）', {
-                        from: hi,
-                        to: ti,
-                      })
-                    }
-                  }
-                }
-              }
+              const lastClean = stripThinkFromText(last, think, 'dom')
               const count = typeof scraped.count === 'number' ? scraped.count : 0
               /**
                * ⭐ 回复是否停在未闭合围栏里（= 没写完）。抓取脚本算好的，

@@ -518,11 +518,15 @@ console.log('\n[?] ⭐⭐⭐ 正文里混进思考时必须剔除（用户实测
    * 就删掉那段。先试直接子串，不中再按逐行定位。
    */
   const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
-  check('⭐⭐⭐ 有「正文混进思考」的兜底', /正文里混进了思考，已剔除/.test(clientSrc), true)
-  check('⭐⭐ 先试直接子串', /const at = last\.indexOf\(thinkTrim\)/.test(clientSrc), true)
+  /**
+   * ⚠️ 判据已**收口**到模块级的 stripThinkFromText（见本文件最后一组）——
+   * 这里只确认日志存在，具体实现细节由那组断言负责。
+   */
+  check('⭐⭐⭐ 有「正文混进思考」的兜底', /正文里混进了思考/.test(clientSrc), true)
+  check('⭐⭐ 先试直接子串', /const at = text\.indexOf\(t\)/.test(clientSrc), true)
   check('⭐⭐ 不中再逐行定位', /lLines\.findIndex/.test(clientSrc), true)
   /** 只对足够长的思考生效，避免误删正常正文里的短句。 */
-  check('⭐⭐ 有最小长度门槛', /thinkTrim\.length >= 20/.test(clientSrc), true)
+  check('⭐⭐ 有最小长度门槛', /t\.length < 20/.test(clientSrc), true)
   /** 交付必须用剔除后的文本（用 last 就等于没修）。 */
   check('⭐⭐⭐ 交付用剔除后的 lastClean', /\? lastClean/.test(clientSrc), true)
   check('⭐⭐ 变化判定也用 lastClean', /scrapedRef\.current !== lastClean/.test(clientSrc), true)
@@ -557,6 +561,43 @@ console.log('\n[?] ⭐⭐⭐ readThink 必须认**新版**文案（真根因）'
     !/wt\.indexOf\('已思考'\)/.test(hookSrc),
     true,
   )
+}
+
+console.log('\n[?] ⭐⭐⭐ 思考剔除必须**两条交付路径共用同一个函数**')
+{
+  /**
+   * ## 用户实测（第四轮，我前四轮都改错了地方）
+   *
+   * `/status` 的抓取诊断显示 **DOM 侧读到的是干净的 23 字符工具调用**
+   * （`ldw + 围栏 + const r`），而用户收到的是**长长的思考**。
+   *
+   * ⇒ **泄漏在 hook 路径上**：hook 的 `done` 事件带 `{text, think}`，它先触发、
+   * 清掉 pending、把 `text` **原样**交付 —— 而那个 text 里混着思考。
+   *
+   * 我前四轮一直在改 DOM 侧的排除（`render` / `readThink`），所以**完全没用**。
+   *
+   * ## 修法：收口
+   *
+   * 「剔除混进正文的思考」现在只有**一处实现**（`stripThinkFromText`），
+   * DOM 路径与 hook 路径都调它。判据分散是今天所有返工的根源。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+
+  check('⭐⭐⭐ 有共用的 stripThinkFromText', /const stripThinkFromText = /.test(clientSrc), true)
+  check(
+    '⭐⭐⭐ hook 路径也调它',
+    /stripThinkFromText\(replyRaw/.test(clientSrc),
+    true,
+  )
+  check(
+    '⭐⭐ DOM 路径也调它',
+    /stripThinkFromText\(last, think, 'dom'\)/.test(clientSrc),
+    true,
+  )
+  /** 旧的内联实现必须消失 —— 否则又是两份判据。 */
+  check('⭐⭐ 不再有内联的 thinkTrim 实现', !/thinkTrim/.test(clientSrc), true)
+  /** 剔除要留日志，便于确认生效。 */
+  check('⭐ 剔除时记日志', /正文里混进了思考/.test(clientSrc), true)
 }
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
