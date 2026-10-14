@@ -1626,6 +1626,18 @@ export function LdwHost(): unknown {
    * 记「上次变化时刻」才是真正的静默时长。
    */
   const scrapedChangedAtRef = useRef<number>(0)
+  /**
+   * ⭐ hook 是否**曾经**交付过事件。
+   *
+   * 用途：DOM 抓取是**兜底**路径，而 SSE hook 才是**权威**路径（思考与正文在
+   * 协议层分开）。hook 活着时把 DOM 路径的静默门槛拉长，给权威路径让路 ——
+   * 否则 DOM 可能先按 STABLE_MS 交付一份「混着思考」的结果（用户实测过）。
+   *
+   * 用「是否收到过事件」而不是「hook 装没装」：前者是免费信号（事件本来就在读），
+   * 后者要额外跨进程读页面的计数器。
+   */
+
+  const hookSeenRef = useRef<boolean>(false)
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
@@ -1647,6 +1659,10 @@ export function LdwHost(): unknown {
             const at = typeof ev.at === 'number' ? ev.at : 0
             if (at !== 0 && at < sentAtRef.current) continue
 
+            if (ev.name === 'done' || ev.name === 'stream') {
+              /** ⭐ 收到 hook 事件 ⇒ 权威路径可用，DOM 兜底要让路。 */
+              hookSeenRef.current = true
+            }
             if (ev.name === 'done') {
               /**
                * ⭐⭐⭐ **这条路径才是思考泄漏的真凶**（实测：DOM 侧读到的是干净的
@@ -2274,8 +2290,24 @@ const EARLY_GIVE_UP_MS = 120_000
                   scrapedChangedAtRef.current = now
                   return
                 }
+                /**
+                 * ## ⭐⭐ hook 活着时，DOM 路径要多等一会儿（给权威路径让路）
+                 *
+                 * 有**两条**交付路径：
+                 *   1. **SSE hook**（权威）—— 直接读页面自己的 SSE 流，
+                 *      思考与正文在协议层就是分开的
+                 *   2. **DOM 抓取**（兜底）—— 读渲染后的页面，天生可能带上思考
+                 *
+                 * hook 一旦交付会清掉 pending，DOM 路径就不会交付。但若 hook
+                 * **慢了一步**，DOM 会先按 STABLE_MS 交付 —— 用户拿到的就是
+                 * DOM 那份（可能混着思考，实测发生过）。
+                 *
+                 * 所以：hook 可用时把静默门槛**拉长**，给权威路径先手。
+                 * 拉长不等于卡死 —— hook 真不工作时，最终仍会按拉长后的门槛交付。
+                 */
+                const stableNeed = hookSeenRef.current ? STABLE_MS * 3 : STABLE_MS
                 /** 内容没变 —— 还要确认已经静默够久。 */
-                if (now - scrapedChangedAtRef.current < STABLE_MS) {
+                if (now - scrapedChangedAtRef.current < stableNeed) {
                   return
                 }
                 /**

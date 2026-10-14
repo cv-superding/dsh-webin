@@ -788,6 +788,17 @@ function classifyFailure(message: string): { code: string; providerRetryAfterMs?
   return { code: 'WEBIN_FAILED' }
 }
 
+/** 每块字符数（见 emit 处的说明）。 */
+const CHUNK_CHARS = 200
+
+/** 把整段文本切成契约友好的增量块。 */
+function chunkText(text: string): string[] {
+  if (text.length <= CHUNK_CHARS) return [text]
+  const parts: string[] = []
+  for (let i = 0; i < text.length; i += CHUNK_CHARS) parts.push(text.slice(i, i + CHUNK_CHARS))
+  return parts
+}
+
 export function createAdapter(deps: AdapterDeps) {
   const { queue } = deps
   const registry = deps.registry ?? new ProviderRegistry()
@@ -1200,8 +1211,21 @@ export function createAdapter(deps: AdapterDeps) {
 
     // 思考内容作为 reasoning 块（只给 DSH 展示，不回灌网页 —— 见 serialize.ts 说明）
     if (result.think.trim() !== '') {
+      /**
+       * ⭐ 按官方契约**分块**发射（原来整段一次性发）。
+       *
+       * 官方 StreamChunk 声明（从 DSH 的 app.asar 提取）：
+       *   | { type: 'reasoning-delta'; index: number; text: string }
+       *   | { type: 'text-delta'; index: number; text: string }
+       * 两者都是**增量**事件，分块比「一个巨大的 delta」更符合契约语义。
+       *
+       * ⚠️ 诚实说明：这不会让它真正流式 —— 插件是从客户端一次性拿到完整文本的。
+       * 真正的逐字上屏需要客户端边生成边上报（另一处改动）。
+       */
       yield { type: 'block-start', index, blockType: 'reasoning' }
-      yield { type: 'reasoning-delta', index, text: result.think }
+      for (const piece of chunkText(result.think)) {
+        yield { type: 'reasoning-delta', index, text: piece }
+      }
       yield { type: 'block-end', index, block: { type: 'reasoning', text: result.think } }
       index += 1
     }
@@ -1209,7 +1233,9 @@ export function createAdapter(deps: AdapterDeps) {
     // 正文（已剥掉工具代码块）
     if (parsed.text.trim() !== '') {
       yield { type: 'block-start', index, blockType: 'text' }
-      yield { type: 'text-delta', index, text: parsed.text }
+      for (const piece of chunkText(parsed.text)) {
+        yield { type: 'text-delta', index, text: piece }
+      }
       yield { type: 'block-end', index, block: { type: 'text', text: parsed.text } }
       index += 1
     }

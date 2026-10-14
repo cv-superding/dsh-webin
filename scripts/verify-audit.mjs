@@ -486,7 +486,11 @@ console.log('\n[U] ⭐⭐ 交付判据：内容不再增长 + 静默够久（防
    */
   check('⭐ 有 STABLE_MS 常量', /const STABLE_MS = 3_000/.test(clientSrc), true)
   check('⭐ 有「变化时刻」ref', /scrapedChangedAtRef/.test(clientSrc), true)
-  check('⭐ 判据含静默时长', /now - scrapedChangedAtRef\.current < STABLE_MS/.test(clientSrc), true)
+  /**
+   * ⚠️ 门槛变量已从 STABLE_MS 改成 stableNeed —— hook 可用时拉长（给权威路径让路）。
+   * 断言盯「用了静默门槛」，不盯某个具体变量名。
+   */
+  check('⭐ 判据含静默时长', /now - scrapedChangedAtRef\.current < (STABLE_MS|stableNeed)/.test(clientSrc), true)
   /**
    * 内容变化时要更新「变化时刻」。
    *

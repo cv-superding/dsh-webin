@@ -205,7 +205,13 @@ function scan(src) {
     if (!/\s/.test(c)) lastSig = c
     i += 1
   }
-  return out
+  /**
+   * ⭐ 把**最终状态**一起返回 —— 让「扫描器跑偏」可见，而不是静默返回 0 处。
+   *
+   * 真实教训：构建因模板里的反引号失败，而本审计报「发现 0 处」——
+   * 因为它当时不在模板模式（状态提前跑偏），**静默失效**比误报更危险。
+   */
+  return { hits: out, finalStack: stack.slice(), braceDepth }
 }
 
 function walk(dir, acc = []) {
@@ -240,7 +246,7 @@ console.log('\n[0] 扫描器自检（合成样本）')
     // 误报防护：合法的一行多个模板，**不该**被报
     'const ok2 = `${a}px` + `${b}px`;',
   ].join('\n')
-  const found = scan(sample).map((h) => h.esc)
+  const found = scan(sample).hits.map((h) => h.esc)
   check(`自检命中 3 处（实际 ${JSON.stringify(found)}）`, found.length, 3)
   check('自检命中反斜杠-s', found.includes('\\s'), true)
   check('自检命中反斜杠-斜杠', found.includes('\\/'), true)
@@ -249,8 +255,35 @@ console.log('\n[0] 扫描器自检（合成样本）')
 
 const hits = []
 for (const f of files) {
-  for (const h of scan(readFileSync(f, 'utf8'))) {
+  for (const h of scan(readFileSync(f, 'utf8')).hits) {
     hits.push({ file: relative(ROOT, f), ...h })
+  }
+}
+
+console.log('\n[1b] ⭐⭐⭐ 扫描器状态自检：每个文件结束时模板必须全部闭合')
+{
+  /**
+   * ## 为什么必须查这个
+   *
+   * 本审计靠一个状态机跟踪「当前在不在模板字符串里」。一旦状态跑偏
+   * （漏配一个反引号、把除法当正则、模板嵌套处理错），它会**静默返回 0 处** ——
+   * 而 0 处看起来就像「一切正常」。
+   *
+   * 真实教训：构建因模板里的反引号失败，而本审计报「发现 0 处」。
+   *
+   * 判据：文件扫完后，栈里应当只剩最底层的 `code`（所有模板都闭合了）。
+   * 不是 ⇒ 扫描器跑偏 ⇒ **大声报错**，不要让它假装通过。
+   */
+  const unbalanced = []
+  for (const abs of files) {
+    const r = scan(readFileSync(abs, 'utf8'))
+    if (r.finalStack.length !== 1 || r.finalStack[0] !== 'code') {
+      unbalanced.push({ file: relative(ROOT, abs), stack: r.finalStack.join('>') })
+    }
+  }
+  check(`扫描器状态正常（${unbalanced.length} 个文件未闭合）`, unbalanced.length, 0)
+  for (const u of unbalanced.slice(0, 8)) {
+    console.log(`       ${u.file}  残留栈: ${u.stack}`)
   }
 }
 

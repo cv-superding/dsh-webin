@@ -54,7 +54,8 @@ console.log('[1] ⭐ 从真实源码抽判据（不是重写一遍）')
 {
   check('抓到 countGrew', /const countGrew = count > baselineRef\.current/.test(clientSrc), true)
   check('抓到 contentChanged', /const contentChanged = last !== '' && last !== baselineTextRef\.current/.test(clientSrc), true)
-  check('抓到静默判据', /now - scrapedChangedAtRef\.current < STABLE_MS/.test(clientSrc), true)
+  /** ⚠️ 门槛变量已改为 stableNeed（hook 可用时拉长）—— 断言盯语义不盯变量名。 */
+  check('抓到静默判据', /now - scrapedChangedAtRef\.current < (STABLE_MS|stableNeed)/.test(clientSrc), true)
   check('抓到长度门槛', /last\.length >= 8/.test(clientSrc), true)
 }
 
