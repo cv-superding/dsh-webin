@@ -286,6 +286,42 @@ console.log('\n[6] ⭐⭐⭐ isGenerating：停止键是**纯图标**，只能�
   check('⭐ 普通按钮 ⇒ 不是生成中', run([el({ cls: 'ds-button', text: '发送' })]), false)
 }
 
+console.log('\n[7] ⭐⭐⭐ isThinkLabel：思考区的界面标签必须被排除')
+{
+  /**
+   * ## 用户实测（2026-10-14 截图）
+   *
+   * 思考又漏进正文了，而且带出了**页面 UI 标签**：
+   *
+   *     已完成分析          ← 折叠条（新版文案）
+   *     思考                ← 分组标题（新版文案）
+   *
+   * 原来的排除只认「已思考（用时 N 秒）」这一种文案 —— 页面改版换词后全失效。
+   *
+   * ## 附带影响（同一根因）
+   *
+   * 思考一直在流式变化 ⇒ 正文永远「在变」⇒ 静默判据永不成立 ⇒
+   * **DSH 一直「深度求索中」**（用户实测等了 5 分 40 秒，而网页版早就生成完了）。
+   */
+  const isThinkLabel = new Function(`${extractFn('isThinkLabel')}; return isThinkLabel`)()
+
+  const yes = ['已思考（用时 1 秒）', '已完成分析', '正在分析请求', '思考', '用户', '深度思考']
+  for (const t of yes) check(`「${t}」⇒ 是标签`, isThinkLabel(t), true)
+
+  /** 正文不能被误伤 —— 这是这条判据最危险的方向。 */
+  const no = [
+    '思考一下这个问题怎么解决，先把方案写出来再动手，注意边界条件',
+    '我觉得这里需要深度思考才能得出结论，所以先分析一下数据分布',
+    '用户要求在当前目录创建一个 HTML 文件，包含 SVG 动画',
+    '',
+    'x'.repeat(80),
+  ]
+  for (const t of no) check(`正文「${t.slice(0, 14)}…」⇒ 不是标签`, isThinkLabel(t), false)
+
+  /** 长文本里出现关键词也不算（长度门槛）。 */
+  check('长文本含「已完成分析」⇒ 不是标签', isThinkLabel('已完成分析之后' + 'x'.repeat(70)), false)
+}
+
 console.log('\n[5] 生成器可解析（防模板转义把脚本弄坏）')
 {
   try {

@@ -1007,6 +1007,36 @@ export function buildScrapeScript(): string {
       return false;
     }
 
+    /**
+     * ## ⭐⭐⭐ 是不是「思考区」的**界面标签**（不是正文）
+     *
+     * ## 为什么要单独抽出来（用户实测：思考又漏进正文了）
+     *
+     * 原来的排除只认「已思考（用时 N 秒）」这一种文案 —— 而**页面改版换了词**。
+     * 用户 2026-10-14 的截图里，被当成正文交出去的是：
+     *
+     *     已完成分析          ← 折叠条（新版文案）
+     *     思考                ← 分组标题（新版文案）
+     *     用户                ← 分析对象标签
+     *
+     * 文案一变，按文案匹配的排除就全失效 —— 这是**依赖页面特征**的固有脆弱点。
+     * 但折叠条/分组标题**必然是很短的独立文本**，所以判据是「短 + 命中已知文案」，
+     * 并把已知文案尽量列全。
+     *
+     * ⚠️ 单独一个「思考」两字最容易误伤正文，所以那种情况要求**整段就等于它**。
+     */
+    function isThinkLabel(txt) {
+      var t = String(txt || '').trim();
+      if (t === '' || t.length >= 60) return false;
+      if (t.indexOf('已思考（用时') !== -1) return true;
+      if (t.indexOf('已完成分析') !== -1) return true;
+      if (t.indexOf('正在分析请求') !== -1) return true;
+      if (t.indexOf('深度思考') !== -1 && t.length < 20) return true;
+      /** 单独成词的标签（整段就等于它）才算，避免误伤正文。 */
+      if (t === '思考' || t === '用户' || t === '分析') return true;
+      return false;
+    }
+
       /**
        * 找代码块的语言标记 —— DeepSeek 把标签渲染在 pre **外面**的头部条里，
        * 所以 code 元素上的 language-xxx class 常常是空的。
@@ -1093,7 +1123,7 @@ export function buildScrapeScript(): string {
          */
         var nt3 = '';
         try { nt3 = String(node.textContent || ''); } catch (e) { nt3 = ''; }
-        if (nt3.indexOf('已思考（用时') !== -1 && nt3.length < 60) return '';
+        if (isThinkLabel(nt3)) return '';
         /**
          * ⭐⭐ 代码块语言标签条排除：节点的**下一个兄弟是 pre**，且自身
          * 是短语言名 ⇒ 它是语言标签条（DeepSeek 把语言名渲染在 pre 外面）。
@@ -1128,7 +1158,7 @@ export function buildScrapeScript(): string {
         if (prev) {
           var pt = '';
           try { pt = String(prev.textContent || ''); } catch (e) { pt = ''; }
-          if (pt.indexOf('已思考（用时') !== -1 && pt.length < 60) return '';
+          if (isThinkLabel(pt)) return '';
         }
       }
 
