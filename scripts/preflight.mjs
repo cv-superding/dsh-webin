@@ -21,7 +21,30 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 
 const SRC = dirname(dirname(fileURLToPath(import.meta.url)))
-const PROFILE = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'profiles', 'desktop')
+
+/** `readdirSync` 的安全版：目录不存在或不可读时返回空数组（预检不应因此报错）。 */
+function readdirSyncSafe(dir) {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+/**
+ * profile 解析顺序（原来硬编码 `desktop`，在 web profile 上必然误报）：
+ *   1. `--profile <name>`（显式指定，最高优先）
+ *   2. `DSH_PROFILE`（harness 注入）
+ *   3. `DSH_PROFILE_DIR`（harness 注入的绝对路径）
+ *   4. 回落 `desktop`（官方 Desktop 的保留名，历史默认）
+ */
+const profileArgIndex = process.argv.indexOf('--profile')
+const PROFILE_NAME =
+  (profileArgIndex >= 0 ? process.argv[profileArgIndex + 1] : undefined) ??
+  process.env.DSH_PROFILE ??
+  'desktop'
+const PROFILE =
+  process.env.DSH_PROFILE_DIR ??
+  join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'profiles', PROFILE_NAME)
 const LINKED = join(PROFILE, 'node_modules', 'dsh-webin')
 
 let pass = 0
@@ -204,6 +227,66 @@ if (existsSync(libClient)) {
         check(`语法完整 ${name}`, false, String(e?.message ?? '').slice(0, 110))
       }
     }
+  }
+}
+
+// ---- 宿主能力（新增）----
+/**
+ * ⚠️ 这一项本来就该有。
+ *
+ * 插件需要官方 Desktop 注入的 `globalThis.dshDesktop.browser` 桥。
+ * 没有它时，插件会“装得上、模型能选、一发就失败”，
+ * 而以前的预检**完全不检查这一点**（只看 profile 装配）。
+ *
+ * 判据：壳的 `main.js` 里是否同时具备 `webviewTag: true` 与 preload 注入。
+ * 这是静态判断（不需要跑 Electron），足以提前告诉用户“你这个宿主拿不到浏览器”。
+ */
+console.log('\n[9] 宿主浏览器桥（官方 Desktop 或等价 Electron 壳）')
+const shellCandidates = [
+  join(process.env.LOCALAPPDATA ?? '', 'DSH Desktop', 'main.js'),
+  join(homedir(), 'AppData', 'Local', 'DSH Desktop', 'main.js'),
+]
+let shellMain = null
+for (const c of shellCandidates) {
+  if (existsSync(c)) { shellMain = c; break }
+}
+if (shellMain === null) {
+  skip += 1
+  console.log('  SKIP 未找到 Electron 壳的 main.js —— 无法静态判断宿主能力')
+  console.log('       （若你用的是官方 Desktop，请在页面控制台执行 globalThis.dshDesktop 确认）')
+} else {
+  let shellSrc = ''
+  try { shellSrc = readFileSync(shellMain, 'utf8') } catch { shellSrc = '' }
+  const hasWebviewTag = /webviewTag\s*:\s*true/.test(shellSrc)
+  const hasPreload = /preload\s*:/.test(shellSrc)
+  /**
+   * ⚠️ 不能只看“src/ 里有没有 dshDesktop 字样” ——
+   * 旧壳未接 preload 时，src/ 里的文件依然在盘上，会造成**假通过**
+   * （实测踩到：旧 main.js + 新 src/ 时第三项误报 OK）。
+   *
+   * 正确判据：**主进程真的接了 preload**，且那个 preload 真的暴露了 dshDesktop。
+   */
+  let preloadExposes = false
+  if (hasPreload) {
+    const srcDir = join(dirname(shellMain), 'src')
+    if (/dshDesktop/.test(shellSrc)) preloadExposes = true
+    else {
+      preloadExposes = readdirSyncSafe(srcDir).some((f) => {
+        try {
+          return readFileSync(join(srcDir, f), 'utf8').includes("exposeInMainWorld('dshDesktop'")
+        } catch {
+          return false
+        }
+      })
+    }
+  }
+  const injectsBridge = hasPreload && preloadExposes
+  check('壳开启 webviewTag', hasWebviewTag, shellMain)
+  check('壳注入 preload', hasPreload, shellMain)
+  check('壳向页面暴露 dshDesktop 桥', injectsBridge, shellMain)
+  if (!injectsBridge) {
+    console.log('       → 这个宿主拿不到浏览器，LDW 在此环境下无法工作。')
+    console.log('       → 参见 D:\\deepseekwork\\dsh-desktop-shell（给壳补桥），或改用官方 Desktop。')
   }
 }
 
