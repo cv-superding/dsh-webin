@@ -1723,7 +1723,14 @@ export function LdwHost(): unknown {
                 void fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
                   method: 'PUT',
                   headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ error: String(ev.detail?.message ?? 'page error') }),
+                  body: JSON.stringify({
+                    error: String(ev.detail?.message ?? 'page error'),
+                    /**
+                     * ⭐ 把 hook 读到的 HTTP 状态码一起上报 —— 官方 LlmFailure.status
+                     * 就是它，DSH 的重试策略据此分类（429 vs 500 的处理不同）。
+                     */
+                    ...(typeof ev.detail?.status === 'number' ? { httpStatus: ev.detail.status } : {}),
+                  }),
                 })
               }
             }

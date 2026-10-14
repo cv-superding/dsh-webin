@@ -468,6 +468,55 @@ console.log('\n[?] ⭐⭐⭐ 失败必须用 DSH 的**官方失败码**（否则
   check('⭐ 认不出回退 WEBIN_FAILED', /code: 'WEBIN_FAILED'/.test(adapterSrc), true)
 }
 
+console.log('\n[?] ⭐⭐⭐ HTTP 状态码必须走完四层链路（官方 LlmFailure.status）')
+{
+  /**
+   * ## 官方契约
+   *
+   *     export interface LlmFailure {
+   *         readonly message: string
+   *         readonly code: string
+   *         readonly status?: number          // ← HTTP 状态码
+   *         readonly providerRetryAfterMs?: number
+   *     }
+   *
+   * ## 为什么要走四层
+   *
+   * 插件只从 DOM 读文本，**拿不到状态码**。唯一能拿到的地方是 hook ——
+   * 它包了页面的 fetch / XHR，res.status 与 this.status 就在手里。
+   *
+   * 链路：hook（读状态码）→ client（上报）→ host（存进任务）→ adapter（填进 LlmFailure）
+   *
+   * 任何一层断了，DSH 的重试策略就分类不准（429 与 500 处理不同）。
+   */
+  const hookSrc = readFileSync(join(ROOT, 'src', 'client', 'hook.ts'), 'utf8')
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  const hostSrc = readFileSync(join(ROOT, 'src', 'host', 'index.ts'), 'utf8')
+  const adapterSrc = readFileSync(join(ROOT, 'src', 'host', 'adapter.ts'), 'utf8')
+
+  /** ① hook：统一变量 + 两个读取点 + 发射时带上 */
+  check('① hook 有统一状态变量', /var lastHttpStatus = 0/.test(hookSrc), true)
+  check('① hook 读 fetch 的 res.status', /lastHttpStatus = res\.status/.test(hookSrc), true)
+  check('① hook 读 XHR 的 this.status', /lastHttpStatus = this\.status/.test(hookSrc), true)
+  check('① hook 发射时带上 status', /status: lastHttpStatus/.test(hookSrc), true)
+  /** 不许再有未声明的变量（本轮踩过：加了 xhrStatus 却忘了声明）。 */
+  check('① 无未声明的 xhrStatus', !/\bxhrStatus\b/.test(hookSrc), true)
+
+  /** ② client 上报 */
+  check('② client 上报 httpStatus', /httpStatus: ev\.detail\.status/.test(clientSrc), true)
+
+  /** ③ host 接收 + 存进任务 */
+  check('③ host 接收 httpStatus', /httpStatus\?: number/.test(hostSrc), true)
+  check('③ Job 有 httpStatus 字段', /httpStatus\?: number/.test(adapterSrc), true)
+  check('③ 存进 job', /job\.httpStatus =/.test(adapterSrc), true)
+
+  /** ④ adapter 填进官方 LlmFailure */
+  check('④ throw 时挂上状态码', /\.httpStatus = current\.httpStatus/.test(adapterSrc), true)
+  check('④ 填进 failure 的 status', /typeof st === 'number' && st > 0 \? \{ status: st \}/.test(adapterSrc), true)
+  /** 拿不到时**不带**该字段（而不是填 0）—— 官方契约里它是可选的。 */
+  check('④ 拿不到时不带 status', /\{ status: st \} : \{\}/.test(adapterSrc), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1

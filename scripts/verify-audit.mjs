@@ -435,7 +435,11 @@ console.log('\n[R] ⭐⭐ host 侧：已取消的任务不能被结果「复活�
   check('⭐ settle 拒绝已了结的', /if \(job\.done !== undefined \|\| job\.failed !== undefined\) return false/.test(adapterSrc), true)
   /** 顺序：两个拒绝都要在写入**之前**。 */
   const iReject = adapterSrc.indexOf('if (job.cancelled === true) return false')
-  const iWrite = adapterSrc.indexOf("if ('error' in result) job.failed = result.error")
+  /**
+   * ⚠️ 放宽：原来钉单行写法，而写入已改成块（里面多了一行记 httpStatus）。
+   * 断言该盯「写入位置」，不该盯具体写法。
+   */
+  const iWrite = adapterSrc.indexOf("job.failed = result.error")
   check('⭐ 拒绝在写入之前', iReject > 0 && iWrite > iReject, true)
 }
 

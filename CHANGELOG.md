@@ -5,6 +5,46 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.16
+
+### 第四项：HTTP 状态码走完四层链路，填进官方 `LlmFailure.status`
+
+**官方契约**（从 DSH 的 app.asar 提取）：
+
+```ts
+export interface LlmFailure {
+    readonly message: string
+    readonly code: string
+    readonly status?: number          // ← HTTP 状态码
+    readonly providerRetryAfterMs?: number
+}
+```
+
+**为什么必须走四层**：插件只从 DOM 读文本，**拿不到状态码**。唯一能拿到的地方是
+hook —— 它包了页面的 `fetch` / `XHR`，`res.status` 与 `this.status` 就在手里。
+
+```
+hook（读状态码）→ client（上报）→ host（存进任务）→ adapter（填进 LlmFailure）
+```
+
+**实现要点**
+
+- hook 用**统一变量** `lastHttpStatus`（三个发射点共用），而不是逐处传参 ——
+  本轮就踩过一次：加了 `xhrStatus` 却忘了声明，而**构建不做类型检查、照样过**。
+- 拿不到时**不带** `status` 字段（不是填 0）—— 官方契约里它是可选的。
+
+### 本轮的两次自我纠正
+
+1. **反引号（第 6 次）**：注释里写反引号导致构建失败 —— 而**上一轮加的审计当场抓到**
+   （报 6 处）。这是那项修复的实战验证。
+2. **清理过火**：我为了去掉反引号，脚本清了**整个文件**注释里的 128 个反引号，
+   误删了模板外的合法文档标记。**用 git 恢复该文件后只重做必要改动** ——
+   45 处合法注释反引号已回来。
+
+### 测试
+
+`verify-host` 新增 12 条，逐层断言链路完整（含「无未声明的 xhrStatus」这条防回退）。
+
 ## v0.2.15
 
 ### 四项改进（用户要求「全做」）

@@ -1008,6 +1008,11 @@ export async function apply(ctx: {
            * 有问题（而不是「偶发的页面慢」）。
            */
           via?: string
+          /**
+           * ⭐ 客户端观察到的 HTTP 状态码（hook 读 res.status / xhr.status）。
+           * 透传给 adapter，填进官方 LlmFailure.status。
+           */
+          httpStatus?: number
         }
         try {
           payload = JSON.parse(body) as typeof payload

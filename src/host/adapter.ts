@@ -100,6 +100,13 @@ interface Job {
    */
   claimedVia?: 'session' | 'fallback'
   /**
+   * ⭐ 客户端观察到的 HTTP 状态码（来自 hook 的 res.status / xhr.status）。
+   *
+   * 用途：填进 DSH 官方的 `LlmFailure.status` —— 官方重试策略据此分类
+   * （429 与 500 的处理不同）。拿不到时保持 undefined。
+   */
+  httpStatus?: number
+  /**
    * 发送前必须先导航到这个 URL —— 该任务所属 DSH 会话绑定的网页对话。
    *
    * ## 为什么必须有这个（用户实测发现的封号级缺陷）
@@ -417,7 +424,16 @@ class JobQueue {
      * 和真实 `done` 同时到达），此时**保留先到的那个**更安全。
      */
     if (job.done !== undefined || job.failed !== undefined) return false
-    if ('error' in result) job.failed = result.error
+    if ('error' in result) {
+      job.failed = result.error
+      /**
+       * ⭐ 一并存下 HTTP 状态码 —— adapter 交给 DSH 时要填进 LlmFailure.status。
+       * 见 hook 里读 res.status 的那处说明。
+       */
+      if (typeof (result as { httpStatus?: unknown }).httpStatus === 'number') {
+        job.httpStatus = (result as { httpStatus: number }).httpStatus
+      }
+    }
     else job.done = result
     return true
   }
@@ -935,7 +951,15 @@ export function createAdapter(deps: AdapterDeps) {
       }
       const current = queue.get(job.id)
       if (current === undefined) throw new Error('job disappeared')
-      if (current.failed !== undefined) throw new Error(current.failed)
+      if (current.failed !== undefined) {
+        const e = new Error(current.failed)
+        /**
+         * ⭐ 把 HTTP 状态码挂在错误对象上 —— 交付时要填进官方 LlmFailure.status。
+         * 客户端从 hook 的 res.status / this.status 一路带到这里（四层链路）。
+         */
+        ;(e as Error & { httpStatus?: number }).httpStatus = current.httpStatus
+        throw e
+      }
       if (current.done !== undefined) return current.done
 
       if (current.claimedAt !== undefined) claimedOnce = true
@@ -1152,6 +1176,17 @@ export function createAdapter(deps: AdapterDeps) {
              * 认不出来，一次都不会重试。见 classifyFailure 的说明。
              */
             ...classifyFailure((error as Error)?.message ?? String(error)),
+            /**
+             * ⭐⭐ 官方 LlmFailure.status —— HTTP 状态码。
+             *
+             * 客户端从 hook 的 res.status / this.status 拿到，经 client → host 任务
+             * 一路带到这里。DSH 的重试策略据此分类（429 与 500 处理不同）。
+             * 拿不到时**不带这个字段**（不是填 0）—— 官方契约里它是可选的。
+             */
+            ...(() => {
+              const st = (error as Error & { httpStatus?: number })?.httpStatus
+              return typeof st === 'number' && st > 0 ? { status: st } : {}
+            })(),
           },
         },
       }
