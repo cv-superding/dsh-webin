@@ -487,8 +487,17 @@ console.log('\n[U] ⭐⭐ 交付判据：内容不再增长 + 静默够久（防
   check('⭐ 有 STABLE_MS 常量', /const STABLE_MS = 3_000/.test(clientSrc), true)
   check('⭐ 有「变化时刻」ref', /scrapedChangedAtRef/.test(clientSrc), true)
   check('⭐ 判据含静默时长', /now - scrapedChangedAtRef\.current < STABLE_MS/.test(clientSrc), true)
-  /** 内容变化时要更新「变化时刻」。 */
-  check('⭐ 内容变了就记时刻', /scrapedRef\.current = last\s*\n\s*scrapedChangedAtRef\.current = now/.test(clientSrc), true)
+  /**
+   * 内容变化时要更新「变化时刻」。
+   *
+   * ⚠️ 记的是 **lastClean**（剔除思考后的正文），不是 `last` —— 页面把思考
+   * 嵌套在回复容器里，思考一出现就会被当成「内容变化」，静默计时永远重置。
+   */
+  check(
+    '⭐ 内容变了就记时刻',
+    /scrapedRef\.current = lastClean\s*\n\s*scrapedChangedAtRef\.current = now/.test(clientSrc),
+    true,
+  )
   /** 领活时重置变化时刻（新任务从此刻开始算静默）。 */
   check('⭐ 领活时重置变化时刻', /baselineTextRef\.current = typeof base\.last[\s\S]{0,200}scrapedChangedAtRef\.current = Date\.now\(\)/.test(clientSrc), true)
   /** 统一清理要含它。 */

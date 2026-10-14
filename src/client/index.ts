@@ -2094,6 +2094,55 @@ const EARLY_GIVE_UP_MS = 120_000
               }
               const last = typeof scraped.last === 'string' ? scraped.last : ''
               const think = typeof scraped.think === 'string' ? scraped.think : ''
+
+              /**
+               * ## ⭐⭐⭐ 安全网：正文里混进了思考 ⇒ 剔掉（与类名无关）
+               *
+               * ## 真实页面结构（hook.ts 里已有注释）
+               *
+               * `ds-think-content` **嵌套在 `ds-markdown` 内部** —— 思考是回复的
+               * 一部分，只是折叠显示。所以递归渲染正文时很容易把思考一起读进去。
+               *
+               * hook 侧有两层排除（`isThinkNode` 按类名 + 「已思考（用时」折叠条），
+               * 但**都依赖页面特征** —— 类名或文案一变就失效。用户实测：
+               * 思考被当成正文交付到 DSH 对话里。
+               *
+               * ## 这里做一道与页面特征无关的兜底
+               *
+               * `think` 是**单独读出来的**（`readThink()`）。若它出现在正文里，
+               * 说明正文把思考也读进去了 ⇒ 直接删掉那段。
+               *
+               * 先试直接子串；不中再按「逐行」定位（应对换行/缩进差异）。
+               * 只处理足够长的思考（≥ 20 字），避免把正常正文里的短句误删。
+               */
+              const thinkTrim = think.trim()
+              let lastClean = last
+              if (thinkTrim.length >= 20) {
+                const at = last.indexOf(thinkTrim)
+                if (at >= 0) {
+                  lastClean = (last.slice(0, at) + last.slice(at + thinkTrim.length)).trim()
+                  console.warn('[dsh-webin] 正文里混进了思考，已剔除（直接命中）', {
+                    removed: thinkTrim.length,
+                  })
+                } else {
+                  /** 逐行兜底：思考的首行与末行都在正文里 ⇒ 删掉它们之间的区间。 */
+                  const tLines = thinkTrim.split('\n').map((s) => s.trim()).filter((s) => s !== '')
+                  const head = tLines[0]
+                  const tail = tLines[tLines.length - 1]
+                  if (tLines.length >= 2 && head !== undefined && tail !== undefined) {
+                    const lLines = last.split('\n')
+                    const hi = lLines.findIndex((s) => s.trim() === head)
+                    const ti = lLines.findIndex((s, i) => i > hi && s.trim() === tail)
+                    if (hi >= 0 && ti > hi) {
+                      lastClean = [...lLines.slice(0, hi), ...lLines.slice(ti + 1)].join('\n').trim()
+                      console.warn('[dsh-webin] 正文里混进了思考，已剔除（逐行命中）', {
+                        from: hi,
+                        to: ti,
+                      })
+                    }
+                  }
+                }
+              }
               const count = typeof scraped.count === 'number' ? scraped.count : 0
               /**
                * ⭐ 回复是否停在未闭合围栏里（= 没写完）。抓取脚本算好的，
@@ -2193,9 +2242,9 @@ const EARLY_GIVE_UP_MS = 120_000
                  * 宁可早交付也不卡死（卡死是用户最难受的）。
                  */
                 const now = Date.now()
-                if (scrapedRef.current !== last) {
+                if (scrapedRef.current !== lastClean) {
                   /** 内容变了：记录新内容 + **变化时刻**，等下一轮。 */
-                  scrapedRef.current = last
+                  scrapedRef.current = lastClean
                   scrapedChangedAtRef.current = now
                   return
                 }
@@ -2469,11 +2518,11 @@ const EARLY_GIVE_UP_MS = 120_000
                  */
                 const deliveredText =
                   incompleteReason === ''
-                    ? last
+                    ? lastClean
                     : `⚠️ **本次回复不完整**：${incompleteReason}。\n` +
                       `已自动重试 ${RETRY_MAX} 次仍未成功，以下内容可能被截断（例如工具调用断在半句）。\n` +
                       `建议：稍等片刻后重新发送，或在 LDW 面板里点「继续生成」。\n\n---\n\n` +
-                      last
+                      lastClean
                 const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
                 const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
                 await fetchJson(`/dsh-webin/api/job/${jobId}/result`, {

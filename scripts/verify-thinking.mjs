@@ -497,6 +497,37 @@ console.log('\n[6] hook 侧：reasoning_content 能被提取（网页确实会�
 }
 
 cleanupState()
+console.log('\n[?] ⭐⭐⭐ 正文里混进思考时必须剔除（用户实测）')
+{
+  /**
+   * ## 用户实测
+   *
+   * 「感觉把思考内容也当正文输出了」—— DSH 对话里显示的是模型的英文思考过程。
+   *
+   * ## 根因
+   *
+   * 真实页面上 `ds-think-content` **嵌套在 `ds-markdown` 内部**（思考是回复的
+   * 一部分，只是折叠显示），递归渲染正文时会把思考一起读进去。
+   *
+   * hook 侧有两层排除，但**都依赖页面特征**（类名 / 折叠条文案「已思考（用时」），
+   * 页面一改版就失效。
+   *
+   * ## 修法
+   *
+   * 加一道**与页面特征无关**的兜底：`think` 是单独读出来的，若它出现在正文里
+   * 就删掉那段。先试直接子串，不中再按逐行定位。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+  check('⭐⭐⭐ 有「正文混进思考」的兜底', /正文里混进了思考，已剔除/.test(clientSrc), true)
+  check('⭐⭐ 先试直接子串', /const at = last\.indexOf\(thinkTrim\)/.test(clientSrc), true)
+  check('⭐⭐ 不中再逐行定位', /lLines\.findIndex/.test(clientSrc), true)
+  /** 只对足够长的思考生效，避免误删正常正文里的短句。 */
+  check('⭐⭐ 有最小长度门槛', /thinkTrim\.length >= 20/.test(clientSrc), true)
+  /** 交付必须用剔除后的文本（用 last 就等于没修）。 */
+  check('⭐⭐⭐ 交付用剔除后的 lastClean', /\? lastClean/.test(clientSrc), true)
+  check('⭐⭐ 变化判定也用 lastClean', /scrapedRef\.current !== lastClean/.test(clientSrc), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

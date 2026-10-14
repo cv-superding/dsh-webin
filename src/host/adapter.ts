@@ -154,12 +154,37 @@ class JobQueue {
    * @param now - 当前时刻（默认 Date.now()，测试可注入）。
    * @returns 被回收的任务数。
    */
-  reapStaleClaimed(now: number = Date.now(), timeoutMs: number = 180_000): number {
+  reapStaleClaimed(
+    now: number = Date.now(),
+    timeoutMs: number = 180_000,
+    /**
+     * ## ⭐⭐⭐ 面板是否**真的还活着**（心跳新鲜）
+     *
+     * ## 用户实测：这条判据在「面板活得好好的」时候误杀任务
+     *
+     * 报错文案写的是「执行面板中途失联（心跳停止）」，但**实现里压根没读心跳** ——
+     * 它只是「claim 后 3 分钟没结果」的**盲超时**。
+     *
+     * 用户实测：一轮长生成（思考 + 写文件）超过 3 分钟，文件其实**已经写成功**
+     * （DSH 里能看到 diff 卡片），任务却被判失败 —— 而面板全程心跳正常。
+     *
+     * ## 修法：有真实依据才下结论（与 cuckoo 一致）
+     *
+     * 传进来一个存活谓词；**面板还活着就绝不回收**。这样：
+     *   - 面板真死了 ⇒ 心跳停 ⇒ 45 秒后判死 ⇒ 回收（报错文案也终于名副其实）
+     *   - 面板活着但回复很慢 ⇒ **不回收**，交给 adapter 自己的 replyTimeout 兜底
+     *
+     * 谓词缺省（老调用/测试）时保持原行为，向后兼容。
+     */
+    alive?: () => boolean,
+  ): number {
     let reaped = 0
     for (const job of this.jobs.values()) {
       if (job.claimedAt === undefined) continue
       if (job.done !== undefined || job.failed !== undefined) continue
       if (now - job.claimedAt < timeoutMs) continue
+      /** ⭐⭐ 面板还在心跳 ⇒ 它只是在慢慢生成，**不是失联**。 */
+      if (alive !== undefined && alive()) continue
       job.failed = '执行面板中途失联（心跳停止）—— 任务没能完成，请重试'
       reaped += 1
     }

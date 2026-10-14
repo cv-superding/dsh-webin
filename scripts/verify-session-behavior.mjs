@@ -312,6 +312,52 @@ console.log('\n[13] ⭐⭐ 回归：输入框空着时不能判 input-lost')
   check('⭐ 有内容但不是我们的才报错', /输入框里的内容变了（不是刚填进去的那段）/.test(chatSrc), true)
 }
 
+console.log('\n[?] ⭐⭐⭐ 面板活着时，回收看门狗**不许**误杀任务')
+{
+  /**
+   * ## 用户实测
+   *
+   * 一轮长生成（思考 + 写文件）超过 3 分钟，**文件其实已经写成功**（DSH 里能
+   * 看到 diff 卡片），任务却被判失败 —— 报错文案写「执行面板中途失联
+   * （心跳停止）」，但**面板全程心跳正常**。
+   *
+   * ## 根因
+   *
+   * `reapStaleClaimed` 的实现**压根没读心跳** —— 它只是「claim 后 3 分钟没结果」
+   * 的盲超时，文案却写着「心跳停止」。典型的「拿猜当结论」。
+   *
+   * ## 修法
+   *
+   * 传入存活谓词；面板还活着就绝不回收。
+   */
+  const q = new JobQueue()
+  const job = q.enqueue('长任务', false, 'deepseek', undefined, false, 'session-A')
+  q.claimNext('deepseek', 'session-A')
+  /** 假装已过 4 分钟（超过 3 分钟阈值）。 */
+  const later = job.claimedAt + 240_000
+
+  /** 面板**活着** ⇒ 不许回收。 */
+  check('⭐⭐⭐ 面板活着 ⇒ 不回收', q.reapStaleClaimed(later, 180_000, () => true), 0)
+
+  /** 面板**确实死了**（心跳停）⇒ 回收，且文案名副其实。 */
+  const q2 = new JobQueue()
+  const job2 = q2.enqueue('长任务', false, 'deepseek', undefined, false, 'session-A')
+  q2.claimNext('deepseek', 'session-A')
+  check('⭐⭐ 面板心跳停了 ⇒ 回收', q2.reapStaleClaimed(job2.claimedAt + 240_000, 180_000, () => false), 1)
+
+  /** 没到超时 ⇒ 不回收（与存活无关）。 */
+  const q3 = new JobQueue()
+  const job3 = q3.enqueue('短任务', false, 'deepseek', undefined, false, 'session-A')
+  q3.claimNext('deepseek', 'session-A')
+  check('⭐ 未超时 ⇒ 不回收', q3.reapStaleClaimed(job3.claimedAt + 1_000, 180_000, () => false), 0)
+
+  /** 谓词缺省时保持原行为（向后兼容）。 */
+  const q4 = new JobQueue()
+  const job4 = q4.enqueue('任务', false, 'deepseek', undefined, false, 'session-A')
+  q4.claimNext('deepseek', 'session-A')
+  check('⭐ 谓词缺省 ⇒ 保持原行为', q4.reapStaleClaimed(job4.claimedAt + 240_000), 1)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */

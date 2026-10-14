@@ -1507,8 +1507,15 @@ export async function apply(ctx: {
   ctx.effect(() => {
     const timer = setInterval(() => {
       try {
-        const reaped = queue.reapStaleClaimed()
-        if (reaped > 0) log.warn?.(`看门狗回收了 ${reaped} 个失联任务（面板中途死亡）`)
+        /**
+         * ⭐⭐ 传入**真实心跳**作为存活判据 —— 面板活着就不回收。
+         *
+         * 这条看门狗原来的文案写着「心跳停止」，但**从没读过心跳**，只是
+         * 「claim 后 3 分钟没结果」的盲超时。用户实测：一轮长生成超过 3 分钟，
+         * 文件其实已经写成功，任务却被误杀（面板全程心跳正常）。
+         */
+        const reaped = queue.reapStaleClaimed(Date.now(), 180_000, () => liveClients().length > 0)
+        if (reaped > 0) log.warn?.(`看门狗回收了 ${reaped} 个失联任务（面板心跳确实已停）`)
       } catch {
         /* 看门狗自身出错不影响主链路 */
       }
