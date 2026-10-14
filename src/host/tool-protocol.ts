@@ -440,6 +440,33 @@ function positionalToObject(schema: ToolSchema | undefined, body: string): strin
  *   （工具由 DSH 执行，插件只负责把 ```ldw 围栏交给 DSH 解析）
  * - 散落的单个 DSML 标签也删掉
  * - 返回剥离计数，便于在诊断里观察出现频率
+ *
+ * ## ⚠️ 第三种形态：**没有竖线的裸 XML**（用户实测第三次报障）
+ *
+ * 前两版都假定「标签里一定有竖线」（`<｜DSML｜tool_calls>` 或 `<|tool_calls|>`）。
+ * 但用户实测贴回来的泄漏长这样：
+ *
+ *     </invoke>
+ *     </parameter>
+ *     </invoke>
+ *     </parameter>
+ *     …（重复几十次）
+ *
+ * **一个竖线都没有** ⇒ 两版正则 `striped = 0`，**整段原样漏进对话**。
+ * 这是模型吐原生 AntML/XML 工具语法时被网页版截断的残骸。
+ *
+ * ## 为什么不能用「剥掉所有 XML 标签」来解决
+ *
+ * 回复正文里合法出现 `<div>` / `<span>` / `<a href>` 是**正常的**
+ * （模型讲 HTML、贴代码）。无差别剥标签会**吃掉正文**。
+ *
+ * 所以第三种形态走**标签白名单** —— 只剥工具调用专属的标签名：
+ * `tool_calls` / `function_calls` / `invoke` / `parameter` / `tool_call`
+ * / `tool_use` / `tool_result`，并允许 `antml:` / `dsml:` 之类的命名空间前缀。
+ *
+ * 白名单的安全边界已用回归锁死（`scripts/verify-tool-protocol.mjs`）：
+ * `div` / `span` / `a` / `img` / 正文里的 `invoke` 单词 / 数学比较 `${a < b}`
+ * / 自定义元素 `<my-invoke-widget>` **一律不得被剥**。
  */
 function stripDsml(reply: string): { text: string; stripped: number } {
   let stripped = 0
@@ -477,6 +504,24 @@ function stripDsml(reply: string): { text: string; stripped: number } {
   /** Stray single tags: <..anything..>. */
   const tag = new RegExp(OPEN + '[^>]{0,60}>', 'g');
   out = out.replace(tag, () => {
+    stripped += 1;
+    return '';
+  });
+  /**
+   * ## 第三种形态：**没有竖线的裸 XML**（用户第三次报障）
+   *
+   * 前两版都要求标签里含竖线 ⇒ 对 `</invoke>` / `</parameter>` 这类无竖线残骸
+   * `stripped = 0`，整段原样漏进对话（用户实测贴回来几十行）。
+   *
+   * 走**标签白名单**而不是「剥掉所有 XML」：回复正文里合法出现 `<div>` /
+   * `<span>` / `<a href>` 是正常的（模型在讲 HTML），无差别剥会吃掉正文。
+   *
+   * - `[a-z][\w-]*:` 允许 `antml:` / `dsml:` 之类的命名空间前缀
+   * - `\b` 保证不会误吃 `<my-invoke-widget>` 这类自定义元素
+   */
+  const BARE = '<\\/?\\s*(?:[a-z][\\w-]*:)?(?:tool_calls|function_calls|invoke|parameter|tool_call|tool_use|tool_result)\\b[^>]*>'
+  const bare = new RegExp(BARE, 'gi');
+  out = out.replace(bare, () => {
     stripped += 1;
     return '';
   });
