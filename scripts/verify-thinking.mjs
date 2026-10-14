@@ -245,7 +245,12 @@ console.log('\n[4] ⭐⭐ client 必须**真的使用** job.thinking（这就是
    * ⚠️ 发送已拆成 `buildFillScript` + `buildTriggerScript`（照 cuckoo 重构），
    * 所以这里比对「思考切换」与**填充**的先后 —— 填充是发送的第一步。
    */
-  const sendIdx = client.indexOf('buildFillScript(prompt')
+  /**
+   * ⚠️ 必须带逗号：`buildFillScript(prompt` 是 `buildFillScript(promptRef.current`
+   * 的**前缀** —— 不收紧的话会命中「不完整重试」里的重发调用（它在轮询循环里，
+   * 位置比真正的发送早），断言就成了拿错参照点（同类误报见 verify-audit）。
+   */
+  const sendIdx = client.indexOf('buildFillScript(prompt,')
   check('⭐ 切换在发送之前', thinkIdx > 0 && sendIdx > 0 && thinkIdx < sendIdx, true)
   check('⭐ 切不动时不阻断发送', /思考模式脚本失败/.test(client), true)
   check('⭐ 切不动时明确报告（不静默）', /思考模式未切换/.test(client), true)

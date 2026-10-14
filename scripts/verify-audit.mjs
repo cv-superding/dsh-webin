@@ -15,6 +15,28 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 let pass = 0
 let fail = 0
+/**
+ * 取出以 `header` 开头的代码块的**花括号内容**（配对，与长度无关）。
+ *
+ * 为什么不用正则固定窗口：窗口会随函数增长失效，产生「函数明明正常却报红」
+ * 的误报（真实踩过两次）。
+ */
+function bodyOf(src, header) {
+  const i = src.indexOf(header)
+  if (i < 0) return null
+  const open = src.indexOf('{', i)
+  if (open < 0) return null
+  let depth = 0
+  for (let k = open; k < src.length; k += 1) {
+    if (src[k] === '{') depth += 1
+    else if (src[k] === '}') {
+      depth -= 1
+      if (depth === 0) return src.slice(open + 1, k)
+    }
+  }
+  return null
+}
+
 const check = function (name, actual, expected) {
   if (arguments.length < 3) expected = true
   const a = JSON.stringify(actual)
@@ -199,10 +221,17 @@ console.log('\n[F] ⭐ 导航后必须清理「上轮残留」状态')
    */
   check('⭐ 有统一的清理函数', /const clearPending = \(\) => \{/.test(clientSrc), true)
   /** 清理函数必须清全部五项。 */
-  const fn = /const clearPending = \(\) => \{([\s\S]{0,400}?)\}/.exec(clientSrc)
-  check('找到清理函数体', fn !== null, true)
-  if (fn !== null) {
-    const body = fn[1]
+  /**
+   * ⚠️ **不能靠固定窗口取函数体** —— 窗口会随函数增长失效。
+   *
+   * 真实踩过：给 clearPending 加两行「计数归零」后，400 字符窗口够不到收尾的
+   * 花括号，于是「找到清理函数体」直接红了 —— 而函数本身完全正常。
+   * 这类「窗口太小」的误报在本项目已经出现过多次（另见 verify-sequence 的
+   * jobId 距离断言）。改成**花括号配对**，与函数长度无关。
+   */
+  const body = bodyOf(clientSrc, 'const clearPending = () => {')
+  check('找到清理函数体', body !== null, true)
+  if (body !== null) {
     for (const field of ['pendingJobRef', 'pendingSinceRef', 'scrapedRef', 'baselineRef', 'baselineTextRef']) {
       check(`⭐ clearPending 清 ${field}`, new RegExp(`${field}\\.current = `).test(body), true)
     }

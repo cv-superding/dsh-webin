@@ -1549,6 +1549,84 @@ export function buildScrapeScript(): string {
       return hasNewChat && hasDateGroup && s.length > 24;
     }
 
+    /**
+     * ## ⭐⭐⭐ 回复是否**停在未闭合的代码围栏里**（= 还没写完）
+     *
+     * ## 为什么必须判它（真实事故）
+     *
+     * 服务端中途掐断生成时，**整段都在围栏里**的内容会被截在半句。实测交付过
+     * 这样的「回复」：
+     *
+     *     ldw
+     *
+     *     const r = await write(
+     *
+     * DSH 侧解析不出工具调用，用户看到的是「已完成」+ 一句残缺代码 ——
+     * 而真正的原因是服务端把生成停了，用户根本无从得知。
+     *
+     * 判据极简且可靠：围栏标记（三个反引号）计数为**奇数** ⇒ 一定没写完。
+     * 正常结束的回复围栏总是成对闭合的。
+     *
+     * ⚠️ 围栏用字符码拼 —— 本函数整体位于模板字符串里，直接写三反引号会
+     * 提前终止模板（本文件里已有的同类写法见 looksLikeSidebar）。
+     */
+    function isFenceOpen(txt) {
+      if (!txt) return false;
+      var fence = String.fromCharCode(96, 96, 96);
+      var s = String(txt);
+      var n = 0;
+      var i = 0;
+      while (true) {
+        var k = s.indexOf(fence, i);
+        if (k === -1) break;
+        n++;
+        i = k + fence.length;
+      }
+      return n % 2 === 1;
+    }
+
+    /**
+     * ## ⭐⭐⭐ 读页面上的**服务端错误提示**（「服务器暂时不可用」等）
+     *
+     * ## 为什么需要
+     *
+     * 服务端不可用 / 限流时，网页版会插一条提示，并**直接掐断生成**。此时若
+     * 照常交付，用户看到的是「已完成」+ 半截内容，完全不知道真实原因是服务端
+     * 拒绝 —— 也就不会想到重试。
+     *
+     * 检测到就上报：client 负责**提醒用户 + 按策略重试**。
+     *
+     * ## 实现取舍
+     *
+     * 不知道横幅的类名（页面改版会变），所以只能扫文本。为了不拖慢轮询：
+     *   - 只看**叶子节点**（有子元素的节点文本必然包含子节点的文本，白扫）
+     *   - 文本长度限制 60 以内（横幅是一句话，不会更长）
+     *   - 节点数封顶 4000（真页面上千节点，超出部分几乎不可能是横幅）
+     */
+    function readServerError() {
+      var KEYS = [
+        '服务器暂时不可用', '服务暂时不可用', '服务器繁忙', '服务繁忙',
+        '请求过于频繁', '网络异常', '系统繁忙', '请稍后重试',
+        'Server is busy', 'Service Unavailable', 'Too Many Requests'
+      ];
+      try {
+        var nodes = document.querySelectorAll('div, span, p, section');
+        var cap = Math.min(nodes.length, 4000);
+        for (var i = 0; i < cap; i++) {
+          var el = nodes[i];
+          /** 只看叶子：父节点的 textContent 包含子节点文本，扫了也是白扫。 */
+          if (el.firstElementChild) continue;
+          if (!el.offsetWidth && !el.offsetHeight) continue;
+          var t = (el.textContent || '').trim();
+          if (t.length === 0 || t.length > 60) continue;
+          for (var k = 0; k < KEYS.length; k++) {
+            if (t.indexOf(KEYS[k]) !== -1) return KEYS[k];
+          }
+        }
+      } catch (e) {}
+      return '';
+    }
+
     if (list.length === 0) {
       var fallbackInfo = "";
       var all = root.querySelectorAll('div');
@@ -1589,6 +1667,15 @@ export function buildScrapeScript(): string {
       ok: list.length > 0,
       /** ⭐⭐ 页面是否仍在生成（停止按钮存在）—— 交付判据用它防「思考被当回复」。 */
       generating: isGenerating(),
+      /**
+       * ⭐ 回复是否停在未闭合围栏里（= 没写完）。交付闸门用它挡住半截工具调用。
+       */
+      fenceOpen: isFenceOpen(list.length > 0 ? list[list.length - 1] : ''),
+      /**
+       * ⭐ 页面上的服务端错误提示（空串 = 没有）。非空 ⇒ 生成是被服务端掐断的，
+       * 必须提醒用户并重试，而不是把半截内容当成功交付。
+       */
+      serverError: readServerError(),
       /** 全部候选；**最后一条**是最新一轮的回复。 */
       all: list,
       last: list.length > 0 ? list[list.length - 1] : '',

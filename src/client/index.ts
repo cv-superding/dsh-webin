@@ -815,6 +815,14 @@ const watchdogCountRef: { current: number } = { current: 0 }
  */
 const continueCountRef: { current: number } = { current: 0 }
 
+/**
+ * ⭐ 「回复不完整」的重试计数（服务端掐断 / 围栏没闭合）。
+ *
+ * 与续写计数、看门狗计数**各自独立** —— 三种补救手段互不占用额度。
+ * 每个新任务开始时重置为 0（见 clearPending）。
+ */
+const retryCountRef: { current: number } = { current: 0 }
+
 const scrapeDiagRef: {
   current: {
     selector?: string
@@ -1890,6 +1898,8 @@ const clearPending = () => {
         watchdogCountRef.current = 0
         /** 点「继续生成」的计数同样归零。 */
         continueCountRef.current = 0
+        /** 不完整重试计数同样归零。 */
+        retryCountRef.current = 0
       }
       /**
        * ## ⚠️ 正在等回复时**绝不能再领新任务**
@@ -2075,6 +2085,19 @@ const clearPending = () => {
               const last = typeof scraped.last === 'string' ? scraped.last : ''
               const think = typeof scraped.think === 'string' ? scraped.think : ''
               const count = typeof scraped.count === 'number' ? scraped.count : 0
+              /**
+               * ⭐ 回复是否停在未闭合围栏里（= 没写完）。抓取脚本算好的，
+               * 这里只取用 —— 见 hook.ts 的 isFenceOpen。
+               */
+              const fenceOpen = (scraped as { fenceOpen?: boolean }).fenceOpen === true
+              /**
+               * ⭐ 页面上的服务端错误提示（「服务器暂时不可用」等，空串 = 没有）。
+               * 非空 ⇒ 生成是被服务端掐断的，不能当成功交付。
+               */
+              const serverError =
+                typeof (scraped as { serverError?: unknown }).serverError === 'string'
+                  ? ((scraped as { serverError?: string }).serverError ?? '')
+                  : ''
 
               /**
                * ## 本轮回复来了吗？—— 两个判据**任一**成立
@@ -2176,6 +2199,114 @@ const clearPending = () => {
                  * 页面自己的按钮（正确做法）⇒ 点不到才退回看门狗（发「请继续」）。
                  */
                 const CONTINUE_MAX = 3
+
+                /**
+                 * ## ⭐⭐⭐ 不完整闸门：服务端掐断 / 围栏没闭合 ⇒ 不能当成功交付
+                 *
+                 * ## 用户实测（两个症状，同一根因）
+                 *
+                 * 网页版服务端不可用时会插一条「服务器暂时不可用」并**直接掐断
+                 * 生成**。插件当时两种后果都没处理：
+                 *
+                 *   1. **交付半截工具调用** —— DSH 收到的是
+                 *      「ldw + const r = await write(」，工具调用断在半句，
+                 *      用户看到「已完成」却什么都没做成；
+                 *   2. **用户不知道真实原因** —— 界面写「已完成」，用户以为
+                 *      是插件 bug，不会想到「服务端拒绝、该重试」。
+                 *
+                 * ## 判据（任一成立即本轮不算成功）
+                 *
+                 *   - `serverError` 非空 ⇒ 页面上明确写着服务端错误
+                 *   - `fenceOpen === true` ⇒ 回复停在未闭合围栏里，一定没写完
+                 *
+                 * ## 重试动作
+                 *
+                 * 先点页面自己的「继续生成」（同一条消息续写）；点不到就
+                 * **重发原 prompt** —— 服务端可能已经恢复，新一次请求能过。
+                 *
+                 * ## 提醒用户
+                 *
+                 * 面板状态 + 控制台。重试耗尽后交付时还会在正文前加一条明确
+                 * 警告 —— 宁可让用户看到「这次没成功」，也不要给一个看起来
+                 * 成功、实际半截的结果。
+                 */
+                const RETRY_MAX = 3
+                const incompleteReason =
+                  serverError !== ''
+                    ? `服务端提示「${serverError}」`
+                    : fenceOpen === true
+                      ? '回复停在未闭合的代码围栏里（工具调用被截断）'
+                      : ''
+                if (incompleteReason !== '' && retryCountRef.current < RETRY_MAX) {
+                  retryCountRef.current += 1
+                  console.warn(
+                    `[dsh-webin] 本轮回复不完整：${incompleteReason} —— 第 ${retryCountRef.current}/${RETRY_MAX} 次重试`,
+                    { serverError, fenceOpen, chars: last.length },
+                  )
+                  /** ⭐ 提醒用户（面板状态栏）。 */
+                  setStatus(
+                    `回复被中断：${incompleteReason}\n正在自动重试（第 ${retryCountRef.current}/${RETRY_MAX} 次）…`,
+                  )
+                  /**
+                   * 重试动作一：点页面自己的「继续生成」。
+                   * 服务端已恢复时这是最省事、语义最正确的一条路。
+                   */
+                  const contRaw2 = await execJs<string>(
+                    el,
+                    buildContinueScript(sendHintsFor(provider)),
+                    8_000,
+                  )
+                  let retried = false
+                  if (contRaw2 !== EXEC_TIMEOUT) {
+                    try {
+                      if ((JSON.parse(String(contRaw2)) as { ok?: boolean }).ok === true) retried = true
+                    } catch {
+                      /* 解析失败按「点不到」处理 */
+                    }
+                  }
+                  /**
+                   * 重试动作二：点不到「继续生成」⇒ **重发原 prompt**。
+                   * 服务端限流通常几秒就恢复，新一次请求比死等有效。
+                   */
+                  if (!retried && promptRef.current !== '') {
+                    const fillRaw2 = await execJs<string>(
+                      el,
+                      buildFillScript(promptRef.current, sendHintsFor(provider)),
+                      30_000,
+                    )
+                    if (fillRaw2 !== EXEC_TIMEOUT) {
+                      await new Promise((r) => setTimeout(r, pickSendDelay(currentConfig())))
+                      const trigRaw2 = await execJs<string>(
+                        el,
+                        buildTriggerScript(sendHintsFor(provider), promptRef.current),
+                        15_000,
+                      )
+                      if (trigRaw2 !== EXEC_TIMEOUT) {
+                        try {
+                          if ((JSON.parse(String(trigRaw2)) as { ok?: boolean }).ok === true) retried = true
+                        } catch {
+                          /* 按失败处理 */
+                        }
+                      }
+                    }
+                  }
+                  console.log(
+                    retried
+                      ? '[dsh-webin] 重试已发出 —— 等页面重新生成'
+                      : '[dsh-webin] 重试没能发出（继续按钮与重发都失败）—— 稍后再试',
+                  )
+                  /** 重置静默计时，给页面时间重新进入生成态。 */
+                  scrapedChangedAtRef.current = Date.now()
+                  return
+                }
+                /** 重试耗尽仍不完整 ⇒ 交付时带警告（见下面的 deliveredText）。 */
+                if (incompleteReason !== '') {
+                  console.warn(
+                    `[dsh-webin] 重试 ${RETRY_MAX} 次后仍不完整（${incompleteReason}）—— 交付并标注警告`,
+                  )
+                  setStatus(`回复被中断且重试未成功：${incompleteReason}\n已把现有内容交付，并在开头标注警告。`)
+                }
+
                 if (continueCountRef.current < CONTINUE_MAX) {
                   const contRaw = await execJs<string>(
                     el,
@@ -2283,6 +2414,20 @@ const clearPending = () => {
                   selector: scraped.selector,
                 })
                 clearPending()
+                /**
+                 * ⭐ 不完整时在正文前加一条**明确警告**。
+                 *
+                 * 用户要的是「提醒用户」—— 面板状态栏容易被忽略，而这条会跟着
+                 * 回复一起进 DSH 对话，用户一定看得到。宁可显得啰嗦，也不要让
+                 * 一个半截结果看起来像成功。
+                 */
+                const deliveredText =
+                  incompleteReason === ''
+                    ? last
+                    : `⚠️ **本次回复不完整**：${incompleteReason}。\n` +
+                      `已自动重试 ${RETRY_MAX} 次仍未成功，以下内容可能被截断（例如工具调用断在半句）。\n` +
+                      `建议：稍等片刻后重新发送，或在 LDW 面板里点「继续生成」。\n\n---\n\n` +
+                      last
                 const chatUrlRaw = await execJs<string>(el, 'location.href', 8_000)
                 const chatUrl = chatUrlRaw === EXEC_TIMEOUT ? '' : String(chatUrlRaw)
                 await fetchJson(`/dsh-webin/api/job/${jobId}/result`, {
@@ -2290,6 +2435,10 @@ const clearPending = () => {
                   headers: { 'content-type': 'application/json' },
                   body: JSON.stringify({
                     text: last,
+                    think,
+                    status: 'finished',
+                    via: 'dom',
+                    text: deliveredText,
                     think,
                     status: 'finished',
                     via: 'dom',
