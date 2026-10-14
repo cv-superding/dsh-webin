@@ -475,6 +475,54 @@ console.log('\n[?] ⭐⭐⭐ DSML 标记必须被剥离（用户实测：DSML �
   check('⭐⭐ HTML 标签不误伤', r7.text, '<div>内容</div> <p>段落</p>')
   const r8 = parseToolCalls('a < b 且 c > d', TOOLS)
   check('⭐⭐ 普通尖括号不误伤', r8.text, 'a < b 且 c > d')
+
+  /* ========================================================================
+   * ⭐⭐⭐ 第三种形态：**没有竖线的裸 XML**（用户第三次报障）
+   *
+   * 用户实测贴回来的泄漏长这样（一个竖线都没有）：
+   *
+   *     </invoke>
+   *     </parameter>
+   *     …（重复几十次）
+   *
+   * 前两版都要求含竖线 ⇒ 这种形态 `stripped = 0`，整段漏进对话。
+   * ====================================================================== */
+
+  /** 用户实测的原始形状：裸闭合标签堆叠。 */
+  const leak = '正文\n</invoke>\n</parameter>\n</invoke>\n</parameter>'
+  const r9 = parseToolCalls(leak, TOOLS)
+  check('⭐⭐⭐ 裸 </invoke> 被剥离', r9.text.includes('</invoke>'), false)
+  check('⭐⭐⭐ 裸 </parameter> 被剥离', r9.text.includes('</parameter>'), false)
+  check('⭐⭐⭐ 剥离后正文保留', r9.text.trim(), '正文')
+  check('⭐⭐⭐ 剥离时留诊断', r9.failed.some((f) => f.includes('DSML')), true)
+
+  /** 开启标签也要剥（带属性）。 */
+  const r10 = parseToolCalls('<invoke name="write">x</invoke>', TOOLS)
+  check('⭐⭐ 裸 invoke 开启标签被剥', r10.text.includes('invoke'), false)
+
+  /** 带命名空间的 AntML 形态（模型另一种叫法）。 */
+  const r11 = parseToolCalls('<antml:invoke name="x">y</antml:invoke>', TOOLS)
+  check('⭐⭐ antml:invoke 被剥', r11.text.includes('invoke'), false)
+  const r12 = parseToolCalls('<dsml:parameter name="a">1</dsml:parameter>', TOOLS)
+  check('⭐⭐ dsml:parameter 被剥', r12.text.includes('parameter'), false)
+
+  /**
+   * ⚠️ 白名单的**安全边界** —— 这几条是防止改动过宽的唯一钢钉。
+   *
+   * 裸 XML 剥离最容易误伤正文。下面这些全部**必须原样保留**。
+   */
+  const keepCases = [
+    ['正文里的 invoke 单词', 'we should invoke the function'],
+    ['正文里的 parameter 单词', 'the parameter is 3'],
+    ['自定义元素（不得误吃）', '<my-invoke-widget>x</my-invoke-widget>'],
+    ['正常 a 标签', '<a href="https://x">link</a>'],
+    ['正常 img 标签', '<img src="x.png">'],
+    ['正常 span', '<span class="k">hi</span>'],
+  ]
+  for (const [name, input] of keepCases) {
+    const r = parseToolCalls(input, TOOLS)
+    check(`⭐⭐⭐ 不误伤：${name}`, r.text, input)
+  }
 }
 
 

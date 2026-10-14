@@ -5,6 +5,37 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## 未发布
+
+### 修复：无竖线的裸 XML 工具标记漏进对话（第三种形态）
+
+**用户实测**：回复里整段漏出这种残骸（一个竖线都没有）：
+
+```
+</invoke>
+</parameter>
+</invoke>
+</parameter>
+…（重复几十次）
+```
+
+**根因**：现有 `stripDsml()` 的两条正则都要求标签里**至少有一个竖线**
+（`<｜DSML｜tool_calls>` 或 `<|tool_calls|>`）。用户这份是**纯 XML 形态**
+⇒ `stripped = 0`，正则从未命中，整段原样交回 DSH。
+
+**这是同一个 bug 的第三个变体**（前两次：只认单竖线 / 漏了双竖线）。
+
+**修法**：新增**标签白名单**处理裸 XML 形态 —— 只剥工具调用专属标签名
+（`tool_calls` / `function_calls` / `invoke` / `parameter` / `tool_call` / `tool_use` /
+`tool_result`），并允许 `antml:` / `dsml:` 命名空间前缀。
+
+**为什么不能“剥掉所有 XML 标签”**：正文里合法出现 `<div>` / `<span>` / `<a href>`
+是正常的（模型在讲 HTML），无差别剥会**吃掉正文**。
+
+**回归保护**：`scripts/verify-tools.mjs` 新增 16 项，其中 6 项专门锁**不得误伤**：
+正文里的 `invoke` / `parameter` 单词、自定义元素 `<my-invoke-widget>`、
+`<a>` / `<img>` / `<span>` 均必须**原样保留**。
+
 ## v0.2.23
 
 ### 修复：心跳判死阈值贴着节流后的实际间隔 ⇒ `online` 来回抖动
