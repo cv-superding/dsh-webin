@@ -792,6 +792,19 @@ function classifyFailure(message: string): { code: string; providerRetryAfterMs?
   if (/心跳|失联|超时|timeout|面板未连接|无人领取/i.test(m)) {
     return { code: 'TIMEOUT' }
   }
+  /**
+   * ⭐⭐ 未登录 ⇒ **不可重试**。
+   *
+   * 实测（端到端自测）：页面停在登录页时客户端报
+   * `no-input: 找不到可见的输入框（页面结构可能已变，或还停在登录页）`。
+   * 如果按传输类处理，DSH 会**白重试 5 次**（每次都要等退避），
+   * 而重试对「未登录」毫无帮助 —— 必须由用户去登录。
+   *
+   * 所以含「登录」字样的失败一律归到不可重试的自定义码。
+   */
+  if (/登录页|未登录|not logged in|sign[ _-]?in/i.test(m)) {
+    return { code: 'WEBIN_NOT_LOGGED_IN' }
+  }
   /** 发送链路问题（没发出去、输入框丢了）⇒ 传输类（可重试）。 */
   if (/没发出去|send-failed|输入框|发送失败|触发发送/i.test(m)) {
     return { code: 'TRANSPORT' }
