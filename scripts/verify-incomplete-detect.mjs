@@ -225,6 +225,67 @@ console.log('\n[4] ⭐⭐⭐ lastCodeBlockIncomplete：围栏被页面补闭合�
   check('正文以加号结尾不算（不误报）', lastCodeBlockIncomplete('1 + 2 +'), false)
 }
 
+console.log('\n[6] ⭐⭐⭐ isGenerating：停止键是**纯图标**，只能靠 class 特征')
+{
+  /**
+   * ## 为什么必须测它（本轮实测：判据错了很久没人发现）
+   *
+   * 旧判据只找 aria-label / title 含「停止 / stop」的元素 —— 但同一个文件里
+   * buildStopScript 的注释早就写明：「DeepSeek 的停止键是**纯图标**
+   * （无 aria-label、无文字），只能靠 class 特征区分」。
+   *
+   * 两处自相矛盾 ⇒ isGenerating() **恒返回 false** ⇒
+   *   - 「生成中不交付」那道闸门从来没生效过
+   *   - 「页面在生成就不算没发出去」也失效（用户实测：网页版在生成，
+   *     DSH 却报「消息似乎没有发出去」）
+   *
+   * 所以这里用假 DOM 把**校准过的特征**逐条钉住。
+   */
+  const isGenerating = new Function(
+    `${extractFn('labelOfEl')}\n${extractFn('isGenerating')}\nreturn isGenerating`,
+  )()
+
+  function el(opts = {}) {
+    const { cls = '', aria = null, text = '', visible = true } = opts
+    return {
+      offsetWidth: visible ? 20 : 0,
+      offsetHeight: visible ? 20 : 0,
+      className: cls,
+      textContent: text,
+      getAttribute: (k) => (k === 'aria-label' ? aria : null),
+    }
+  }
+  const run = (els) => {
+    const sandbox = { JSON, RegExp, Array, String, Number, Object, Boolean, Error }
+    sandbox.document = { querySelectorAll: () => els }
+    /** ⚠️ labelOfEl 也要一起注入 —— 少了它 isGenerating 会抛错被吞、恒返回 false。 */
+    return vm.runInContext(
+      `(() => { ${extractFn('labelOfEl')}\n${extractFn('isGenerating')}\nreturn isGenerating() })()`,
+      vm.createContext(sandbox),
+    )
+  }
+
+  /** 真实校准结论：生成中停止键带 ds-button--outlined。 */
+  check('⭐⭐⭐ ds-button--outlined ⇒ 生成中', run([el({ cls: 'ds-button--outlined ds-button--circle' })]), true)
+  /** 发送键独有特征 ⇒ 不能误判成生成中。 */
+  check('⭐⭐ ds-button--filled ⇒ 不是生成中', run([el({ cls: 'ds-button--filled ds-button--circle' })]), false)
+  check('⭐⭐ ds-button--primary ⇒ 不是生成中', run([el({ cls: 'ds-button--primary' })]), false)
+  /** 生成中发送键**不会消失** ⇒ 两个都在时仍要判生成中。 */
+  check(
+    '⭐⭐ 发送键与停止键同屏 ⇒ 仍判生成中',
+    run([el({ cls: 'ds-button--filled' }), el({ cls: 'ds-button--outlined' })]),
+    true,
+  )
+  /** 语义兜底：页面改版后若补上 aria-label，也认。 */
+  check('⭐ aria-label 含「停止」⇒ 生成中（兜底）', run([el({ aria: '停止生成' })]), true)
+  check('⭐ aria-label 含 stop ⇒ 生成中（兜底）', run([el({ aria: 'Stop' })]), true)
+  /** 不可见的不算。 */
+  check('⭐ 不可见 ⇒ 不算生成中', run([el({ cls: 'ds-button--outlined', visible: false })]), false)
+  check('⭐ 空页面 ⇒ 不是生成中', run([]), false)
+  /** 普通按钮不能误判。 */
+  check('⭐ 普通按钮 ⇒ 不是生成中', run([el({ cls: 'ds-button', text: '发送' })]), false)
+}
+
 console.log('\n[5] 生成器可解析（防模板转义把脚本弄坏）')
 {
   try {

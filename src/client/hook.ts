@@ -1406,19 +1406,60 @@ export function buildScrapeScript(): string {
      */
 
     /**
-     * ⭐ 页面是否**仍在生成**（停止按钮存在）。
+     * ## ⭐⭐⭐ 页面是否**仍在生成**（停止按钮存在）
      *
-     * 生成中输入框的发送键会变成停止键（方块图标）。识别特征：
-     * aria-label/title 含「停止/stop」的可点击元素。
-     * 找不到任何特征时返回 false（不阻止交付 —— 宁早勿卡）。
+     * ## ⚠️ 旧判据是错的，而且错了很久（本轮实测发现）
+     *
+     * 旧写法只找 aria-label / title 含「停止 / stop」的元素。但**本文件里
+     * buildStopScript 的注释早就写明了**：「DeepSeek 的停止键是**纯图标
+     * （无 aria-label、无文字）**，只能靠 class 特征区分」。
+     *
+     * 两处判据自相矛盾，而错的是这一处 ⇒ isGenerating() **恒返回 false** ⇒
+     *   - 「生成中不交付」那道闸门**从来没生效过**
+     *   - 依赖它的判据（如「页面在生成就不算没发出去」）也全部失效
+     *
+     * 实测证据：v0.2.5 加了 generating 一票否决后，用户仍然在网页版生成中
+     * 收到「消息似乎没有发出去」—— 因为 generating 压根不是 true。
+     *
+     * ## 现在的判据：用**已校准的 class 特征**（与 buildStopScript 同源）
+     *
+     *   - 发送键独有：ds-button--filled / ds-button--primary ⇒ 排除
+     *   - 停止键独有：ds-button--outlined ⇒ 命中即判定生成中
+     *   - 语义兜底：页面改版后若补上 aria-label，也认
+     *
+     * 仍然保持「找不到就返回 false（不阻止交付，宁早勿卡）」的取舍。
+     *
+     * ⚠️ 本注释在模板字符串里，**不能出现反引号** —— 会提前终止模板
+     * （这个坑本轮踩了四次，已加审计防它）。
      */
-    const GENERATING_SIG = '[aria-label*="停止"], [aria-label*="stop" i], [title*="停止"], [title*="stop" i]';
+    function labelOfEl(el) {
+      var parts = [];
+      try {
+        if (el.getAttribute) {
+          parts.push(el.getAttribute('aria-label') || '');
+          parts.push(el.getAttribute('title') || '');
+          parts.push(el.getAttribute('data-testid') || '');
+        }
+        if (el.className && typeof el.className === 'string') parts.push(el.className);
+        var t = (el.textContent || '').trim();
+        if (t.length <= 24) parts.push(t);
+      } catch (e) {}
+      return parts.join(' ').toLowerCase();
+    }
+
     function isGenerating() {
       try {
-        var stops = document.querySelectorAll(GENERATING_SIG);
-        for (var gi = 0; gi < stops.length; gi++) {
-          var st = stops[gi];
-          if (st.offsetWidth > 0 && st.offsetHeight > 0) return true;
+        var all = document.querySelectorAll('button, [role="button"]');
+        for (var gi = 0; gi < all.length; gi++) {
+          var st = all[gi];
+          if (!st.offsetWidth && !st.offsetHeight) continue;
+          var L = labelOfEl(st);
+          /** 发送键独有 ⇒ 明确排除（生成中它**不会消失**）。 */
+          if (/ds-button--filled|ds-button--primary/.test(L)) continue;
+          /** 停止键独有 ⇒ 命中即判定生成中。 */
+          if (/ds-button--outlined/.test(L)) return true;
+          /** 语义兜底（页面改版后可能补上 aria-label）。 */
+          if (/stop|停止|中断|abort/.test(L)) return true;
         }
       } catch (e) {}
       return false;

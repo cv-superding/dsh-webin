@@ -83,12 +83,40 @@ function scan(src) {
     if (stack[stack.length - 1] === 'tpl') {
       if (c === '\\') {
         const nx = at(i + 1) ?? ''
-        if (nx !== '' && !LEGIT.has(nx) && SUSPICIOUS.has(nx)) out.push({ line, esc: c + nx })
+        if (nx !== '' && !LEGIT.has(nx) && SUSPICIOUS.has(nx)) out.push({ line, kind: 'escape', esc: c + nx })
         i += 2
         continue
       }
       if (c === '`') {
         stack.pop()
+        /**
+         * ⚠️ **误闭合检测**：模板正文里不小心写了一个反引号（典型场景：在
+         * 注释里写 markdown 代码片段，如反引号包住的标识符），会**提前终止
+         * 模板** ⇒ 后续内容变成代码 ⇒ 构建报 PARSE_ERROR。
+         *
+         * 判据：闭合后**同一行 60 字符内**又出现一个反引号。
+         * 合法的模板结尾后面跟的是换行 / 分号 / 括号，同一行不会再有反引号。
+         *
+         * （这个坑一天踩了四次，构建报错又很难看懂，所以加在这里提前报。）
+         */
+        const rest = src.slice(i + 1, i + 61)
+        const nlAt = rest.indexOf('\n')
+        const tickAt = rest.indexOf('`')
+        /**
+         * ⚠️ 只对**注释行**报，否则误报一片。
+         *
+         * 合法的一行里出现多个反引号很常见：模板拼接（`${a}px`, `${b}px`）、
+         * 三元里的两个模板、字符串里的三反引号 —— 实测这些全是误报。
+         *
+         * 而真正的失败模式很具体：**在模板内的注释行里写反引号**
+         * （典型：JSDoc 里用反引号包标识符）。那种行 trimmed 后以 * 或 // 开头。
+         */
+        const lineStart = src.lastIndexOf('\n', i) + 1
+        const lineText = src.slice(lineStart, i).trimStart()
+        const isCommentLine = lineText.startsWith('*') || lineText.startsWith('//')
+        if (isCommentLine && tickAt >= 0 && (nlAt < 0 || tickAt < nlAt)) {
+          out.push({ line, kind: 'stray-backtick', esc: '`' })
+        }
         i += 1
         continue
       }
@@ -206,11 +234,17 @@ console.log('\n[0] 扫描器自检（合成样本）')
     'const codeRe = /[\\s]+/.test(s);',
     'const nested = `x ${/[`]+/.test(s) ? 1 : 2} y`;',
     'const ctrl = `line\\nbreak`;',
+    // 误闭合：**模板正文的注释行**里写了反引号（下一个反引号在同一行）
+    'const tpl = `(function () {',
+    '     * 注释里写了 `word` 这样的片段`',
+    // 误报防护：合法的一行多个模板，**不该**被报
+    'const ok2 = `${a}px` + `${b}px`;',
   ].join('\n')
   const found = scan(sample).map((h) => h.esc)
-  check(`自检命中 2 处（实际 ${JSON.stringify(found)}）`, found.length, 2)
+  check(`自检命中 3 处（实际 ${JSON.stringify(found)}）`, found.length, 3)
   check('自检命中反斜杠-s', found.includes('\\s'), true)
   check('自检命中反斜杠-斜杠', found.includes('\\/'), true)
+  check('自检命中误写反引号', found.includes('`'), true)
 }
 
 const hits = []

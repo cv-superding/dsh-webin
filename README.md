@@ -1061,6 +1061,22 @@ Invoke-WebRequest "http://127.0.0.1:19387/dsh-webin/api/job/next" -Headers $h -U
 （条数没增长、内容没变化、思考区也没读到）—— 三个条件同时成立就会误判成
 「没发出去」。所以只要页面在生成，就绝不放弃。
 
+## 「页面是否在生成」靠什么判断
+
+**不能靠 aria-label** —— DeepSeek 的停止键是**纯图标**（无 aria-label、无文字），
+`aria-label*="停止"` 这类选择器**永远匹配不到**。曾经因此让 `isGenerating()`
+恒返回 false，连带「生成中不交付」闸门从未生效。
+
+正确判据是**校准过的 class 特征**（与 `buildStopScript` 同源）：
+
+| 特征 | 含义 |
+|---|---|
+| `ds-button--outlined` | **停止键独有** ⇒ 命中即判定生成中 |
+| `ds-button--filled` / `ds-button--primary` | **发送键独有** ⇒ 排除（生成中它不会消失） |
+| aria-label / title 含 stop / 停止 | 语义兜底（页面改版后可能补上） |
+
+找不到任何特征时返回 false（不阻止交付 —— 宁早勿卡）。
+
 ## 已知限制
 
 ### L1：guest partition 不持久（需重启后重新登录）

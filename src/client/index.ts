@@ -2187,7 +2187,7 @@ const clearPending = () => {
                 /**
                  * ⭐⭐ 生成结束闸门：页面还在生成（停止按钮在）⇒ 不交付。
                  */
-                if ((scraped as { generating?: boolean }).generating === true) {
+                if (generating === true) {
                   console.log('[dsh-webin] 内容静默但页面仍在生成（停止按钮在）—— 继续等')
                   scrapedChangedAtRef.current = now
                   return

@@ -5,6 +5,43 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.6
+
+### 修复：`isGenerating()` 判据错了很久 —— 「生成中不交付」闸门从未生效
+
+**用户实测**：网页版还在生成，DSH 又报「消息似乎没有发出去」，而 v0.2.5 已经
+加了 `generating` 一票否决。查下来发现 **`generating` 压根不是 true**。
+
+**根因：两处判据自相矛盾，而错的是 `isGenerating()`**
+
+旧写法只找 `aria-label` / `title` 含「停止 / stop」的元素。但**同一个文件里
+`buildStopScript` 的注释早就写明了**：
+
+> DeepSeek 的停止键是**纯图标（无 aria-label、无文字）**，只能靠 class 特征区分。
+
+`buildStopScript` 用的是校准过的 class 特征（`ds-button--outlined` 独有），
+而 `isGenerating()` 用的是永远匹配不到的 aria-label ⇒ **恒返回 false**。后果：
+
+- **「生成中不交付」那道闸门从来没生效过** —— 网页版还在生成时也可能交付
+  （之前几次「半截回复」很可能有这个因素）
+- v0.2.5 的 `generating` 一票否决**白加了**（`generating` 不是 true）
+- 依赖它的其它判据全部失效
+
+**修法**：改用与 `buildStopScript` 同源的校准特征 ——
+发送键独有（`ds-button--filled` / `ds-button--primary`）排除、
+停止键独有（`ds-button--outlined`）命中即判定生成中、保留语义兜底。
+
+同时把交付闸门改成读**同一个**局部 `generating`（单一来源，避免两处再分叉）。
+
+### 测试
+
+- `verify-incomplete-detect` 新增 9 条 `isGenerating` 行为用例（假 DOM）：
+  校准特征命中、发送键排除、两者同屏仍判生成中、语义兜底、不可见不算、空页面
+- `verify-live` 里那条**钉住错误判据**的断言（要求 `aria-label*="停止"`）已换成
+  校准后的 class 特征 —— 它正是这个 bug 能存活这么久的原因之一
+- `verify-escapes` 扩展：新增「模板内的**注释行**里误写反引号」检测
+  （这个坑本轮踩了四次，构建报错又难懂）
+
 ## v0.2.5
 
 ### 修复：网页版正在生成，DSH 却判「没发出去」直接失败

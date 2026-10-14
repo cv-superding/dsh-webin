@@ -656,8 +656,23 @@ console.log('\n[17] ⭐⭐⭐ 生成结束闸门：停止按钮在 ⇒ 不交付
   const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
 
   check('⭐⭐ 抓取返回 generating', /generating: isGenerating\(\)/.test(hookSrc), true)
-  check('⭐ 停止按钮特征（aria-label 停止/stop）', /aria-label\*="停止"/.test(hookSrc), true)
-  check('⭐⭐ 交付闸门：generating===true 不交付', /\(scraped as \{ generating\?: boolean \}\)\.generating === true/.test(clientSrc), true)
+  /**
+   * ## ⚠️ 这条断言原来钉的是**错误判据**
+   *
+   * 旧断言要求「停止按钮特征 = aria-label 含停止/stop」—— 但同一个文件里
+   * buildStopScript 的注释早就写明：DeepSeek 的停止键是**纯图标**
+   * （无 aria-label、无文字），只能靠 class 特征区分。
+   *
+   * 两处自相矛盾且错的是这一处 ⇒ isGenerating() 恒返回 false ⇒
+   * 「生成中不交付」那道闸门**从来没生效过**（用户实测：网页版在生成，
+   * DSH 却报「消息似乎没有发出去」）。
+   *
+   * 现在钉**校准过的 class 特征**，与 buildStopScript 同源。
+   */
+  check('⭐⭐ 停止键独有特征（ds-button--outlined）', /ds-button--outlined/.test(hookSrc), true)
+  check('⭐⭐ 发送键特征要排除（filled/primary）', /ds-button--filled\|ds-button--primary/.test(hookSrc), true)
+  check('⭐ 保留语义兜底（页面改版后可能补 aria-label）', /stop\|停止\|中断\|abort/.test(hookSrc), true)
+  check('⭐⭐ 交付闸门：generating===true 不交付', /if \(generating === true\) \{/.test(clientSrc), true)
   /** 字段缺失（旧脚本）时不阻止 —— 宁早勿卡。 */
   check('⭐⭐ 字段缺失不阻止交付', /generating === true\) \{[\s\S]{0,200}?return/.test(clientSrc), true)
 
