@@ -528,6 +528,37 @@ console.log('\n[?] ⭐⭐⭐ 正文里混进思考时必须剔除（用户实测
   check('⭐⭐ 变化判定也用 lastClean', /scrapedRef\.current !== lastClean/.test(clientSrc), true)
 }
 
+console.log('\n[?] ⭐⭐⭐ readThink 必须认**新版**文案（真根因）')
+{
+  /**
+   * ## 用户实测（第三次报同一个症状）
+   *
+   * 思考又被当正文输出。查下来真根因在 `readThink()`：
+   *
+   *     if (wt.indexOf('已思考') === -1 || wt.length > 200) continue;
+   *
+   * 它**硬匹配旧文案「已思考」** —— 而页面已改成「**已完成分析**」，
+   * 匹配不上 ⇒ `readThink()` 返回**空** ⇒ 上一版加的「正文混进思考就剔除」
+   * 兜底**根本没有东西可剔除** ⇒ 思考原样漏出。
+   *
+   * ⚠️ 教训：同一份文案判据散落在多处（render 排除 / readThink 定位 / 前缀清理），
+   * 改一处漏两处。所以现在**统一用 isThinkLabel()**，不再各写各的。
+   */
+  const hookSrc = readFileSync(join(ROOT, 'src', 'client', 'hook.ts'), 'utf8')
+
+  check('⭐⭐⭐ 折叠条定位改用 isThinkLabel', /if \(!isThinkLabel\(wt\)\) continue;/.test(hookSrc), true)
+  check('⭐⭐ 深层判据也用 isThinkLabel', /isThinkLabel\(String\(wkk\[wj\]\.textContent/.test(hookSrc), true)
+  check('⭐⭐ 前缀清理含新文案', hookSrc.includes('已完成分析') && hookSrc.includes('正在分析请求'), true)
+  /** 逐行去掉「思考 · 用户」这类分组标题。 */
+  check('⭐⭐ 逐行过滤标签行', /segs\.every/.test(hookSrc), true)
+  /** 不许再残留硬匹配的旧文案判据。 */
+  check(
+    '⭐⭐ 不再有硬匹配「已思考」的定位',
+    !/wt\.indexOf\('已思考'\)/.test(hookSrc),
+    true,
+  )
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1
 /** ⚠️ 显式退出 —— 防 handle 悬挂把 npm run check 卡死（verify-lifecycle 实测踩过）。 */
