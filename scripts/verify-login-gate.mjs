@@ -344,6 +344,32 @@ console.log('\n[11] client 与 host 用同一套登录判断（不能各写一�
   check('⭐ client 没有本地重复定义', /^function snapshotLooksLoggedIn/m.test(client), false)
 }
 
+console.log('\n[?] ⭐⭐⭐ 登录页的文字绝不能被当成回复交付')
+{
+  /**
+   * ## 用户实测（真实事故）
+   *
+   * 会话掉线跳到登录页后，DOM 抓取把登录页内容读成了「最新回复」，交付给 DSH：
+   *
+   *     +86
+   *     注册登录即代表已阅读并同意用户的 用户协议 与 隐私政策...
+   *     密码登录使用 Apple 账号登录
+   *     微信扫码登录
+   *     浙ICP备2023025841号 · 联系我们
+   *
+   * ## 为什么危险
+   *
+   * DOM 抓取是**兜底**路径，只认「最后一个像回复的容器」。页面跳到登录页后，
+   * 它读到的东西完全不是回复 —— 而这类内容交付后**看起来像正常文本**，
+   * 比报错更难察觉。
+   */
+  const clientSrc = readFileSync(join(ROOT, 'src', 'client', 'index.ts'), 'utf8')
+
+  check('⭐⭐⭐ 有登录页 URL 判据', /sign\[_-\]\?in|sign\[_-\]\?up/.test(clientSrc), true)
+  check('⭐⭐ 命中后拒绝交付抓取内容', /拒绝把页面文字当回复交付/.test(clientSrc), true)
+  check('⭐⭐ 改为明确报错', /页面已掉线到登录页/.test(clientSrc), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1
