@@ -517,6 +517,32 @@ console.log('\n[?] ⭐⭐⭐ HTTP 状态码必须走完四层链路（官方 Llm
   check('④ 拿不到时不带 status', /\{ status: st \} : \{\}/.test(adapterSrc), true)
 }
 
+console.log('\n[?] ⭐⭐⭐ 空回复必须报 EMPTY_RESPONSE（否则永远不会重试）')
+{
+  /**
+   * ## 用户实测
+   *
+   * 「依旧仅有思考，没有输出」—— 回复完全为空，而且**一次都不重试**。
+   *
+   * ## 根因
+   *
+   * 页面弹出「服务器暂时不可用」后自己停下，模型在思考之后什么都没产出。
+   * 插件交付**空回复 + finish:stop** ⇒ DSH 认为「成功了」⇒ **不重试**。
+   *
+   * ## 官方契约
+   *
+   * dsh-llm-retry 的 normal mode 对 **EMPTY_RESPONSE**、RATE_LIMIT、SERVER、
+   * TIMEOUT、TRANSPORT 最多重试五次 —— 空回复**明确在可重试集合里**。
+   */
+  const adapterSrc = readFileSync(join(ROOT, 'src', 'host', 'adapter.ts'), 'utf8')
+
+  check('⭐⭐⭐ 判空用 trim', /parsed\.text\.trim\(\) === '' && parsed\.calls\.length === 0/.test(adapterSrc), true)
+  check('⭐⭐⭐ 空回复报 EMPTY_RESPONSE', /code: 'EMPTY_RESPONSE'/.test(adapterSrc), true)
+  check('⭐⭐ 空回复以 error 结束', /emptyReply[\s\S]{0,400}kind: 'error'/.test(adapterSrc), true)
+  /** 非空回复仍走原来的 stop / tool-calls。 */
+  check('⭐⭐ 非空仍用 stop/tool-calls', /parsed\.calls\.length > 0 \? \{ kind: 'tool-calls' \} : \{ kind: 'stop' \}/.test(adapterSrc), true)
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 cleanupState()
 process.exitCode = fail === 0 ? 0 : 1

@@ -1292,6 +1292,45 @@ export function createAdapter(deps: AdapterDeps) {
      * 结束原因：有工具调用时必须是 `tool-calls`
      * （DSH 据此决定「执行工具后继续」而不是「本轮结束」）。
      */
+    /**
+     * ## 空回复必须报 EMPTY_RESPONSE，不能报 stop
+     *
+     * ## 为什么（用户实测：只有思考、正文全空，而且一次都不重试）
+     *
+     * 真实场景：网页版弹出「服务器暂时不可用」并自己停下 —— 模型在思考之后
+     * **什么都没产出**。此时插件交付了一个**空回复 + stop**，DSH 认为「成功了」
+     * ⇒ **不会重试** ⇒ 用户看到一个永远空着的回复。
+     *
+     * ## 官方契约
+     *
+     * dsh-llm-retry 的 normal mode 对 **EMPTY_RESPONSE**、RATE_LIMIT、SERVER、
+     * TIMEOUT、TRANSPORT 最多重试五次 —— 空回复是**明确列在可重试集合里**的。
+     *
+     * 所以：正文与工具调用都为空时，报 `error` + `EMPTY_RESPONSE`，
+     * 让 DSH 的重试机制接手（v0.2.14 已让失败码合规，v0.2.17 已挂载重试插件）。
+     *
+     * ⚠️ 判据用 trim 后的空串 —— 只有空白字符也算空。
+     */
+    const emptyReply = parsed.text.trim() === '' && parsed.calls.length === 0
+    if (emptyReply) {
+      deps.logger?.warn?.(
+        '本轮回复为空（正文与工具调用都没有）—— 报 EMPTY_RESPONSE，交给 DSH 重试',
+      )
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            code: 'EMPTY_RESPONSE',
+            message:
+              '网页版这一轮没有产出任何内容（可能被「服务器暂时不可用」之类的中断截断）。' +
+              '已按官方 EMPTY_RESPONSE 上报，请由重试机制接手。',
+          },
+        },
+      }
+      return
+    }
+
     yield {
       type: 'finish',
       reason: parsed.calls.length > 0 ? { kind: 'tool-calls' } : { kind: 'stop' },
