@@ -172,7 +172,27 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
   }
 
   // ---------- 回复提取 ----------
-  function createExtractor() {
+  /**
+   * @param thinkingEnabled - 本轮请求体里的 thinking_enabled。
+   *
+   * ## ⭐⭐⭐ 为什么必须传进来（照参考实现 F25 的修复）
+   *
+   * 真实事故（参考实现 dsh-deepseek-web-login 用真实帧复现并记录）：
+   * **思考的归属完全依赖首帧快照里的 THINK fragment**。一旦那份快照没能进入
+   * 状态机（整帧丢失、或服务端先发了 fragments: []），fragmentTypes 就一直是
+   * 空的，而旧实现在「无 fragment 可续」时**无条件当正文发射** ⇒ **整段思考上屏**。
+   *
+   * 实测后果（参考实现记录）：一轮 2062 字符、两轮 10526 / 4360 字符**全部进正文**。
+   * 而 dsh-webin 的 route() 有一模一样的缺陷：
+   *
+   *     var kind = forceKind ?? (currentIsThink() ? 'think' : 'text');   // 空表 ⇒ 'text'
+   *
+   * ## 修法（照参考实现）
+   *
+   * 开了思考、但**还没有任何 fragment** 时，裸增量先**缓冲**，等 fragment 出现
+   * 再按它的类型定归属。未开思考时不缓冲（没有歧义），保持旧行为。
+   */
+  function createExtractor(thinkingEnabled) {
     var text = '';
     var think = '';
     var finished = false;
@@ -286,9 +306,42 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       return String(fragmentTypes[currentIndex]).toUpperCase() === 'THINK';
     }
 
+    /**
+     * ⭐⭐⭐ 通道未知时的暂存文本（照参考实现 F25）。
+     *
+     * 只在「本轮开了思考、但还没有任何 fragment」时使用 —— 正常流不会走到这里
+     * （首帧快照就带着 THINK fragment）。有了它，「快照丢失 ⇒ 整段思考进正文」
+     * 这条事故链就断了。
+     */
+    var orphanBuffer = '';
+    /** 是否正在缓冲（开了思考且还没有 fragment 类型可依据）。 */
+    function shouldBufferOrphan() {
+      return thinkingEnabled === true && fragmentTypes.length === 0;
+    }
+    /**
+     * 把暂存文本按**刚确定的 fragment 类型**归属并落盘。
+     * 在「fragment 类型表第一次有内容」时调用。
+     */
+    function flushOrphan() {
+      if (orphanBuffer === '') return;
+      var piece = orphanBuffer;
+      orphanBuffer = '';
+      route(piece);
+    }
+
     /** 把一段文本按当前 fragment 类型分流。 */
     function route(piece, forceKind) {
       if (!piece) return;
+      /**
+       * ⚠️ 顺序要紧：**先判要不要缓冲**，再分流。
+       * 缓冲期间不能落盘，否则思考就进了正文（这正是要修的事故）。
+       */
+      if (forceKind === undefined || forceKind === null) {
+        if (shouldBufferOrphan()) {
+          orphanBuffer += piece;
+          return;
+        }
+      }
       var kind = forceKind !== undefined && forceKind !== null ? forceKind : (currentIsThink() ? 'think' : 'text');
       if (kind === 'think') think += piece;
       else text += piece;
@@ -360,6 +413,8 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
           var idx = fragmentTypes.length;
           fragmentTypes.push(typeof f.type === 'string' ? f.type : 'RESPONSE');
           currentIndex = idx;
+          /** ⭐ 类型表刚有内容 ⇒ 把之前暂存的「孤儿文本」按现在的归属落盘。 */
+          flushOrphan();
           if (!piece) continue;
           route(piece, String(f.type).toUpperCase() === 'THINK' ? 'think' : 'text');
         }
@@ -387,6 +442,8 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
           }
           fragmentTypes.length = frags.length;
           currentIndex = frags.length - 1;
+          /** ⭐ 快照建立了类型表 ⇒ 落盘暂存文本。 */
+          flushOrphan();
           if (t) text = t;
           if (k) think = k;
         }
@@ -415,6 +472,8 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
          */
         if (isThinkField(obj.p)) fragmentTypes[fragIdx] = 'THINK';
         else if (isTextField(obj.p)) fragmentTypes[fragIdx] = 'RESPONSE';
+        /** ⭐ 路径帧给出了类型 ⇒ 落盘暂存文本。 */
+        flushOrphan();
         var kindFrag = isThinkField(obj.p) ? 'think' : isTextField(obj.p) ? 'text' : null;
         if (kindFrag === 'think') think += obj.v;
         else if (kindFrag === 'text') {
@@ -453,7 +512,14 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       get think() { return think; },
       get finished() { return finished; },
       get incomplete() { return incomplete; },
-      get businessError() { return businessError; }
+      get businessError() { return businessError; },
+      /**
+       * ⭐ 结束时若还有暂存文本 ⇒ **兜底落盘**。
+       *
+       * 不能丢字：极端情况下整轮都没有 fragment 类型（页面改版 / 快照全丢），
+       * 那时宁可当正文交出去，也不能让它凭空消失。
+       */
+      flushOrphan: function () { flushOrphan(); },
     };
   }
 
@@ -499,9 +565,25 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
     });
   }
 
+  /**
+   * ⭐ 从请求体里读 thinking_enabled。
+   *
+   * F25 的缓冲判据需要它：**开了思考才缓冲**（没开思考时没有歧义，保持旧行为）。
+   * 读不到就当未开启 —— 那样行为与旧版一致，不会更差。
+   */
+  function readThinkingEnabled(body) {
+    try {
+      if (typeof body !== 'string' || body === '') return false;
+      var j = JSON.parse(body);
+      return j && j.thinking_enabled === true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   // ---------- 单次请求的观察会话 ----------
-  function watchResponse(response, onDone) {
-    var ex = createExtractor();
+  function watchResponse(response, onDone, thinkingEnabled) {
+    var ex = createExtractor(thinkingEnabled);
     var decoder = createFrameDecoder();
     var reader = response.body.getReader();
     var dec = new TextDecoder();
@@ -564,8 +646,16 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
               } catch (e) { /* ignore */ }
               return;
             }
+            /**
+             * ⭐ 把 thinking_enabled 传进去 —— F25 的缓冲判据依赖它。
+             * 不传的话 createExtractor 收到 undefined，缓冲永远不启用（修复失效）。
+             */
+            var te = readThinkingEnabled(
+              (init && typeof init.body === 'string' ? init.body : '') ||
+                (input && typeof input.body === 'string' ? input.body : ''),
+            );
             // 必须 clone —— 页面自己要消费原 body，我们只看副本
-            try { watchResponse(res.clone()); } catch (e) { /* ignore */ }
+            try { watchResponse(res.clone(), undefined, te); } catch (e) { /* ignore */ }
           }).catch(function () {});
         }
       } catch (e) { /* ignore */ }
@@ -586,15 +676,19 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       return origOpen.apply(this, arguments);
     };
 
-    OrigXHR.prototype.send = function () {
+    OrigXHR.prototype.send = function (body) {
       var meta = info.get(this);
+      /** ⭐ 记下请求体 —— F25 的缓冲判据要从里面读 thinking_enabled。 */
+      try {
+        if (meta) meta.body = body;
+      } catch (e) { /* ignore */ }
       var isPost = meta && String(meta.method).toUpperCase() === 'POST';
       /** 记下路径（诊断用）。 */
       if (isPost) notePostPath(meta.url);
       var isTarget = isPost && samePath(meta.url, COMPLETION);
       if (isTarget) {
         noteCompletionRequest();
-        var ex = createExtractor();
+        var ex = createExtractor(readThinkingEnabled(meta && meta.body));
         var decoder = createFrameDecoder();
         var lastLen = 0;
         var done = false;

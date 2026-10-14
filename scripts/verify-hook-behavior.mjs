@@ -253,5 +253,77 @@ console.log('\n[4] 非目标路径不得被解析（只观察 completion）')
   check('没有 error 事件', evs.filter((e) => e.name === 'error').length, 0)
 }
 
+console.log('\n[5] ⭐⭐⭐ F25：无 fragment 时思考必须被缓冲（照参考实现移植）')
+{
+  /**
+   * ## 为什么必须有这条
+   *
+   * 参考实现（dsh-deepseek-web-login）用**真实帧**复现并记录了这个事故：
+   *
+   * > 思考的归属完全依赖首帧快照里的 THINK fragment。一旦快照没能进入状态机，
+   * > fragments 就一直是空的，而旧实现在「无 fragment 可续」时**无条件当正文
+   * > 发射** ⇒ 整段思考上屏。实测：一轮 2062 字符、两轮 10526 / 4360 字符
+   * > 全部进正文。
+   *
+   * dsh-webin 的 route() 有一模一样的缺陷：
+   *
+   *     var kind = forceKind ?? (currentIsThink() ? 'think' : 'text');   // 空表 ⇒ 'text'
+   *
+   * ## 修法（照参考实现）
+   *
+   * 开了思考、但还没有任何 fragment 时，裸增量先**缓冲**，等 fragment 出现
+   * 再按它的类型定归属。未开思考时不缓冲，保持旧行为。
+   */
+  const frame = (obj) => `data: ${JSON.stringify(obj)}\n\n`
+  const FENCE3 = '```'
+
+  /** ① 开了思考 + 快照丢失（首帧就是裸增量）⇒ 不许进正文。 */
+  {
+    const sse =
+      frame({ v: '这是思考的内容，绝不该进正文。' }) +
+      frame({ p: 'response/fragments', o: 'APPEND', v: [{ type: 'THINK', content: '' }] }) +
+      frame({ v: '继续思考' }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+
+    const h = bootHook(() => makeResponse(sse), { thinking_enabled: true })
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":true}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+
+    check('⭐⭐⭐ 快照丢失时思考不进正文', done?.detail?.text ?? '', '')
+    check('⭐⭐ 缓冲的思考归属到 think', (done?.detail?.think ?? '').includes('这是思考的内容'), true)
+  }
+
+  /** ② 没开思考 ⇒ 保持旧行为（裸增量直接进正文，不缓冲）。 */
+  {
+    const sse =
+      frame({ v: '这是正文。' }) +
+      frame({ p: 'response/fragments', o: 'APPEND', v: [{ type: 'RESPONSE', content: '' }] }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+
+    const h = bootHook(() => makeResponse(sse), { thinking_enabled: false })
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":false}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    check('⭐⭐ 未开思考时裸增量仍进正文', (done?.detail?.text ?? '').includes('这是正文'), true)
+  }
+
+  /** ③ 正常流（首帧快照带 THINK）⇒ 思考与正文各归各位。 */
+  {
+    const sse =
+      frame({ p: 'response/fragments', o: 'APPEND', v: [{ type: 'THINK', content: '' }, { type: 'RESPONSE', content: '' }] }) +
+      frame({ p: 'response/fragments/0/reasoning_content', o: 'APPEND', v: '想一下' }) +
+      frame({ p: 'response/fragments/1/content', o: 'APPEND', v: '答案' }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+
+    const h = bootHook(() => makeResponse(sse), { thinking_enabled: true })
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":true}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    check('⭐⭐ 正常流：思考归 think', done?.detail?.think, '想一下')
+    check('⭐⭐ 正常流：正文归 text', done?.detail?.text, '答案')
+  }
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

@@ -5,6 +5,63 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.13
+
+### 真根因（照参考实现移植）：无 fragment 时思考被无条件当正文
+
+**用户第三次指路**：「你为啥不在看看 dsh-deepseek-web-login 怎么实现的呢，
+有些调用工具、思考、执行命令等都不要当正文显示出来！」
+
+读了 `dsh-deepseek-web-login-main/src/webapi.ts` 的 SSE 解析状态机 ——
+**它记录了一个和本插件症状完全吻合的真实事故（F25）**：
+
+> 思考的归属**完全依赖首帧快照里的 THINK fragment**。一旦快照没能进入状态机，
+> `fragments` 就一直是空的，而旧实现在**「无 fragment 可续」时无条件当正文发射**
+> ⇒ **整段思考上屏**。
+> 实测后果：一轮 2062 字符、两轮 10526 / 4360 字符**全部进正文**，
+> 且正文块开头都缺几个字。
+
+**dsh-webin 的 `route()` 有一模一样的缺陷**：
+
+```js
+var fragmentTypes = [];  var currentIndex = -1;
+function currentIsThink() { if (currentIndex < 0 || ...) return false; }
+function route(piece, forceKind) {
+  var kind = forceKind ?? (currentIsThink() ? 'think' : 'text');   // 空表 ⇒ 'text'
+}
+```
+
+**空类型表 ⇒ 无条件判成 text ⇒ 整段思考进正文。** 这就是用户连续五轮报的同一个症状。
+
+### 修法（照参考实现）
+
+1. `createExtractor(thinkingEnabled)` 接收本轮是否开了思考
+2. 新增 `orphanBuffer`：**开了思考、但还没有任何 fragment 时，裸增量先缓冲**
+3. fragment 类型表第一次有内容时（fragments APPEND / 快照 / 路径帧三条路径）
+   **flush**，按刚确定的类型归属
+4. 结束时若仍在缓冲 ⇒ **兜底落盘**（不能丢字）
+5. 未开思考时**不缓冲**，保持旧行为
+
+`thinking_enabled` 从请求体读：fetch 走 `init.body` / `input.body`，
+XHR 在 `send(body)` 里记下来。
+
+### 测试
+
+`verify-hook-behavior` 新增 5 条：**快照丢失时思考不进正文**、缓冲归属到 think、
+未开思考保持旧行为、正常流各归各位。
+
+### 参考实现的另一处关键信息
+
+它的 SSE 协议注释确认了字段归属：
+
+    {"p":"response/thinking_content","v":"…"}   思考（独立路径）
+    {"p":"response/content","v":"…"}            正文（独立路径）
+    {"p":"response/fragments/-1/content","v":"…"}
+    {"v":"…"}                                   承接上一个 path 的续段
+
+**思考与正文在协议层就是分开的** —— 这正是用户说的「调用 api 的形式就很顺畅」。
+本插件走的是 DOM 抓取 + SSE 辅助，架构不同；但这条 F25 的修法可以直接移植。
+
 ## v0.2.12
 
 ### 真凶：泄漏在 **hook 路径**上，我前四轮都在改 DOM 路径

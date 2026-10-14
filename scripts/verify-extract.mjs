@@ -56,7 +56,12 @@ function unescapeTemplateLayer(text) {
 }
 
 function extractCreateExtractor(bundle) {
-  const m = bundle.match(/function createExtractor\(\)\s*\{/)
+  /**
+   * ⚠️ 参数列表要放宽 —— 原来钉的是空参数 `createExtractor()`，
+   * 而 F25 修复给它加了 `thinkingEnabled` ⇒ 提取失败。
+   * 断言应该盯「函数在哪」，不该盯签名。
+   */
+  const m = bundle.match(/function createExtractor\([^)]*\)\s*\{/)
   if (m === null) throw new Error('产物里找不到 createExtractor —— 先跑 npm run build')
   const start = m.index
   const openBrace = bundle.indexOf('{', start)
