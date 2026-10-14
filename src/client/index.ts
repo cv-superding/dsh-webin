@@ -30,6 +30,7 @@ import {
 import { buildDomReportScript } from './dom-report'
 import {
   buildClearInputScript,
+  buildContinueScript,
   buildDiagnoseScript,
   buildFillScript,
   buildStopScript,
@@ -804,6 +805,15 @@ const domReportAtRef: { current: number } = { current: 0 }
  * 每个新任务开始时重置为 0（见 clearPending）。
  */
 const watchdogCountRef: { current: number } = { current: 0 }
+
+/**
+ * ⭐ 点页面自己「继续生成」按钮的计数。
+ *
+ * 与看门狗（发「请继续」新消息）分开计数：两者是**不同的补救手段**，
+ * 一个失败不该消耗另一个的额度。
+ * 每个新任务开始时重置为 0（见 clearPending）。
+ */
+const continueCountRef: { current: number } = { current: 0 }
 
 const scrapeDiagRef: {
   current: {
@@ -1878,6 +1888,8 @@ const clearPending = () => {
         baselineTextRef.current = ''
         /** 看门狗计数归零（新任务重新有 3 次催继续的机会）。 */
         watchdogCountRef.current = 0
+        /** 点「继续生成」的计数同样归零。 */
+        continueCountRef.current = 0
       }
       /**
        * ## ⚠️ 正在等回复时**绝不能再领新任务**
@@ -2142,6 +2154,56 @@ const clearPending = () => {
                   console.log('[dsh-webin] 内容静默但页面仍在生成（停止按钮在）—— 继续等')
                   scrapedChangedAtRef.current = now
                   return
+                }
+
+                /**
+                 * ## ⭐⭐⭐ 网页版自己停了 ⇒ 点它自己的「继续生成」
+                 *
+                 * ## 为什么必须在这里（交付闸门之前）
+                 *
+                 * 服务端主动停止时，页面显示「已停止」+「继续生成」按钮。
+                 * 此时 `generating === false`（停止键不在）⇒ 交付闸门放行 ⇒
+                 * **半截回复被当成本轮结果交付**，用户看到「已完成」但任务没做完
+                 * （实测：6 秒就交付了，因为静默只等了 STABLE_MS）。
+                 *
+                 * 原有看门狗要等 **12 秒**静默才动手，而且动作是**发一条新消息**
+                 * 「请继续」—— 续写落在新的 assistant 消息里，正文被切成两段，
+                 * 限流时新请求还会被拒。点页面自己的按钮是**同一条消息**的续写，
+                 * 语义正确、立即生效。
+                 *
+                 * ## 顺序
+                 *
+                 * 页面自己的按钮（正确做法）⇒ 点不到才退回看门狗（发「请继续」）。
+                 */
+                const CONTINUE_MAX = 3
+                if (continueCountRef.current < CONTINUE_MAX) {
+                  const contRaw = await execJs<string>(
+                    el,
+                    buildContinueScript(sendHintsFor(provider)),
+                    8_000,
+                  )
+                  if (contRaw !== EXEC_TIMEOUT) {
+                    let cont: { ok?: boolean; reason?: string; how?: string } = {}
+                    try {
+                      cont = JSON.parse(String(contRaw)) as typeof cont
+                    } catch {
+                      /* 解析失败按「点不到」处理 */
+                    }
+                    if (cont.ok === true) {
+                      continueCountRef.current += 1
+                      console.log(
+                        `[dsh-webin] 网页版已停止但页面有「继续生成」—— 已点击续写（第 ${continueCountRef.current}/${CONTINUE_MAX} 次）`,
+                        { how: cont.how },
+                      )
+                      /**
+                       * 重置静默计时并给页面一点时间重新进入生成态。
+                       * **不重置基线** —— 续写会往同一条消息里追加，
+                       * 条数不变、内容变长，基线保持原样才能正确判定「内容变化」。
+                       */
+                      scrapedChangedAtRef.current = Date.now()
+                      return
+                    }
+                  }
                 }
 
                 /**

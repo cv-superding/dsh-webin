@@ -1032,3 +1032,119 @@ export function buildStopScript(hints?: SendHints): string {
   }
 })();`
 }
+
+/**
+ * 生成「继续生成」的页面脚本。
+ *
+ * ## 为什么需要（用户实测：网页版老是自己停）
+ *
+ * 网页版会在**服务端主动停止**时把回复截断，界面上显示「已停止」并给出一个
+ * 「继续生成」按钮。此时：
+ *
+ *   - 页面 `generating === false`（停止按钮不在）⇒ 交付闸门放行
+ *   - 内容静默 ≥ STABLE_MS ⇒ **直接交付半截回复**
+ *
+ * 用户看到的就是「任务没做完，DSH 却报已完成」。而页面上明明有个按钮能接着写。
+ *
+ * ## 为什么点按钮，而不是发一条「请继续」
+ *
+ * 插件原有看门狗是**发一条新消息**「请继续」。但那是新的一条消息：
+ *   - 续写落在**新的** assistant 消息里，正文被切成两段；
+ *   - 服务端限流时新请求同样会被拒，等于白费一次配额；
+ *   - 页面自己的「继续生成」是**同一条消息**的续写，语义正确。
+ *
+ * 所以优先点页面自己的按钮；点不到才退回原看门狗。
+ *
+ * ## 判据（保守 —— 点错的代价远大于不点）
+ *
+ * 「继续生成」是**有文字**的按钮（与纯图标的停止键不同），靠文本匹配即可。
+ * 但必须排除所有可能误点的东西：停止键、发送键、附件、深度思考、智能搜索。
+ * 且**只认强语义**（≥ 80 分），不靠 class 特征猜。
+ *
+ * @param hints - 平台定位策略（复用发送脚本的选择器与否决规则）
+ */
+export function buildContinueScript(hints?: SendHints): string {
+  const sendSelectors = hints?.sendSelectors ?? ['button[type="submit"]']
+  const vetoes = hints?.vetoes ?? []
+  return `(function () {
+  try {
+    function visible(el) {
+      if (!el) return false;
+      try {
+        if (el.offsetWidth > 0 && el.offsetHeight > 0) return true;
+        var r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      } catch (e) { return false; }
+    }
+    function labelOf(el) {
+      var parts = [];
+      try {
+        if (el.getAttribute) {
+          parts.push(el.getAttribute('aria-label') || '');
+          parts.push(el.getAttribute('title') || '');
+          parts.push(el.getAttribute('data-testid') || '');
+        }
+        if (el.className && typeof el.className === 'string') parts.push(el.className);
+        var t = (el.textContent || '').trim();
+        if (t.length <= 24) parts.push(t);
+      } catch (e) {}
+      return parts.join(' ').toLowerCase();
+    }
+
+    var all;
+    try { all = document.querySelectorAll('button, [role="button"]'); } catch (e) { all = []; }
+    var hits = [];
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!visible(el)) continue;
+      var L = labelOf(el);
+
+      // ---- 一票否决：绝不能误点的东西 ----
+      var vetoed = false;
+      var vs = ${JSON.stringify(vetoes)};
+      for (var v = 0; v < vs.length; v++) {
+        try { if (new RegExp(vs[v]).test(L)) { vetoed = true; break; } } catch (e) {}
+      }
+      if (vetoed) continue;
+      /**
+       * ⚠️ 「停止」必须排除：它和「继续生成」在**同一个操作条**上，
+       * 点错就真把生成停了。发送键同理（会发出空消息）。
+       */
+      if (/附件|attach|上传|upload|深度思考|智能搜索|联网/.test(L)) continue;
+      if (/stop|停止|中断|abort|发送|send|submit/.test(L)) continue;
+      if (/ds-button--filled|ds-button--primary/.test(L)) continue;
+      var sels = ${JSON.stringify(sendSelectors)};
+      var isSend = false;
+      for (var s = 0; s < sels.length; s++) {
+        try { if (el.matches && el.matches(sels[s])) { isSend = true; break; } } catch (e) {}
+      }
+      if (isSend) continue;
+
+      // ---- 只认强语义，不靠 class 猜 ----
+      var score = 0;
+      if (/继续生成|继续回答|continue generating|regenerate|重新生成/.test(L)) score = 100;
+      else if (/(^|\\s)继续(\\s|$)|(^|\\s)continue(\\s|$)/.test(L)) score = 80;
+
+      if (score >= 80) hits.push({ el: el, score: score, why: L.slice(0, 60) });
+    }
+
+    if (!hits.length) return JSON.stringify({ ok: false, reason: 'no-continue-control' });
+    hits.sort(function (a, b) { return b.score - a.score; });
+
+    // 分数并列时不敢猜 —— 宁可不点，也绝不点错
+    if (hits.length > 1 && hits[1].score === hits[0].score) {
+      return JSON.stringify({ ok: false, reason: 'ambiguous', candidates: hits.length, top: hits[0].score });
+    }
+
+    var top = hits[0];
+    try {
+      top.el.click();
+      return JSON.stringify({ ok: true, how: top.why, score: top.score, candidates: hits.length });
+    } catch (e) {
+      return JSON.stringify({ ok: false, reason: 'click-failed', message: String(e && e.message) });
+    }
+  } catch (e) {
+    return JSON.stringify({ ok: false, reason: 'exception', message: String(e && e.message) });
+  }
+})();`
+}
