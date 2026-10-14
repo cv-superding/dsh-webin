@@ -326,7 +326,25 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
       if (orphanBuffer === '') return;
       var piece = orphanBuffer;
       orphanBuffer = '';
-      route(piece);
+      /**
+       * ## ⚠️ 归属规则（这里原来有个 bug）
+       *
+       * 原实现调 route(piece) —— 而 route 在**类型表为空**时按
+       * currentIsThink() 判定，空表恒为 false ⇒ 孤儿文本进了正文。
+       * 那等于把「缓冲」这道修复又绕过去了。
+       *
+       * 正确归属（依据参考实现的真实帧观察）：
+       *   - 开了思考时，正常流的**首帧快照一定带 THINK fragment**
+       *     ⇒ 「整轮都没出现 fragment 类型」说明帧丢了/流断了，
+       *       此时孤儿文本**极可能是思考** ⇒ 归到 think
+       *   - 没开思考时没有歧义 ⇒ 归到正文（保持旧行为）
+       *
+       * 宁可把「疑似思考」放进 think（显示在思考区，不污染正文），
+       * 也不要反过来 —— 正文里混进思考是用户反复报过的症状。
+       */
+      var kind = thinkingEnabled === true ? 'think' : 'text';
+      if (kind === 'think') think += piece;
+      else text += piece;
     }
 
     /** 把一段文本按当前 fragment 类型分流。 */
@@ -619,6 +637,13 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
             var p = parseBlock(rest[i]);
             if (p) ex.consume(p);
           }
+          /**
+           * ⭐ 流结束前把**还在缓冲的孤儿文本**落盘。
+           *
+           * 漏了这一步会怎样（本测试抓到的）：孤儿既不进正文也不进思考，
+           * **整段内容凭空消失** —— 比放错位置更糟。
+           */
+          try { ex.flushOrphan(); } catch (e) { /* ignore */ }
           emitDone(ex, 'eof');
           if (onDone) onDone();
           return;
@@ -635,6 +660,7 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
     }
 
     return pump().catch(function (e) {
+      try { ex.flushOrphan(); } catch (e) { /* ignore */ }
       emitDone(ex, 'read-error');
       if (onDone) onDone();
     });
@@ -742,6 +768,13 @@ export function buildDeepSeekHook(completionPath: string, stopPath?: string): st
               var p2 = parseBlock(rest[j]);
               if (p2) ex.consume(p2);
             }
+          /**
+           * ⭐ 流结束前把**还在缓冲的孤儿文本**落盘。
+           *
+           * 漏了这一步会怎样（本测试抓到的）：孤儿既不进正文也不进思考，
+           * **整段内容凭空消失** —— 比放错位置更糟。
+           */
+          try { ex.flushOrphan(); } catch (e) { /* ignore */ }
             emitDone(ex, 'xhr-end');
           }
         });

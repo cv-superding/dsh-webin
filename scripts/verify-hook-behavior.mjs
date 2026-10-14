@@ -325,5 +325,51 @@ console.log('\n[5] ⭐⭐⭐ F25：无 fragment 时思考必须被缓冲（照�
   }
 }
 
+console.log('\n[6] ⭐⭐⭐ 孤儿文本的**兜底归属**（本轮修掉的一个自引入 bug）')
+{
+  /**
+   * ## 背景
+   *
+   * F25 修复引入了「开了思考但还没有 fragment 时先缓冲」。但**缓冲什么时候落盘、
+   * 落给谁**这一步我第一版写错了：`flushOrphan()` 直接调 `route(piece)`，
+   * 而 `route` 在**类型表为空**时按 `currentIsThink()` 判定 —— 空表恒为 false
+   * ⇒ 孤儿文本又进了正文。**等于把「缓冲」这道修复绕过去了。**
+   *
+   * ## 正确归属（依据参考实现的真实帧观察）
+   *
+   * 开了思考时，正常流的**首帧快照一定带 THINK fragment**（参考实现抓包实测 4 轮全如此）。
+   * ⇒ 「整轮都没出现 fragment 类型」说明帧丢了或流断了，此时孤儿文本**极可能是思考**。
+   *
+   * 宁可把「疑似思考」放进 think（显示在思考区），也不要反过来 ——
+   * 正文混进思考是用户反复报过的症状。
+   */
+  const frame = (obj) => `data: ${JSON.stringify(obj)}\n\n`
+
+  /** ① 开了思考 + 整轮无 fragment ⇒ 孤儿必须归 think，不许进正文。 */
+  {
+    const sse =
+      frame({ v: '整段思考但没有任何 fragment 类型' }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+    const h = bootHook(() => makeResponse(sse))
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":true}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    check('⭐⭐⭐ 无 fragment + 开思考 ⇒ 归 think', (done?.detail?.think ?? '').includes('整段思考'), true)
+    check('⭐⭐⭐ 无 fragment + 开思考 ⇒ 不进正文', (done?.detail?.text ?? ''), '')
+  }
+
+  /** ② 没开思考 + 无 fragment ⇒ 归正文（保持旧行为，不能倒过来）。 */
+  {
+    const sse =
+      frame({ v: '这就是正文内容' }) +
+      frame({ p: 'response/status', o: 'SET', v: 'FINISHED' })
+    const h = bootHook(() => makeResponse(sse))
+    await h.ctx.fetch('/api/v0/chat/completion', { method: 'POST', body: '{"thinking_enabled":false}' })
+    await sleep(60)
+    const done = h.drain().filter((e) => e.name === 'done').pop()
+    check('⭐⭐ 无 fragment + 未开思考 ⇒ 归正文', (done?.detail?.text ?? '').includes('这就是正文内容'), true)
+  }
+}
+
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`)
 process.exitCode = fail === 0 ? 0 : 1

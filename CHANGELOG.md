@@ -5,6 +5,43 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## v0.2.17
+
+### 修复 1：孤儿文本的兜底归属（**F25 修复里我自己留下的漏洞**）
+
+F25 引入了「开了思考但还没有 fragment 时先缓冲」。但**缓冲落盘时归给谁**这一步
+第一版写错了：`flushOrphan()` 直接调 `route(piece)`，而 `route` 在**类型表为空**时
+按 `currentIsThink()` 判定 —— 空表恒为 false ⇒ **孤儿文本又进了正文**。
+等于把「缓冲」这道修复绕过去了。
+
+**修法**（依据参考实现的真实帧观察）：开了思考时，正常流的首帧快照**一定**带
+THINK fragment ⇒「整轮都没出现 fragment 类型」说明帧丢了或流断了，此时孤儿文本
+**极可能是思考** ⇒ 归到 `think`。未开思考时保持旧行为（归正文）。
+
+### 修复 2：「完全没有重试」的真根因在 **DSH 侧配置**（已代为启用）
+
+用户实测：页面因「服务器暂时不可用」自己停了，DSH 那边**一次重试都没有**。
+
+查证结果（**不是插件问题**）：
+
+- `dsh-llm-retry` **未安装**在 profile 的 node_modules
+- **不在** `dsh.profile.bundles` 里
+- **未挂载**在 `cordis.patch.yml`
+
+⇒ **DSH 的官方重试执行器从未被挂载**，所以插件上报的失败码再正确也不会触发重试。
+
+**已代为启用**：把 `@deepseek-ai/dsh-llm-retry` 加入
+`~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles`
+（原文件已备份为 `package.json.bak-before-retry-<时间戳>`）。
+该包在 DSH 应用包内存在，与 `dsh-base` / `dsh-web-app` 同源解析。
+
+> 与 v0.2.14 的失败码修复是**一对**：v0.2.14 让失败可被分类，这次让分类真的生效。
+
+### 测试
+
+`verify-hook-behavior` 新增 3 条：无 fragment + 开思考 ⇒ 归 think 且不进正文；
+无 fragment + 未开思考 ⇒ 归正文（两个方向都钉住）。
+
 ## v0.2.16
 
 ### 第四项：HTTP 状态码走完四层链路，填进官方 `LlmFailure.status`
