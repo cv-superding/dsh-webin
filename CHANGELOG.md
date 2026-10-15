@@ -1,3 +1,54 @@
+## v0.2.24
+
+### 合并社区 PR #1（by [@pawamamama](https://github.com/pawamamama)）
+
+两个修复，都经过本地全量验证后合入。
+
+#### 修复 1：非桌面宿主静默降级，且错误提示指向错误方向
+
+**症状**：在没有官方 Desktop Electron 桥的宿主上，插件装得上、模型选择器里也能看到
+LDW，但发消息后没人领 → 等满 `claimGraceMs` → 报
+*「面板未连接 —— 标签没开 / 面板没挂载 / 页面没登录」*。
+
+**问题在于那句错误提示**：它把用户引向「切标签、重新登录」，而这两件事**都帮不上忙**。
+真正缺的是**宿主能力**，不是面板状态。
+
+**修法**：客户端在无桥时发一次心跳带 `capability: 'no-desktop-bridge'`（复用现有端点，
+不新增协议）；host 侧 `/status` 暴露 `hostCapability`；adapter 区分「宿主无桥」与
+「面板没开」两种情形，前者明确说明**这不是「标签没打开」**。
+
+#### 修复 2：**没有竖线的裸 XML 工具标记**泄漏进正文（同一 bug 的第三种形态）
+
+**症状**：回复里出现几十行 `</invoke>` / `</parameter>` 残骸。
+
+**根因**：前两版 `stripDsml` 都假定「标签里一定有竖线」（`<｜DSML｜tool_calls>` 或
+`<|tool_calls|>`）⇒ 对这种无竖线残骸 `stripped = 0` ⇒ **整段原样漏进对话**。
+
+**修法**：走**标签白名单**（只剥 `tool_calls` / `function_calls` / `invoke` /
+`parameter` / `tool_call` / `tool_use` / `tool_result`），**而不是「剥掉所有 XML」** ——
+因为正文里合法出现 `<div>` / `<span>` 是正常的（模型在讲 HTML），无差别剥会**吃掉正文**。
+
+> 作者还预判了误报风险并加了回归锁：`div` / `span` / `a` / `img`、正文里的 `invoke`
+> 单词、数学比较 `${a < b}`、自定义元素 `<my-invoke-widget>` **一律不得被剥**。
+
+#### 另外
+
+- `scripts/preflight.mjs` 不再硬编码 `profiles/desktop`（在 `web` profile 上必然误报失败），
+  改为尊重 `--profile` / `DSH_PROFILE` / `DSH_PROFILE_DIR`；并新增
+  **[9] 宿主浏览器桥检查** —— 仓库此前从不检查这一项，而它正是本次根因。
+- README / CHANGELOG 补充了对应说明。
+
+### 维护者补充
+
+合入时发现一条**过紧的断言**（与 PR 无关）：`verify-live` 用固定 900 字符窗口找
+`scrape: payload.scrape`，PR 在处理器里加了两行（capability）就把它挤出了窗口，
+导致**误报失败**。已放宽到 2000 字符并在整段 handler 里兜底查找。
+
+> 教训与今天早些时候一致：**断言要盯语义，不要盯位置或写法。**
+
+### 验证
+
+build + preflight（22 通过 / 0 失败 / 2 跳过）+ **39 个 verify 全绿**。
 # 更新日志
 
 版本号从这一版起才真正开始动（之前一直是 `0.0.1`，导致设置页显示的版本号

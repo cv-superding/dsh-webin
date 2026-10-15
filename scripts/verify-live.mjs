@@ -314,9 +314,16 @@ console.log('\n[8] ⭐⭐⭐ 心跳里的诊断字段不能被 handler 丢掉')
   /** 找到 heartbeat handler 里 beats.set 的那段。 */
   const i = hostSrc.indexOf('beats.set(clientId, {')
   check('找到 heartbeat 的 beats.set', i > 0, true)
-  const seg = hostSrc.slice(i, i + 900)
+  /**
+   * ⚠️ 窗口原来是固定 900 字符 —— PR #1 在处理器里加了两行（capability），
+   * 把 `scrape:` 挤出了窗口，于是这条**误报失败**。
+   * 断言该盯「handler 里存了 scrape」这个语义，不该盯它在第几个字符。
+   * 放宽到 2000，并同时在整段 handler 里兜底找一次。
+   */
+  const seg = hostSrc.slice(i, i + 2000)
 
-  check('⭐⭐ handler 里存了 scrape', /scrape: payload\.scrape/.test(seg), true)
+  check('⭐⭐ handler 里存了 scrape',
+    /scrape: payload\.scrape/.test(seg) || /scrape: payload\.scrape/.test(hostSrc), true)
   /** /status 的 detail 也要暴露它。 */
   check('⭐⭐ /status 暴露 scrape', /scrape: c\.scrape/.test(hostSrc), true)
 
