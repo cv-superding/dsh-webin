@@ -5,6 +5,69 @@
 
 判据仍以**提交号**为准（见 README「更新检查」一节）—— 版本号只是给人看的。
 
+## 未发布
+
+### 修复：无竖线的裸 XML 工具标记漏进对话（第三种形态）
+
+**用户实测**：回复里整段漏出这种残骸（一个竖线都没有）：
+
+```
+</invoke>
+</parameter>
+</invoke>
+</parameter>
+…（重复几十次）
+```
+
+**根因**：现有 `stripDsml()` 的两条正则都要求标签里**至少有一个竖线**
+（`<｜DSML｜tool_calls>` 或 `<|tool_calls|>`）。用户这份是**纯 XML 形态**
+⇒ `stripped = 0`，正则从未命中，整段原样交回 DSH。
+
+**这是同一个 bug 的第三个变体**（前两次：只认单竖线 / 漏了双竖线）。
+
+**修法**：新增**标签白名单**处理裸 XML 形态 —— 只剥工具调用专属标签名
+（`tool_calls` / `function_calls` / `invoke` / `parameter` / `tool_call` / `tool_use` /
+`tool_result`），并允许 `antml:` / `dsml:` 命名空间前缀。
+
+**为什么不能“剥掉所有 XML 标签”**：正文里合法出现 `<div>` / `<span>` / `<a href>`
+是正常的（模型在讲 HTML），无差别剥会**吃掉正文**。
+
+**回归保护**：`scripts/verify-tools.mjs` 新增 16 项，其中 6 项专门锁**不得误伤**：
+正文里的 `invoke` / `parameter` 单词、自定义元素 `<my-invoke-widget>`、
+`<a>` / `<img>` / `<span>` 均必须**原样保留**。
+
+### 修复：非 Desktop 宿主上「静默降级」，报错指向错误方向
+
+**用户实测**：在非官方 Desktop 宿主（DSH-X 启动器 + 浏览器 Web GUI、或普通 Electron 壳）里装上插件后：
+
+- 安装**成功**、host 半**正常加载**、模型选择器里**出现 LDW**；
+- 但发任何消息都只能等到 `claimGraceMs` 宽限到期，然后返回 `WEBIN_FAILED`；
+- 而错误文案写的是「LDW 面板未连接 —— 标签没打开 / 被切走 / 未登录」，
+  **把用户引向完全错误的方向**（切标签、重登录都无用）。
+
+**根因**：插件依赖官方 Desktop 注入的 `globalThis.dshDesktop.browser`（Electron `<webview>` 通道）。
+非官方 Desktop 宿主不提供该桥，client 半 `desktopBrowser()` 返回 `undefined` 后**直接 `return`** ——
+**一个字节都不上报**。于是 host 侧只能看到「没有面板来领活」，无法区分：
+
+| 情况 | 真实原因 | 修复方向 |
+|---|---|---|
+| A | 宿主没有桌面浏览器通道 | 只能用官方 Desktop 版 |
+| B | 面板没打开 / 被切走 / 未登录 | 切到 LDW 标签 |
+
+这两种情况的**修复动作完全不同**，以前却报同一句话。
+
+**修法**（不改 Desktop 下任何行为）：
+
+1. `src/client/index.ts`：无桥时**先发一次**既有心跳端点，带 `capability: 'no-desktop-bridge'`，
+   再显示状态（不新增协议）；并在文案里给出可操作指引。
+2. `src/host/index.ts`：heartbeat handler **显式**挑入 `capability`（该 handler 是手工挑字段写法，
+   漏挑就丢；此前 `scrape` 已经踩过同一个坑），新增 `/status.hostCapability`
+   （`unknown` / `no-desktop-bridge` / `desktop-bridge`，多面板时**报最坏的**）。
+3. `src/host/adapter.ts`：无人领活分支改为按 `hostCapability()` 区分两种原因，
+   情况 A 明确说「这不是标签没打开，换官方 Desktop 版」；情况 B 保持原文案不变。
+
+回归保护：`npm run verify` 65/65 通过；Desktop 路径的周期性心跳 payload **不含** `capability`，行为不变。
+
 ## v0.2.23
 
 ### 修复：心跳判死阈值贴着节流后的实际间隔 ⇒ `online` 来回抖动

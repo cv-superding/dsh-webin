@@ -321,6 +321,19 @@ interface ClientBeat {
   loggedIn: boolean
   hasGuest: boolean
   replyCount: number
+  /**
+   * ⭐ 宿主能力 —— 面板**有没有**桌面浏览器通道。
+   *
+   * 背景（用户实测反馈）：非官方 Desktop 宿主（例如 DSH-X 启动器 + 浏览器
+   * Web GUI、或第三方 Electron 壳）里 `globalThis.dshDesktop` 不存在，
+   * 面板会直接停在「当前环境没有 DSH 桌面浏览器通道」——但**它以前什么
+   * 都不上报**，于是 host 侧只能看到「没有面板来领活」，报错笼统地指向
+   * 「标签没打开 / 页面没登录」，把用户带偏。
+   *
+   * 现在无桥时面板会先发一次心跳并带 `capability: 'no-desktop-bridge'`，
+   * host 据此把失败原因说清楚（见 adapter 的无人领活分支）。
+   */
+  capability?: string
   /** ⭐ client 半的构建时刻 —— 判断面板是否落后于最新构建。 */
   clientBuiltAt?: string
   /**
@@ -538,6 +551,25 @@ export async function apply(ctx: {
     }
     return out
   }
+  /**
+   * ⭐ 宿主能力 —— “为什么模型不回复”的第一个判据。
+   *
+   *   - 'unknown'            没有任何面板上报（面板没挂载 / 旧版 client）
+   *   - 'no-desktop-bridge'  面板在线，但宿主没有桌面浏览器通道 ⇒ 永远不可能工作
+   *   - 'desktop-bridge'     面板在线且拿到了桥
+   *
+   * **优先报告最坏的那个**：只要有一个面板没桥，就说明这个环境不完整，
+   * 不能因为另一个面板正常就报正常。
+   *
+   * 这里是**唯一**的能力判断实现：`/status` 与 adapter 都调它，
+   * 避免两处各自推断而不一致。
+   */
+  const hostCapability = (): string => {
+    const clients = liveClients()
+    if (clients.length === 0) return 'unknown'
+    if (clients.some((c) => c.capability === 'no-desktop-bridge')) return 'no-desktop-bridge'
+    return 'desktop-bridge'
+  }
 
   // ---- provider 注册：每个平台一个路由，让它们出现在模型选择器 ----
   //
@@ -587,6 +619,13 @@ export async function apply(ctx: {
      * 用户要求「如果是已登录才能使用 LDW 那俩模型」。
      */
     isLoggedIn: (platform) => isPlatformLoggedIn(platform),
+    /**
+     * ⭐ 宿主能力——把“无人领活”说到底。
+     *
+     * 无桥环境里面板不会来领活，而“标签没打开”与“宿主没通道”
+     * 的修复方向完全不同——前者切标签就好，后者只能换 Desktop 版。
+     */
+    hostCapability: () => hostCapability(),
     cursorStore: {
       load: (platform) => {
         const path = sessionsPath(platform)
@@ -1129,6 +1168,8 @@ export async function apply(ctx: {
           loggedIn?: boolean
           hasGuest?: boolean
           replyCount?: number
+          /** ⭐ 宿主能力（例：'no-desktop-bridge'）。 */
+          capability?: string
           /** ⭐ 抓取诊断 —— 页面上到底抓到了什么。 */
           scrape?: {
             selector?: string
@@ -1161,6 +1202,11 @@ export async function apply(ctx: {
           loggedIn: payload.loggedIn === true,
           hasGuest: payload.hasGuest === true,
           replyCount: typeof payload.replyCount === 'number' ? payload.replyCount : 0,
+          /**
+           * ⚠️ 这里是**手工挑字段**写法（下面的注释讲过漏存 scrape 的教训）——
+           * 能力字段必须在这里显式提取，否则又会“类型上有、运行时丢”。
+           */
+          ...(payload.capability === undefined ? {} : { capability: payload.capability }),
           /**
            * ## ⚠️ 这里原来**漏存 scrape** —— 诊断数据到 host 就被丢了
            *
@@ -1370,6 +1416,18 @@ export async function apply(ctx: {
            * 面板在线情况 —— 模型不回复时先看这里。
            * `online: 0` 表示没有任何 LDW 面板在跑，任务必然无人领取。
            */
+          /**
+           * ⭐⭐ 宿主能力——“为什么模型不回复”的**第一个**要看的字段。
+           *
+           *   - 'unknown'            没有任何面板上报（面板没挂载 / 旧版 client）
+           *   - 'no-desktop-bridge'  面板在线，但**宿主没有桌面浏览器通道**
+           *                           ⇒ 这种环境下 LDW 永远不可能工作，需官方 Desktop 版
+           *   - 'desktop-bridge'     面板在线且拿到了桥
+           *
+           * 不同面板上报不一致时，**优先报告最坏的那个**
+           * （存在一个没桥的面板就说明环境不完整）。
+           */
+          hostCapability: hostCapability(),
           clients: {
             online: clients.length,
             loggedIn: clients.filter((c) => c.loggedIn).length,
@@ -1380,6 +1438,7 @@ export async function apply(ctx: {
               loggedIn: c.loggedIn,
               hasGuest: c.hasGuest,
               replyCount: c.replyCount,
+              ...(c.capability === undefined ? {} : { capability: c.capability }),
               /** ⭐ 抓取诊断 —— 看「抓到的是不是回复」。 */
               ...(c.scrape === undefined ? {} : { scrape: c.scrape }),
               ...(c.dom === undefined ? {} : { dom: c.dom }),

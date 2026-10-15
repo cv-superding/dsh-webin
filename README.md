@@ -30,6 +30,36 @@ Unofficial DSH plugin — 用**真实浏览器**驱动多个 AI 网页版（Deep
 
 > 各版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
 
+## 前置条件：宿主必须提供浏览器 guest 桥
+
+## ⚠️ 本插件需要一个**受控的真 Chromium**，而这个能力**只有带 Electron 通道的宿主**才有。
+
+它取桥的方式是：
+
+```js
+const carrier = globalThis.dshDesktop        // src/client/index.ts:922
+if (carrier?.protocolVersion !== 1) return undefined
+const bridge = carrier.browser                // acquire / release
+```
+
+| 宿主 | 有桥？ | 说明 |
+|---|---|---|
+| **官方 DSH Desktop**（Electron 应用） | ✅ | 设计目标环境 |
+| DSH-X 启动器 + 浏览器里的 Web GUI | ❌ | 浏览器**无法**注入 Electron preload |
+| 第三方 Electron 壳（未补桥） | ❌ | 默认没有桥 |
+| 自建 Electron 壳（已补 `webviewTag` + preload 注入） | ✅ | 参见下方“没有官方 Desktop 时” |
+
+**在无桥宿主上的行为**：插件**仍然能安装并加载**，模型选择器里也会出现 LDW，
+但发任何消息都会失败。现在它会**明确告诉你原因**（而不是误导成“标签没打开”），
+并在 `/status` 的 `hostCapability` 字段里报 `no-desktop-bridge`。
+
+```powershell
+# 一条命令确认当前宿主有没有桥（在 DSH 页面按 F12）
+#   有桥 -> { protocolVersion: 1, browser: {...} }
+#   无桥 -> undefined
+globalThis.dshDesktop
+```
+
 ## 安装
 
 ```bash
@@ -40,10 +70,34 @@ dsh plugin --profile desktop add link:F:/Code/DSH-Code/dsh-webin/dsh-webin
 dsh plugin --profile desktop add dsh-webin
 ```
 
+> **`--profile` 要填你实际在用的那个**。上面写 `desktop` 是因为
+> 官方 DSH Desktop 用的就是这个保留名；用 `dsh web` 的人则是 `web`。
+> 装错 profile 的典型症状就是“插件看不见”。
+
 装完**重启 DSH**（host 半没有热重载）。然后在对话区会出现 **LDW** 标签，
 模型选择器里出现「LDW · DeepSeek 网页版」。
 
 首次使用：切到 LDW 标签 → 登录一次 → 回到对话选 LDW 模型。
+
+## 没有官方 Desktop 时
+
+两条路：
+
+1. **装官方 DSH Desktop** —— 它天生提供桥。
+2. **给一个 Electron 壳补桥** —— 只需两步：
+
+   ```js
+   // 壳的 BrowserWindow：开 webviewTag + 注入 preload
+   webPreferences: { contextIsolation: true, nodeIntegration: false, webviewTag: true, preload: PRELOAD }
+   ```
+
+   preload 向页面暴露 `globalThis.dshDesktop = { protocolVersion: 1, browser: { acquire, release, onOpenRequested } }`，
+   并在主进程用 `session.on('will-attach-webview')` 做租约门禁。
+
+   参考实现：[官方 `apps/desktop-host`](https://github.com/deepseek-ai/deepseek-harness/tree/main/apps/desktop-host)，
+   或一份等价的本地实现（`D:\deepseekwork\dsh-desktop-shell`）。
+
+   > 用持久分区（`persist:` 前缀）而非内存分区，还能顺带解决下方 L1（重启免登录）。
 
 ## 设置页
 
