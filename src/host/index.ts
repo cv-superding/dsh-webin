@@ -1105,6 +1105,27 @@ export async function apply(ctx: {
         return
       }
 
+      // PUT /job/<id>/think —— client 实时上报一段思考增量（渐进显示思考过程）
+      const thinkJobId = jobIdFromPath(pathname, '/think')
+      if (method === 'PUT' && thinkJobId !== undefined) {
+        const body = await readBody(req)
+        let payload: { delta?: string }
+        try {
+          payload = JSON.parse(body) as typeof payload
+        } catch {
+          sendJson(res, 400, { ok: false, reason: 'invalid-json' })
+          return
+        }
+        const delta = typeof payload.delta === 'string' ? payload.delta : ''
+        const appended = queue.appendThink(thinkJobId, delta)
+        /**
+         * 未接受（任务不存在 / 已了结 / 已取消）时不报错——client 可能迟到，
+         * 最终 `done.think` 全量仍会兜底，增量只是增强。返回 200 让 client 不重试。
+         */
+        sendJson(res, 200, { ok: appended })
+        return
+      }
+
       // GET /auth/<slot>/snapshot —— 取快照
       const getSlot = slotFromPath(pathname, '/snapshot')
       if (method === 'GET' && getSlot !== undefined) {
