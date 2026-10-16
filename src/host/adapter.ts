@@ -107,6 +107,28 @@ interface Job {
    */
   httpStatus?: number
   /**
+   * ⭐ **思考增量流**（渐进显示思考过程用）。
+   *
+   * ## 为什么需要（用户要的「显示思考过程」）
+   *
+   * 旧实现只有 `done.think`（一次性全量），而 `waitForJob` 阻塞到 `settle`
+   * 才返回 ⇒ adapter 在末尾把整段 think 一次性 `yield` 成 reasoning 块。
+   * 体验上「等了好久才一起冒出来」，看不到模型正在怎么想。
+   *
+   * 现在 client 侧每抓到一段 think 增量就 `PUT /job/<id>/think`，
+   * host 把增量**实时**推进这里，并立刻通知 `waitForJob` 的订阅者，
+   * adapter 随即 `yield { type: 'reasoning-delta' }` —— DSH 侧边生成边渲染。
+   *
+   * ⚠️ 这只是「实时增强」：**最终 `done.think` 仍是权威全量**（兜底断流/超时）。
+   * 增量流断掉时，末尾用 `done.think` 补齐，绝不丢字。
+   */
+  thinkDeltas: string[]
+  /**
+   * 关注本任务 think 增量的订阅者（由 `waitForJob` 注册）。
+   * 每个订阅者收到「新追加的 think 增量字符串数组」。
+   */
+  thinkSubscribers: Array<(deltas: string[]) => void>
+  /**
    * 发送前必须先导航到这个 URL —— 该任务所属 DSH 会话绑定的网页对话。
    *
    * ## 为什么必须有这个（用户实测发现的封号级缺陷）
@@ -217,6 +239,9 @@ class JobQueue {
       ...(expectUrl === undefined ? {} : { expectUrl }),
       ...(freshChat === true ? { freshChat: true } : {}),
       ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
+      /** 思考增量流（渐进显示思考过程）。 */
+      thinkDeltas: [],
+      thinkSubscribers: [],
     }
     this.jobs.set(job.id, job)
     /**
@@ -467,6 +492,66 @@ class JobQueue {
     job.failed = reason
     job.cancelled = true
     return true
+  }
+
+  /**
+   * ⭐ **实时追加一段 think 增量**（渐进显示思考过程）。
+   *
+   * client 侧每抓到一段新增的思考文本就调它（走 `PUT /job/<id>/think`）。
+   * 增量被累积进 `job.thinkDeltas`，并**立刻推给所有订阅者** ——
+   * `waitForJob` 注册的订阅者会把它转交 adapter 的 `streamOnce`，
+   * 后者随即 `yield { type: 'reasoning-delta' }`，DSH 侧即时渲染。
+   *
+   * ⚠️ **职责边界**：这里只管「增量实时转发」。最终 `settle` 时的
+   * `done.think` 仍是权威全量（兜底断流/超时），末尾由 adapter 补齐，
+   * 所以增量丢了也不影响最终正确性，只是实时性退化。
+   *
+   * @returns 是否接受（false = 任务不存在 / 已了结 / 已取消）
+   */
+  appendThink(id: string, delta: string): boolean {
+    if (delta === '') return false
+    const job = this.jobs.get(id)
+    if (job === undefined) return false
+    /** 已了结 / 已取消 ⇒ 增量无意义（最终全量已经/将要落定）。 */
+    if (job.done !== undefined || job.failed !== undefined || job.cancelled === true) return false
+    job.thinkDeltas.push(delta)
+    /** 立刻通知订阅者（实时性关键）。复制一份避免订阅者改原数组。 */
+    const chunk = delta
+    for (const sub of job.thinkSubscribers) {
+      try {
+        sub([chunk])
+      } catch {
+        /* 单个订阅者抛错不应中断其它订阅者 */
+      }
+    }
+    return true
+  }
+
+  /**
+   * ⭐ 订阅本任务的 think 增量流。
+   *
+   * 由 `waitForJob` 注册：每当 `appendThink` 来一段新增量，就把这段
+   * 通过回调交给 adapter 的 `streamOnce`，由它转成 `reasoning-delta` 流。
+   *
+   * @returns 退订函数（streamOnce 结束时调用，避免悬挂订阅）
+   */
+  subscribeThink(id: string, cb: (deltas: string[]) => void): () => void {
+    const job = this.jobs.get(id)
+    if (job === undefined) return () => {}
+    job.thinkSubscribers.push(cb)
+    /** 若此时已有累积增量（订阅前就到过），先回放一遍，不让开头漏掉。 */
+    if (job.thinkDeltas.length > 0) {
+      try {
+        cb([...job.thinkDeltas])
+      } catch {
+        /* ignore */
+      }
+    }
+    return () => {
+      const j = this.jobs.get(id)
+      if (j === undefined) return
+      j.thinkSubscribers = j.thinkSubscribers.filter((f) => f !== cb)
+    }
   }
 }
 
@@ -1196,17 +1281,99 @@ export function createAdapter(deps: AdapterDeps) {
         `${diff.note}，${prompt.length} 字符，thinking=${String(spec.thinking)}）`,
     )
 
+    /**
+     * ⭐⭐⭐ 渐进显示思考过程（用户要的「显示思考过程」）。
+     *
+     * ## 思路
+     *
+     * 旧实现：`await waitForJob(...)` 阻塞等到 `settle`（一次性全量结果），
+     * 之后才把整段 think 一次性 `yield` 成 reasoning 块 —— 用户「等很久才一起冒出来」。
+     *
+     * 新实现：client 侧每抓到一段 think 增量就 `PUT /job/<id>/think` 实时上报，
+     * 这里边等边 `yield reasoning-delta`，让 DSH 侧**边生成边渲染**思考区。
+     *
+     * 用「`waitForJob` 最终结果」与「增量到达通知」race 的标准模式：
+     *   - 订阅 `queue.subscribeThink` ⇒ 增量一到就 `resolve(notify)` 唤醒循环
+     *   - 每轮循环**开头**重建 notifyPromise（关键：必须在 `yield` 之前挂好，
+     *     否则「yield 当下→下次 next 恢复」这段窗口里到达的增量会发到已死的旧 promise）
+     *   - 首次出现增量时开 `block-start`；末尾用全量 `result.think` 补齐并关块
+     *
+     * ⚠️ **最终 `done.think` 仍是权威全量兜底**：增量流断掉（客户端断连/超时）
+     * 不影响正确性 —— 末尾用 `result.think` 补齐尚未 yield 的部分，绝不丢字。
+     */
+    const thinking = spec.thinking === true
+    let liveThink = ''
+    let notifyResolver: (() => void) | null = null
+    let notifyPromise: Promise<void> = new Promise<void>((r) => (notifyResolver = r))
+    let unsubscribe: (() => void) | null = null
+    if (thinking) {
+      unsubscribe = queue.subscribeThink(job.id, (deltas) => {
+        for (const d of deltas) liveThink += d
+        /** 唤醒增量泵循环（实时性关键）。 */
+        const r = notifyResolver
+        notifyResolver = null
+        if (r !== null) r()
+      })
+    }
+
+    /** 已经 `yield` 出去的思考长度（用于末尾用全量兜底补齐）。 */
+    let yieldedThinkLen = 0
+    /** 思考块是否已开（避免重复开块 / 空块）。 */
+    let blockStarted = false
+    /** 思考块的块序号（与正文/工具调用共用 `index` 计数）。 */
+    let thinkChunkIndex = 0
+
     let result: { text: string; think: string; status: string; chatUrl?: string }
     try {
-      result = await waitForJob(job, options.signal)
+      const waitPromise = waitForJob(job, options.signal)
+      for (;;) {
+        /** ⭐ 每轮开头重建 notifyPromise（基础版，先挂一个槽）。 */
+        notifyPromise = new Promise<void>((r) => (notifyResolver = r))
+        const settled = await Promise.race([waitPromise, notifyPromise])
+        if (settled === undefined) {
+          /**
+           * `notifyPromise` 先到：有新增 think 增量。
+           * 首次出现增量时开块（让 DSH 立刻显示思考区），再把累积增量实时发射。
+           */
+          if (!blockStarted) {
+            yield { type: 'block-start', index: thinkChunkIndex, blockType: 'reasoning' }
+            blockStarted = true
+          }
+          if (liveThink.length > yieldedThinkLen) {
+            /**
+             * ⭐⭐ **关键**：在 yield 增量**之前**重建 notifyPromise。
+             * 否则 generator 在 `yield` 处暂停时，`notifyResolver` 还指向已消费/已清空的
+             * 旧 promise，期间到达的增量会打到一个「已死的」resolver 上 → 信号丢失 →
+             * 下一个轮询永远等不到 → 实时流卡死。把重建放到 yield 之前，
+             * 暂停期间 `notifyResolver` 就指向这个新鲜有效的 resolver，增量不丢。
+             */
+            notifyPromise = new Promise<void>((r) => (notifyResolver = r))
+            const piece = liveThink.slice(yieldedThinkLen)
+            yieldedThinkLen = liveThink.length
+            for (const chunk of chunkText(piece)) {
+              yield { type: 'reasoning-delta', index: thinkChunkIndex, text: chunk }
+            }
+          }
+          continue
+        }
+        /** `waitPromise` 已 settle（resolve 或 reject）。 */
+        break
+      }
+
+      result = await waitPromise
     } catch (error) {
       /**
-       * ⚠️ **失败时绝不能推进游标。**
-       *
-       * 推进了就意味着「DSH 认为这段内容发过了」，下一轮只发之后的增量 ——
-       * 而页面里其实没有这段内容 ⇒ **上下文永久丢失**，模型从此缺一段记忆。
-       * 不推进 ⇒ 下次调用重新算出同样的增量，内容不丢。
+       * 失败：先把已经实时发射出去的思考块收尾（若有），再报错。
+       * 绝不推进游标 —— 见下方 diff.commit() 的注释。
        */
+      if (thinking && blockStarted) {
+        yield {
+          type: 'block-end',
+          index: thinkChunkIndex,
+          block: { type: 'reasoning', text: liveThink.slice(0, yieldedThinkLen) },
+        }
+      }
+      unsubscribe?.()
       yield {
         type: 'finish',
         reason: {
@@ -1220,10 +1387,6 @@ export function createAdapter(deps: AdapterDeps) {
             ...classifyFailure((error as Error)?.message ?? String(error)),
             /**
              * ⭐⭐ 官方 LlmFailure.status —— HTTP 状态码。
-             *
-             * 客户端从 hook 的 res.status / this.status 拿到，经 client → host 任务
-             * 一路带到这里。DSH 的重试策略据此分类（429 与 500 处理不同）。
-             * 拿不到时**不带这个字段**（不是填 0）—— 官方契约里它是可选的。
              */
             ...(() => {
               const st = (error as Error & { httpStatus?: number })?.httpStatus
@@ -1233,6 +1396,28 @@ export function createAdapter(deps: AdapterDeps) {
         },
       }
       return
+    }
+    unsubscribe?.()
+
+    /**
+     * ⭐ 用权威全量 `result.think` 补齐尚未实时发射的部分。
+     *
+     * 实时增量流可能因客户端断连/超时而停在半路；最终 `done.think` 是网页版的
+     * 完整思考，必须把它补齐再关块 —— 否则思考内容缺尾巴。
+     *
+     * ⚠️ 若全程没有任何增量到达（`blockStarted === false`），但有全量 think，
+     * 这里也要负责开块 + 补齐；只有真正有思考内容时才开/关块（避免空块）。
+     */
+    if (thinking && result.think.trim() !== '' && result.think.length > yieldedThinkLen) {
+      if (!blockStarted) {
+        yield { type: 'block-start', index: thinkChunkIndex, blockType: 'reasoning' }
+        blockStarted = true
+      }
+      const rest = result.think.slice(yieldedThinkLen)
+      yieldedThinkLen = result.think.length
+      for (const chunk of chunkText(rest)) {
+        yield { type: 'reasoning-delta', index: thinkChunkIndex, text: chunk }
+      }
     }
 
     /**
@@ -1286,18 +1471,29 @@ export function createAdapter(deps: AdapterDeps) {
 
     let index = 0
 
-    // 思考内容作为 reasoning 块（只给 DSH 展示，不回灌网页 —— 见 serialize.ts 说明）
-    if (result.think.trim() !== '') {
+    /**
+     * 思考内容作为 reasoning 块（只给 DSH 展示，不回灌网页 —— 见 serialize.ts 说明）。
+     *
+     * ⭐ **渐进显示路径**（thinking === true）：思考块已在上面**先开块、边等边
+     * 实时 yield reasoning-delta、最后用全量 `result.think` 补齐**。这里只需把块**关掉**。
+     *
+     * ⭐ **兜底路径**（thinking === false 但 `result.think` 仍非空）：保持旧行为，
+     * 一次性发完整 reasoning 块（兼容非思考模型也带回 think 的边缘情况）。
+     */
+    if (thinking) {
+      /** 只有真的产出过思考内容才关块（避免空块）。 */
+      if (result.think.trim() !== '') {
+        yield { type: 'block-end', index: thinkChunkIndex, block: { type: 'reasoning', text: result.think } }
+        index = thinkChunkIndex + 1
+      }
+      /** 没产出思考（result.think 为空）时连 block-start 都不要留空块 —— index 仍从 0 起。 */
+    } else if (result.think.trim() !== '') {
       /**
-       * ⭐ 按官方契约**分块**发射（原来整段一次性发）。
+       * 非 thinking 档位但带 think 文本：一次性发完整 reasoning 块（旧行为）。
        *
        * 官方 StreamChunk 声明（从 DSH 的 app.asar 提取）：
        *   | { type: 'reasoning-delta'; index: number; text: string }
        *   | { type: 'text-delta'; index: number; text: string }
-       * 两者都是**增量**事件，分块比「一个巨大的 delta」更符合契约语义。
-       *
-       * ⚠️ 诚实说明：这不会让它真正流式 —— 插件是从客户端一次性拿到完整文本的。
-       * 真正的逐字上屏需要客户端边生成边上报（另一处改动）。
        */
       yield { type: 'block-start', index, blockType: 'reasoning' }
       for (const piece of chunkText(result.think)) {

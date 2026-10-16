@@ -1716,6 +1716,17 @@ export function LdwHost(): unknown {
    */
 
   const hookSeenRef = useRef<boolean>(false)
+  /**
+   * ⭐ 渐进显示思考：已上报给 host 的 think 字符长度。
+   *
+   * hook 的 `stream` 事件里 `detail.think` 是**累积全量**（不是增量），
+   * 所以增量 = `full.slice(reportedThinkLenRef.current)`。
+   * 每次领到新任务（`pendingJobRef` 变化）时归零，避免把上一轮的思考
+   * 当成这一轮的增量。
+   */
+  const reportedThinkLenRef = useRef<number>(0)
+  /** 上一次上报增量时对应的任务 id（用于检测任务切换并重置游标）。 */
+  const reportedThinkJobRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     if (!ready) return
     const timer = window.setInterval(() => {
@@ -1740,6 +1751,39 @@ export function LdwHost(): unknown {
             if (ev.name === 'done' || ev.name === 'stream') {
               /** ⭐ 收到 hook 事件 ⇒ 权威路径可用，DOM 兜底要让路。 */
               hookSeenRef.current = true
+            }
+            if (ev.name === 'stream') {
+              /**
+               * ⭐⭐⭐ 渐进显示思考过程：把 think 增量**实时**上报 host。
+               *
+               * hook 的 `emitStream` 每 ~100ms 节流抛一次 `{text, think, finished}`，
+               * 其中 `think` 是**累积全量**（不是增量）。所以增量 =
+               * `full.slice(reportedThinkLenRef.current)`。
+               *
+               * client 实时 `PUT /job/<id>/think` ⇒ host 边等边 yield
+               * `reasoning-delta` ⇒ DSH 边生成边渲染思考区；最终的 `done.think`
+               * 全量仍由下方 `done` 分支兜底上交（断流/超时不丢字）。
+               *
+               * 任务切换（`pendingJobRef` 变了）时归零游标，否则会把上一轮的
+               * 思考当成这一轮的增量。
+               */
+              const jobId = pendingJobRef.current
+              if (jobId !== undefined) {
+                if (reportedThinkJobRef.current !== jobId) {
+                  reportedThinkLenRef.current = 0
+                  reportedThinkJobRef.current = jobId
+                }
+                const full = String(ev.detail?.think ?? '')
+                if (full.length > reportedThinkLenRef.current) {
+                  const delta = full.slice(reportedThinkLenRef.current)
+                  reportedThinkLenRef.current = full.length
+                  void fetchJson(`/dsh-webin/api/job/${jobId}/think`, {
+                    method: 'PUT',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ delta }),
+                  })
+                }
+              }
             }
             if (ev.name === 'done') {
               /**
