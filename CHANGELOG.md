@@ -1,3 +1,42 @@
+## v0.2.25
+
+### 合并社区 PR #3（by [@zgbkdzj](https://github.com/zgbkdzj)）
+
+**渐进显示模型思考过程** —— thinking 档位下把思考**边生成边**渲染到 DSH，
+而不是等整轮结束一次性冒出。
+
+> 这正是 v0.2.15 里我标注为「缺失」的那一步。当时的原话：
+> 「诚实说明：这**不会**让它真正流式 —— 插件是从客户端一次性拿到完整文本的。
+> 真正的逐字上屏需要客户端边生成边上报（**另一处改动**）。」
+> **这个 PR 就是那处改动。**
+
+#### 实现
+
+| 层 | 改动 |
+|---|---|
+| `host/adapter.ts` | `JobQueue` 新增 `appendThink` / `subscribeThink`；`streamOnce` 在 thinking 档位首次增量到达时开 reasoning 块，边等边实时 yield `reasoning-delta` |
+| `host/index.ts` | 新增 `PUT /job/<id>/think` 路由，接收客户端实时上报的思考增量 |
+| `client/index.ts` | drain effect 监听 hook 的 `dsh-webin:stream` 事件，计算 think 增量并实时上报（**任务切换时重置增量游标**）|
+
+#### 一个关键设计
+
+**最终用全量 `done.think` 兜底补齐再关块** —— 断流或超时**绝不丢字**。
+这很重要：流式渲染最怕的就是「流断了，已经渲染出去的内容不完整，而最终文本又没补上」。
+作者把这条兜底写进了设计，并在测试里专门覆盖。
+
+#### 测试
+
+新增 `scripts/verify-streaming-thinking.mjs`（21 条断言）：实时性 / 断流兜底 /
+非 thinking 退化 / client 契约。
+
+### 验证
+
+build + preflight（22 通过 / 0 失败 / 2 跳过）+ **40 个 verify 全绿**。
+
+### 合并说明
+
+`lib/index.js`（构建产物）有冲突 —— 属于**无意义冲突**（两边都是编译结果，
+只是构建时的提交号不同）。解决方式：产物取 PR 版，**随后重新构建以源码为准**。
 ## v0.2.24
 
 ### 合并社区 PR #1（by [@pawamamama](https://github.com/pawamamama)）
